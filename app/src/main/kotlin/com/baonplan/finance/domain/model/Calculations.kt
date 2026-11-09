@@ -115,7 +115,11 @@ data class WeeklyBudgetSummary(
   val plannedSchoolDaysPerWeek: Int = 0,
   val emergencyFundedExpensesThisWeekCents: Long = 0L,
   val emergencyWithdrawalsToCashThisWeekCents: Long = 0L,
-  val releasedPriorReservesToCashThisWeekCents: Long = 0L
+  val releasedPriorReservesToCashThisWeekCents: Long = 0L,
+  val debtReservedThisWeekCents: Long = 0L,
+  val activeDebtReserveThisWeekCents: Long = 0L,
+  val netEmergencySavingsThisWeekCents: Long = 0L,
+  val cashAddedFromReservesThisWeekCents: Long = 0L
 )
 
 data class NextPaymentItem(

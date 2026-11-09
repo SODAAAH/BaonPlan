@@ -181,7 +181,8 @@ fun TransactionsScreen(
             CalmSectionLabel(ManilaTime.formatDayHeader(dateIso))
             BaonCard(contentPadding = 0.dp) {
               itemsForDate.forEachIndexed { idx, tx ->
-                val isPositiveFlow = tx.type == TransactionType.ALLOWANCE
+                val isPositiveFlow = tx.type == TransactionType.ALLOWANCE ||
+                  (tx.type == TransactionType.ADJUSTMENT && tx.fundedFromReserveCents > 0L)
                 val amountText = when {
                   tx.isVoided -> MoneyFormatter.formatPeso(tx.amountCents)
                   isPositiveFlow -> "+${MoneyFormatter.formatPeso(tx.amountCents)}"
@@ -222,7 +223,7 @@ fun TransactionsScreen(
                         if (tx.category.isNotBlank() && tx.category != tx.type.label) {
                           append(" · ${tx.category}")
                         }
-                        if (tx.fundedFromReserveCents > 0L) {
+                        if (tx.fundedFromReserveCents > 0L && tx.type != TransactionType.ADJUSTMENT) {
                           append(" · From reserve")
                         }
                       },

@@ -56,6 +56,9 @@ import com.baonplan.finance.ui.components.ExpandableSection
 import com.baonplan.finance.ui.components.MetricRow
 import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -92,14 +95,43 @@ fun AllowanceBudgetScreen(
     state.preferences.expensePresets.firstOrNull { it.category != ExpenseCategory.SCHOOL_FOOD }
   }
 
-  var customAllowancePesos by remember(settings.conservativeAllowanceCents) {
-    mutableFloatStateOf((settings.conservativeAllowanceCents / 100L).toFloat())
+  val initialAllowPesos = (settings.conservativeAllowanceCents / 100L).toFloat()
+  val allowMin = remember(initialAllowPesos) {
+    minOf(200f, floor(initialAllowPesos / 50f) * 50f).coerceAtLeast(0f)
   }
-  var customDebtReservePesos by remember(settings.weeklyDebtReserveTargetCents) {
-    mutableFloatStateOf((settings.weeklyDebtReserveTargetCents / 100L).toFloat())
+  val allowMax = remember(initialAllowPesos) {
+    maxOf(1000f, ceil(initialAllowPesos / 50f) * 50f + 200f)
   }
-  var customEmergencyPesos by remember(settings.weeklyEmergencySavingsTargetCents) {
-    mutableFloatStateOf((settings.weeklyEmergencySavingsTargetCents / 100L).toFloat())
+  val allowSteps = remember(allowMin, allowMax) {
+    val stepCount = ((allowMax - allowMin) / 50f).roundToInt()
+    if (stepCount in 2..40) stepCount - 1 else 19
+  }
+  var customAllowancePesos by remember(settings.conservativeAllowanceCents, allowMin, allowMax) {
+    mutableFloatStateOf(initialAllowPesos.coerceIn(allowMin, allowMax))
+  }
+
+  val initialDebtPesos = (settings.weeklyDebtReserveTargetCents / 100L).toFloat()
+  val debtMax = remember(initialDebtPesos) {
+    maxOf(500f, ceil(initialDebtPesos / 25f) * 25f + 100f)
+  }
+  val debtSteps = remember(debtMax) {
+    val stepCount = (debtMax / 25f).roundToInt()
+    if (stepCount in 2..40) stepCount - 1 else 19
+  }
+  var customDebtReservePesos by remember(settings.weeklyDebtReserveTargetCents, debtMax) {
+    mutableFloatStateOf(initialDebtPesos.coerceIn(0f, debtMax))
+  }
+
+  val initialEmergPesos = (settings.weeklyEmergencySavingsTargetCents / 100L).toFloat()
+  val emergMax = remember(initialEmergPesos) {
+    maxOf(300f, ceil(initialEmergPesos / 25f) * 25f + 50f)
+  }
+  val emergSteps = remember(emergMax) {
+    val stepCount = (emergMax / 25f).roundToInt()
+    if (stepCount in 2..40) stepCount - 1 else 19
+  }
+  var customEmergencyPesos by remember(settings.weeklyEmergencySavingsTargetCents, emergMax) {
+    mutableFloatStateOf(initialEmergPesos.coerceIn(0f, emergMax))
   }
 
   val customScenario = FinancialCalculator.calculateScenarioPlan(
@@ -276,11 +308,13 @@ fun AllowanceBudgetScreen(
           ) {
             Text("+ ${MoneyFormatter.formatPesoCompact(settings.minWeeklyAllowanceCents)}")
           }
-          OutlinedButton(
-            onClick = { onRecordAllowanceQuick(settings.maxWeeklyAllowanceCents) },
-            shape = RoundedCornerShape(10.dp)
-          ) {
-            Text("+ ${MoneyFormatter.formatPesoCompact(settings.maxWeeklyAllowanceCents)}")
+          if (settings.maxWeeklyAllowanceCents != settings.minWeeklyAllowanceCents) {
+            OutlinedButton(
+              onClick = { onRecordAllowanceQuick(settings.maxWeeklyAllowanceCents) },
+              shape = RoundedCornerShape(10.dp)
+            ) {
+              Text("+ ${MoneyFormatter.formatPesoCompact(settings.maxWeeklyAllowanceCents)}")
+            }
           }
         }
       }
@@ -353,6 +387,9 @@ fun AllowanceBudgetScreen(
           CalmDivider(modifier = Modifier.padding(vertical = 8.dp))
           MetricRow(
             label = "Other expenses this week",
+            subtitle = if (weekly.emergencyFundedExpensesThisWeekCents > 0L) {
+              "${MoneyFormatter.formatPesoCompact(weekly.emergencyFundedExpensesThisWeekCents)} paid from emergency savings"
+            } else null,
             value = MoneyFormatter.formatPeso(weekly.actualOtherExpensesCents),
             boldValue = false
           )
@@ -485,8 +522,8 @@ fun AllowanceBudgetScreen(
             Slider(
               value = customAllowancePesos,
               onValueChange = { customAllowancePesos = it },
-              valueRange = 200f..1000f,
-              steps = 15
+              valueRange = allowMin..allowMax,
+              steps = allowSteps
             )
             Text(
               text = "Debt reserve: ₱${customDebtReservePesos.roundToLong()} (Safe max ${MoneyFormatter.formatPeso(customScenario.recommendedSafeDebtReserveCents)})",
@@ -495,8 +532,8 @@ fun AllowanceBudgetScreen(
             Slider(
               value = customDebtReservePesos,
               onValueChange = { customDebtReservePesos = it },
-              valueRange = 0f..500f,
-              steps = 19
+              valueRange = 0f..debtMax,
+              steps = debtSteps
             )
             Text(
               text = "Emergency savings: ₱${customEmergencyPesos.roundToLong()}",
@@ -505,8 +542,8 @@ fun AllowanceBudgetScreen(
             Slider(
               value = customEmergencyPesos,
               onValueChange = { customEmergencyPesos = it },
-              valueRange = 0f..300f,
-              steps = 11
+              valueRange = 0f..emergMax,
+              steps = emergSteps
             )
             MetricRow(
               label = "Remaining after food",

@@ -71,7 +71,7 @@ class BaonPlanUiInstrumentedTest {
     // Home screen core elements & clean start
     composeTestRule.onAllNodesWithText("₱0.00").onFirst().assertIsDisplayed()
     composeTestRule.onNodeWithText("Add expense").assertIsDisplayed()
-    composeTestRule.onNodeWithText("Record payment").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Record baon").assertIsDisplayed()
 
     // Navigate to Budget tab
     composeTestRule.onNodeWithText("Budget").performClick()

@@ -562,8 +562,9 @@ fun BaonPlanRoot(
                 settings = state.settings,
                 emergencyGoalCents = state.preferences.emergencySavingsGoalCents,
                 expensePresets = state.preferences.expensePresets,
-                onSaveSettings = { updated -> viewModel.updateSettings(context, updated) },
-                onSaveEmergencyGoal = { goal -> viewModel.setEmergencySavingsGoalCents(goal) },
+                onSaveDefaultsAndGoal = { updated, goal ->
+                  viewModel.saveBudgetDefaults(context, updated, goal)
+                },
                 onSaveExpensePresets = { presets -> viewModel.setExpensePresets(presets) }
               )
             }
@@ -574,7 +575,8 @@ fun BaonPlanRoot(
                 hasAnyRecords = state.debts.isNotEmpty() ||
                   state.transactions.isNotEmpty() ||
                   state.allowances.isNotEmpty() ||
-                  state.expenses.isNotEmpty(),
+                  state.expenses.isNotEmpty() ||
+                  state.reserves.isNotEmpty(),
                 onExportBackupJson = {
                   onSuppressNextRelock()
                   exportJsonLauncher.launch("baonplan-backup-${ManilaTime.formatIso(state.today)}.json")

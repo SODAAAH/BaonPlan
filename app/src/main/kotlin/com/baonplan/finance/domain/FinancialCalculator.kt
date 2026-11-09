@@ -205,14 +205,18 @@ object FinancialCalculator {
       .filter { it.reserveType == ReserveType.DEBT_REPAYMENT_RESERVE }
       .sumOf { it.appliedAmountCents }
 
+    val reservesById = reserves.associateBy { it.id }
+
     // Cash set aside THIS week into reserves or emergency savings (excluding released reserves)
-    val debtReservedThisWeek = reserves
-      .filter {
-        it.weekStartDate == weekStartIso &&
-          it.reserveType == ReserveType.DEBT_REPAYMENT_RESERVE &&
-          it.status != ReserveStatus.RELEASED
-      }
-      .sumOf { it.amountCents }
+    val thisWeekDebtReserves = reserves.filter {
+      it.weekStartDate == weekStartIso &&
+        it.reserveType == ReserveType.DEBT_REPAYMENT_RESERVE &&
+        it.status != ReserveStatus.RELEASED
+    }
+    val debtReservedThisWeek = thisWeekDebtReserves.sumOf { it.amountCents }
+    val activeDebtReserveThisWeek = thisWeekDebtReserves
+      .filter { it.status == ReserveStatus.RESERVED }
+      .sumOf { it.remainingReservedCents }
 
     val emergencySavingsThisWeek = reserves
       .filter {
@@ -243,9 +247,39 @@ object FinancialCalculator {
       .filter { it.type == TransactionType.ADJUSTMENT && it.category == "Emergency Withdrawal" }
       .sumOf { it.amountCents.coerceAtLeast(0L) }
 
-    val releasedPriorReservesToCashThisWeek = weekTransactions
-      .filter { it.type == TransactionType.ADJUSTMENT && it.category == "Reserve Release" }
+    val releaseReserveTxs = weekTransactions.filter {
+      it.type == TransactionType.ADJUSTMENT && it.category == "Reserve Release"
+    }
+    val releasedPriorReservesToCashThisWeek = releaseReserveTxs
       .sumOf { it.amountCents.coerceAtLeast(0L) }
+
+    val sameWeekDebtReleased = releaseReserveTxs
+      .filter { tx ->
+        val res = tx.reserveId?.let { reservesById[it] }
+        res != null &&
+          res.weekStartDate == weekStartIso &&
+          res.reserveType == ReserveType.DEBT_REPAYMENT_RESERVE
+      }
+      .sumOf { it.amountCents.coerceAtLeast(0L) }
+
+    val sameWeekEmergencyReleased = releaseReserveTxs
+      .filter { tx ->
+        val res = tx.reserveId?.let { reservesById[it] }
+        res != null &&
+          res.weekStartDate == weekStartIso &&
+          res.reserveType == ReserveType.EMERGENCY_SAVINGS
+      }
+      .sumOf { it.amountCents.coerceAtLeast(0L) }
+
+    val priorReservesReleased =
+      (releasedPriorReservesToCashThisWeek - sameWeekDebtReleased - sameWeekEmergencyReleased)
+        .coerceAtLeast(0L)
+    val netDebtReservedThisWeek = (debtReservedThisWeek - sameWeekDebtReleased).coerceAtLeast(0L)
+    val rawNetEmergency =
+      emergencySavingsThisWeek - sameWeekEmergencyReleased - emergencyWithdrawalsToCashThisWeek
+    val netEmergencySavingsThisWeek = rawNetEmergency.coerceAtLeast(0L)
+    val excessEmergencyCashReturned = (-rawNetEmergency).coerceAtLeast(0L)
+    val cashAddedFromReservesThisWeek = priorReservesReleased + excessEmergencyCashReturned
 
     val plannedFoodBudget = settings.weeklyFoodBudgetCents
     val remainingFoodBudget = plannedFoodBudget - actualFoodExpenses
@@ -280,7 +314,11 @@ object FinancialCalculator {
       plannedSchoolDaysPerWeek = settings.schoolDaysPerWeek,
       emergencyFundedExpensesThisWeekCents = emergencyFundedExpensesThisWeek,
       emergencyWithdrawalsToCashThisWeekCents = emergencyWithdrawalsToCashThisWeek,
-      releasedPriorReservesToCashThisWeekCents = releasedPriorReservesToCashThisWeek
+      releasedPriorReservesToCashThisWeekCents = releasedPriorReservesToCashThisWeek,
+      debtReservedThisWeekCents = netDebtReservedThisWeek,
+      activeDebtReserveThisWeekCents = activeDebtReserveThisWeek,
+      netEmergencySavingsThisWeekCents = netEmergencySavingsThisWeek,
+      cashAddedFromReservesThisWeekCents = cashAddedFromReservesThisWeek
     )
   }
 

@@ -40,10 +40,12 @@ import com.baonplan.finance.notifications.NotificationHelper
 import com.baonplan.finance.notifications.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -132,6 +134,13 @@ class BaonPlanViewModel(
 
   private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
   val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+  private val _isSessionUnlocked = MutableStateFlow(false)
+  val isSessionUnlocked: StateFlow<Boolean> = _isSessionUnlocked.asStateFlow()
+
+  fun setSessionUnlocked(unlocked: Boolean) {
+    _isSessionUnlocked.value = unlocked
+  }
 
   private val ledgerFlow = combine(
     repository.debtsFlow,
@@ -474,16 +483,21 @@ class BaonPlanViewModel(
     reason: String
   ) {
     viewModelScope.launch {
-      repository.correctOrVoidTransaction(
-        transactionId = txId,
-        newAmountCents = newAmountCents,
-        newTitle = newTitle,
-        newDateIso = newDateIso,
-        newNotes = newNotes,
-        voidTransaction = voidTransaction,
-        reason = reason
-      )
-      emitMessage(if (voidTransaction) "Transaction voided and balances reverted" else "Transaction updated")
+      runCatching {
+        repository.correctOrVoidTransaction(
+          transactionId = txId,
+          newAmountCents = newAmountCents,
+          newTitle = newTitle,
+          newDateIso = newDateIso,
+          newNotes = newNotes,
+          voidTransaction = voidTransaction,
+          reason = reason
+        )
+      }.onSuccess {
+        emitMessage(if (voidTransaction) "Transaction voided and balances reverted" else "Transaction updated")
+      }.onFailure {
+        emitMessage(it.message ?: "Could not update transaction")
+      }
     }
   }
 
@@ -497,6 +511,20 @@ class BaonPlanViewModel(
         reminderMinute = settings.reminderMinute
       )
       emitMessage("Settings saved")
+    }
+  }
+
+  fun saveBudgetDefaults(context: Context, settings: UserSettingsEntity, emergencyGoalCents: Long) {
+    viewModelScope.launch {
+      repository.updateSettings(settings)
+      repository.setEmergencySavingsGoalCents(emergencyGoalCents)
+      ReminderScheduler.schedulePeriodicReminders(
+        context = context.applicationContext,
+        enabled = settings.remindersEnabled,
+        reminderHour = settings.reminderHour,
+        reminderMinute = settings.reminderMinute
+      )
+      emitMessage("Budget defaults saved")
     }
   }
 

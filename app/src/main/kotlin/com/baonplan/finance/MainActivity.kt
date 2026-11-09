@@ -43,9 +43,9 @@ import com.baonplan.finance.widget.BaonWidgetProvider
 class MainActivity : ComponentActivity() {
 
   private var pendingQuickAction by mutableStateOf<String?>(null)
-  private var isUnlocked by mutableStateOf(false)
   private var suppressNextRelock = false
   private var currentAppLockEnabled = false
+  private var activeViewModel: BaonPlanViewModel? = null
   private var lockMessage by mutableStateOf<String?>(null)
   private var pendingCredentialOnSuccess: (() -> Unit)? = null
 
@@ -72,7 +72,9 @@ class MainActivity : ComponentActivity() {
 
     setContent {
       val vm: BaonPlanViewModel = viewModel(factory = factory)
+      activeViewModel = vm
       val uiState by vm.uiState.collectAsStateWithLifecycle()
+      val isUnlocked by vm.isSessionUnlocked.collectAsStateWithLifecycle()
       currentAppLockEnabled = uiState.preferences.appLockEnabled
 
       val locked = !uiState.isLoading && uiState.preferences.appLockEnabled && !isUnlocked
@@ -81,7 +83,7 @@ class MainActivity : ComponentActivity() {
         if (locked) {
           if (!AppLockHelper.canUseDeviceLock(this@MainActivity)) {
             lockMessage = null
-            isUnlocked = true
+            vm.setSessionUnlocked(true)
             vm.setAppLockEnabled(false)
             vm.emitMessage("No device PIN/biometric set — App lock disabled")
           } else {
@@ -90,7 +92,7 @@ class MainActivity : ComponentActivity() {
               subtitle = "Verify with fingerprint, face, or device PIN",
               onSuccess = {
                 lockMessage = null
-                isUnlocked = true
+                vm.setSessionUnlocked(true)
               },
               onError = { msg -> lockMessage = msg }
             )
@@ -155,7 +157,7 @@ class MainActivity : ComponentActivity() {
                       subtitle = "Verify with fingerprint, face, or device PIN",
                       onSuccess = {
                         lockMessage = null
-                        isUnlocked = true
+                        vm.setSessionUnlocked(true)
                       },
                       onError = { msg -> lockMessage = msg }
                     )
@@ -174,7 +176,7 @@ class MainActivity : ComponentActivity() {
                 onSuppressNextRelock = { suppressNextRelock = true },
                 onToggleAppLock = { enable ->
                   if (!enable) {
-                    isUnlocked = true
+                    vm.setSessionUnlocked(true)
                     lockMessage = null
                     vm.setAppLockEnabled(false)
                   } else {
@@ -182,7 +184,7 @@ class MainActivity : ComponentActivity() {
                       title = "Enable App Lock",
                       subtitle = "Verify with fingerprint or device PIN",
                       onSuccess = {
-                        isUnlocked = true
+                        vm.setSessionUnlocked(true)
                         lockMessage = null
                         vm.setAppLockEnabled(true)
                       },
@@ -218,7 +220,7 @@ class MainActivity : ComponentActivity() {
   override fun onStop() {
     super.onStop()
     if (!isChangingConfigurations && !suppressNextRelock && currentAppLockEnabled) {
-      isUnlocked = false
+      activeViewModel?.setSessionUnlocked(false)
     }
   }
 

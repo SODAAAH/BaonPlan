@@ -70,8 +70,10 @@ fun DebtsScreen(
   val oneTimeActiveCount = activeDebts.count { it.frequency == RepaymentFrequency.ONE_TIME }
 
   val summarySubtitle = when {
-    activeCount == 0 && paidCount == 0 -> "No debts added yet"
-    activeCount == 0 -> "$paidCount paid off"
+    activeCount == 0 && paidCount == 0 && archivedCount == 0 -> "No debts added yet"
+    activeCount == 0 && paidCount > 0 && archivedCount > 0 -> "$paidCount paid off · $archivedCount archived"
+    activeCount == 0 && paidCount > 0 -> "$paidCount paid off"
+    activeCount == 0 -> "$archivedCount archived"
     oneTimeActiveCount > 0 && installmentActiveCount > 0 ->
       "$installmentActiveCount installment · $oneTimeActiveCount one-time"
     oneTimeActiveCount > 0 -> "$oneTimeActiveCount one-time / BNPL"

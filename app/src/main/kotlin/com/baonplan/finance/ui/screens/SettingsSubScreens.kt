@@ -330,8 +330,7 @@ fun BudgetDefaultsScreen(
   settings: UserSettingsEntity,
   emergencyGoalCents: Long,
   expensePresets: List<ExpensePreset>,
-  onSaveSettings: (UserSettingsEntity) -> Unit,
-  onSaveEmergencyGoal: (Long) -> Unit,
+  onSaveDefaultsAndGoal: (UserSettingsEntity, Long) -> Unit,
   onSaveExpensePresets: (List<ExpensePreset>) -> Unit,
   modifier: Modifier = Modifier
 ) {
@@ -362,6 +361,7 @@ fun BudgetDefaultsScreen(
   var overallEmergencyGoalText by remember(emergencyGoalCents) {
     mutableStateOf(MoneyFormatter.formatEditableAmount(emergencyGoalCents))
   }
+  var defaultsErrorText by remember { mutableStateOf<String?>(null) }
 
   val basePresets = remember(expensePresets) {
     expensePresets.ifEmpty { defaultExpensePresets() }
@@ -371,9 +371,10 @@ fun BudgetDefaultsScreen(
       basePresets.map { it.label to MoneyFormatter.formatEditableAmount(it.amountCents) }
     )
   }
+  var presetsErrorText by remember { mutableStateOf<String?>(null) }
 
   val computedFoodBudget = FinancialCalculator.calculateWeeklyFoodBudget(
-    schoolDaysPerWeek = schoolDaysText.toIntOrNull() ?: settings.schoolDaysPerWeek,
+    schoolDaysPerWeek = (schoolDaysText.toIntOrNull() ?: settings.schoolDaysPerWeek).coerceIn(0, 7),
     foodPerSchoolDayCents = MoneyFormatter.parsePesoToCents(foodPerDayText) ?: settings.foodPerSchoolDayCents
   )
 
@@ -388,7 +389,7 @@ fun BudgetDefaultsScreen(
           Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(
               value = minAllowanceText,
-              onValueChange = { minAllowanceText = it },
+              onValueChange = { minAllowanceText = it; defaultsErrorText = null },
               label = { Text("Min weekly") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -398,7 +399,7 @@ fun BudgetDefaultsScreen(
             )
             OutlinedTextField(
               value = maxAllowanceText,
-              onValueChange = { maxAllowanceText = it },
+              onValueChange = { maxAllowanceText = it; defaultsErrorText = null },
               label = { Text("Max weekly") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -409,7 +410,7 @@ fun BudgetDefaultsScreen(
           }
           OutlinedTextField(
             value = conservativeText,
-            onValueChange = { conservativeText = it },
+            onValueChange = { conservativeText = it; defaultsErrorText = null },
             label = { Text("Conservative planning allowance") },
             prefix = { Text("₱") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -420,7 +421,10 @@ fun BudgetDefaultsScreen(
           Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(
               value = schoolDaysText,
-              onValueChange = { schoolDaysText = it.filter { ch -> ch.isDigit() } },
+              onValueChange = {
+                schoolDaysText = it.filter { ch -> ch.isDigit() }
+                defaultsErrorText = null
+              },
               label = { Text("School days / wk") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
               singleLine = true,
@@ -429,7 +433,7 @@ fun BudgetDefaultsScreen(
             )
             OutlinedTextField(
               value = foodPerDayText,
-              onValueChange = { foodPerDayText = it },
+              onValueChange = { foodPerDayText = it; defaultsErrorText = null },
               label = { Text("Food / day") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -446,7 +450,7 @@ fun BudgetDefaultsScreen(
           Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(
               value = otherBufferText,
-              onValueChange = { otherBufferText = it },
+              onValueChange = { otherBufferText = it; defaultsErrorText = null },
               label = { Text("Other needs") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -456,7 +460,7 @@ fun BudgetDefaultsScreen(
             )
             OutlinedTextField(
               value = emergencyTargetText,
-              onValueChange = { emergencyTargetText = it },
+              onValueChange = { emergencyTargetText = it; defaultsErrorText = null },
               label = { Text("Weekly emergency") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -468,7 +472,7 @@ fun BudgetDefaultsScreen(
           Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(
               value = debtReserveTargetText,
-              onValueChange = { debtReserveTargetText = it },
+              onValueChange = { debtReserveTargetText = it; defaultsErrorText = null },
               label = { Text("Weekly debt reserve") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -478,7 +482,7 @@ fun BudgetDefaultsScreen(
             )
             OutlinedTextField(
               value = overallEmergencyGoalText,
-              onValueChange = { overallEmergencyGoalText = it },
+              onValueChange = { overallEmergencyGoalText = it; defaultsErrorText = null },
               label = { Text("Emergency goal") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -487,33 +491,49 @@ fun BudgetDefaultsScreen(
               modifier = Modifier.weight(1f)
             )
           }
+          if (defaultsErrorText != null) {
+            Text(
+              text = defaultsErrorText!!,
+              color = MaterialTheme.colorScheme.error,
+              style = MaterialTheme.typography.bodySmall
+            )
+          }
           Spacer(modifier = Modifier.height(4.dp))
           Button(
             onClick = {
-              val days = (schoolDaysText.toIntOrNull() ?: settings.schoolDaysPerWeek).coerceIn(0, 7)
-              val perDay = MoneyFormatter.parsePesoToCents(foodPerDayText) ?: settings.foodPerSchoolDayCents
-              val minC = MoneyFormatter.parsePesoToCents(minAllowanceText) ?: settings.minWeeklyAllowanceCents
-              val maxC = MoneyFormatter.parsePesoToCents(maxAllowanceText) ?: settings.maxWeeklyAllowanceCents
-              val consC = MoneyFormatter.parsePesoToCents(conservativeText) ?: settings.conservativeAllowanceCents
-              val otherC = MoneyFormatter.parsePesoToCents(otherBufferText) ?: settings.weeklyOtherExpensesBudgetCents
-              val emergC = MoneyFormatter.parsePesoToCents(emergencyTargetText) ?: settings.weeklyEmergencySavingsTargetCents
-              val debtResC = MoneyFormatter.parsePesoToCents(debtReserveTargetText) ?: settings.weeklyDebtReserveTargetCents
+              val days = schoolDaysText.toIntOrNull()
+              val perDay = MoneyFormatter.parsePesoToCents(foodPerDayText)
+              val minC = MoneyFormatter.parsePesoToCents(minAllowanceText)
+              val maxC = MoneyFormatter.parsePesoToCents(maxAllowanceText)
+              val consC = MoneyFormatter.parsePesoToCents(conservativeText)
+              val otherC = MoneyFormatter.parsePesoToCents(otherBufferText)
+              val emergC = MoneyFormatter.parsePesoToCents(emergencyTargetText)
+              val debtResC = MoneyFormatter.parsePesoToCents(debtReserveTargetText)
               val overallGoalC = MoneyFormatter.parsePesoToCents(overallEmergencyGoalText)
-              onSaveSettings(
-                settings.copy(
-                  minWeeklyAllowanceCents = minC,
-                  maxWeeklyAllowanceCents = maxOf(minC, maxC),
-                  conservativeAllowanceCents = consC,
-                  schoolDaysPerWeek = days,
-                  foodPerSchoolDayCents = perDay,
-                  weeklyFoodBudgetCents = FinancialCalculator.calculateWeeklyFoodBudget(days, perDay),
-                  weeklyOtherExpensesBudgetCents = otherC,
-                  weeklyEmergencySavingsTargetCents = emergC,
-                  weeklyDebtReserveTargetCents = debtResC
-                )
-              )
-              if (overallGoalC != null && overallGoalC >= 0L) {
-                onSaveEmergencyGoal(overallGoalC)
+              when {
+                days == null || days !in 0..7 ->
+                  defaultsErrorText = "School days per week must be between 0 and 7"
+                listOf(perDay, minC, maxC, consC, otherC, emergC, debtResC, overallGoalC).any { it == null || it < 0L } ->
+                  defaultsErrorText = "Enter valid peso amounts (0 or greater)"
+                maxC!! < minC!! ->
+                  defaultsErrorText = "Max weekly allowance must be at least min weekly allowance"
+                else -> {
+                  defaultsErrorText = null
+                  onSaveDefaultsAndGoal(
+                    settings.copy(
+                      minWeeklyAllowanceCents = minC,
+                      maxWeeklyAllowanceCents = maxC,
+                      conservativeAllowanceCents = consC!!,
+                      schoolDaysPerWeek = days,
+                      foodPerSchoolDayCents = perDay!!,
+                      weeklyFoodBudgetCents = FinancialCalculator.calculateWeeklyFoodBudget(days, perDay),
+                      weeklyOtherExpensesBudgetCents = otherC!!,
+                      weeklyEmergencySavingsTargetCents = emergC!!,
+                      weeklyDebtReserveTargetCents = debtResC!!
+                    ),
+                    overallGoalC!!
+                  )
+                }
               }
             },
             shape = RoundedCornerShape(12.dp),
@@ -545,6 +565,7 @@ fun BudgetDefaultsScreen(
                 OutlinedTextField(
                   value = draft.first,
                   onValueChange = { newLabel ->
+                    presetsErrorText = null
                     presetDrafts = presetDrafts.toMutableList().also { list ->
                       if (idx in list.indices) list[idx] = newLabel to draft.second
                     }
@@ -557,6 +578,7 @@ fun BudgetDefaultsScreen(
                 OutlinedTextField(
                   value = draft.second,
                   onValueChange = { newAmt ->
+                    presetsErrorText = null
                     presetDrafts = presetDrafts.toMutableList().also { list ->
                       if (idx in list.indices) list[idx] = draft.first to newAmt
                     }
@@ -571,10 +593,18 @@ fun BudgetDefaultsScreen(
               }
             }
           }
+          if (presetsErrorText != null) {
+            Text(
+              text = presetsErrorText!!,
+              color = MaterialTheme.colorScheme.error,
+              style = MaterialTheme.typography.bodySmall
+            )
+          }
           Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(
               onClick = {
                 val defaults = defaultExpensePresets()
+                presetsErrorText = null
                 presetDrafts = defaults.map { it.label to MoneyFormatter.formatEditableAmount(it.amountCents) }
                 onSaveExpensePresets(defaults)
               },
@@ -585,13 +615,18 @@ fun BudgetDefaultsScreen(
             }
             Button(
               onClick = {
-                val updated = basePresets.mapIndexed { idx, preset ->
+                val updated = mutableListOf<ExpensePreset>()
+                for ((idx, preset) in basePresets.withIndex()) {
                   val draft = presetDrafts.getOrNull(idx)
-                  val label = draft?.first?.trim()?.takeIf { it.isNotEmpty() } ?: preset.label
+                  val label = draft?.first?.trim().orEmpty()
                   val amt = draft?.second?.let { MoneyFormatter.parsePesoToCents(it) }
-                    ?.takeIf { it > 0L } ?: preset.amountCents
-                  preset.copy(label = label, amountCents = amt)
+                  if (label.isEmpty() || amt == null || amt <= 0L) {
+                    presetsErrorText = "Each preset needs a label and a positive peso amount"
+                    return@Button
+                  }
+                  updated += preset.copy(label = label, amountCents = amt)
                 }
+                presetsErrorText = null
                 onSaveExpensePresets(updated)
               },
               shape = RoundedCornerShape(12.dp),

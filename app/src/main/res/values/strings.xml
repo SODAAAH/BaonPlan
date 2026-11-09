@@ -9,4 +9,8 @@
     <string name="shortcut_add_expense_long">Record a school or daily expense</string>
     <string name="shortcut_record_payment_short">Record payment</string>
     <string name="shortcut_record_payment_long">Record a debt or installment payment</string>
+    <string name="widget_header_money_left">Money left this week</string>
+    <string name="widget_default_zero_amount">₱0.00</string>
+    <string name="widget_default_no_upcoming">No upcoming payments</string>
+    <string name="widget_action_add_expense">+ Expense</string>
 </resources>

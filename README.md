@@ -2,13 +2,14 @@
 
 A **100% offline native Android personal finance application** built with **Kotlin, Jetpack Compose, Material 3, Room, DataStore, and WorkManager** for Filipino college students managing weekly *baon* allowance, school food budgets, installment loans, SPayLater balances, payment reminders, and emergency savings.
 
-- **Version**: `1.1.0` (`versionCode 2`)
+- **Version**: `1.1.1` (`versionCode 3`)
 - **Application ID**: `com.baonplan.finance`
 - **Minimum Android Version**: Android 8.0 (API 26)
 - **Target / Compile SDK**: Android 16 (API 36)
 - **Appearance**: System default, Light mode, and Dark mode
 - **Currency & Timezone**: Philippine Peso (`PHP` / `₱`) · `Asia/Manila`
-- **Download**: [Latest GitHub Release (`BaonPlan-v1.1.0-release.apk`)](https://github.com/SODAAAH/BaonPlan/releases/latest)
+- **Download**: [Latest GitHub Release (`BaonPlan-v1.1.1-release.apk`)](https://github.com/SODAAAH/BaonPlan/releases/latest)
+- **License**: [MIT License](LICENSE)
 
 ---
 
@@ -83,3 +84,12 @@ app/src/main/kotlin/com/baonplan/finance/
     ├── screens/                       # Home, Budget, Debts, DebtDetail, More, Calendar, Transactions, Reports & Settings subscreens
     └── theme/                         # Warm-white Light & Charcoal-Slate Dark Material 3 themes
 ```
+
+---
+
+## Open Source & Contributing
+
+BaonPlan is open-source software licensed under the [MIT License](LICENSE).
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) for local build commands, architecture guidelines, and pull request conventions.
+- Read [SECURITY.md](SECURITY.md) for offline privacy guarantees and reporting issues.

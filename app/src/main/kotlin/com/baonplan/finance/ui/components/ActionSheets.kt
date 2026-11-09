@@ -38,6 +38,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,7 @@ import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ExpensePreset
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveType
+import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import java.time.Instant
@@ -440,8 +442,11 @@ fun RecordRepaymentDialog(
   onAddDebt: (() -> Unit)? = null
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-  var selectedDebtId by remember {
-    mutableLongStateOf(initialDebtId ?: activeDebts.firstOrNull()?.id ?: 0L)
+  var selectedDebtId by remember(activeDebts, initialDebtId) {
+    val preferredId = initialDebtId?.takeIf { id -> activeDebts.any { it.id == id } }
+      ?: activeDebts.firstOrNull()?.id
+      ?: 0L
+    mutableLongStateOf(preferredId)
   }
   val selectedDebt = activeDebts.firstOrNull { it.id == selectedDebtId }
   val suggestedInstallment = selectedDebt?.installmentAmountCents?.takeIf { it > 0L }
@@ -626,11 +631,12 @@ fun RecordRepaymentDialog(
           onConfirm = {
             val cents = MoneyFormatter.parsePesoToCents(amountText)
             when {
+              selectedDebt == null -> errorText = "Select an active debt first"
               cents == null || cents <= 0L -> errorText = "Enter a valid peso amount"
-              selectedDebt != null && cents > selectedDebt.remainingBalanceCents ->
+              cents > selectedDebt.remainingBalanceCents ->
                 errorText = "Cannot exceed balance (${MoneyFormatter.formatPeso(selectedDebt.remainingBalanceCents)})"
               else -> {
-                onConfirm(selectedDebtId, cents, dateIso, useDebtReserve, notes.trim())
+                onConfirm(selectedDebt.id, cents, dateIso, useDebtReserve, notes.trim())
                 onDismiss()
               }
             }
@@ -673,6 +679,7 @@ fun AdjustBudgetSheet(
   var otherTargetText by remember(settings.weeklyOtherExpensesBudgetCents) {
     mutableStateOf(MoneyFormatter.formatEditableAmount(settings.weeklyOtherExpensesBudgetCents))
   }
+  var errorText by remember { mutableStateOf<String?>(null) }
 
   val daysPreview = (schoolDaysText.toIntOrNull() ?: settings.schoolDaysPerWeek).coerceIn(0, 7)
   val perDayPreview = MoneyFormatter.parsePesoToCents(foodPerDayText) ?: settings.foodPerSchoolDayCents
@@ -697,7 +704,7 @@ fun AdjustBudgetSheet(
       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
           value = minText,
-          onValueChange = { minText = it },
+          onValueChange = { minText = it; errorText = null },
           label = { Text("Min allowance") },
           prefix = { Text("₱") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -707,7 +714,7 @@ fun AdjustBudgetSheet(
         )
         OutlinedTextField(
           value = maxText,
-          onValueChange = { maxText = it },
+          onValueChange = { maxText = it; errorText = null },
           label = { Text("Max allowance") },
           prefix = { Text("₱") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -718,7 +725,7 @@ fun AdjustBudgetSheet(
       }
       OutlinedTextField(
         value = conservativeText,
-        onValueChange = { conservativeText = it },
+        onValueChange = { conservativeText = it; errorText = null },
         label = { Text("Conservative weekly plan") },
         prefix = { Text("₱") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -729,7 +736,7 @@ fun AdjustBudgetSheet(
       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
           value = schoolDaysText,
-          onValueChange = { schoolDaysText = it.filter { ch -> ch.isDigit() } },
+          onValueChange = { schoolDaysText = it.filter { ch -> ch.isDigit() }; errorText = null },
           label = { Text("School days / wk") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
           singleLine = true,
@@ -738,7 +745,7 @@ fun AdjustBudgetSheet(
         )
         OutlinedTextField(
           value = foodPerDayText,
-          onValueChange = { foodPerDayText = it },
+          onValueChange = { foodPerDayText = it; errorText = null },
           label = { Text("Food per day") },
           prefix = { Text("₱") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -755,7 +762,7 @@ fun AdjustBudgetSheet(
       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
           value = debtReserveTargetText,
-          onValueChange = { debtReserveTargetText = it },
+          onValueChange = { debtReserveTargetText = it; errorText = null },
           label = { Text("Debt reserve goal") },
           prefix = { Text("₱") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -765,7 +772,7 @@ fun AdjustBudgetSheet(
         )
         OutlinedTextField(
           value = emergencyTargetText,
-          onValueChange = { emergencyTargetText = it },
+          onValueChange = { emergencyTargetText = it; errorText = null },
           label = { Text("Emergency goal") },
           prefix = { Text("₱") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -776,7 +783,7 @@ fun AdjustBudgetSheet(
       }
       OutlinedTextField(
         value = otherTargetText,
-        onValueChange = { otherTargetText = it },
+        onValueChange = { otherTargetText = it; errorText = null },
         label = { Text("Other needs buffer") },
         prefix = { Text("₱") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -784,32 +791,49 @@ fun AdjustBudgetSheet(
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
+      if (errorText != null) {
+        Text(
+          text = errorText!!,
+          color = MaterialTheme.colorScheme.error,
+          style = MaterialTheme.typography.bodySmall
+        )
+      }
       SheetButtonRow(
         confirmText = "Save budget",
         onCancel = onDismiss,
         onConfirm = {
-          val days = (schoolDaysText.toIntOrNull() ?: settings.schoolDaysPerWeek).coerceIn(0, 7)
-          val perDay = MoneyFormatter.parsePesoToCents(foodPerDayText) ?: settings.foodPerSchoolDayCents
-          val minC = MoneyFormatter.parsePesoToCents(minText) ?: settings.minWeeklyAllowanceCents
-          val maxC = MoneyFormatter.parsePesoToCents(maxText) ?: settings.maxWeeklyAllowanceCents
-          val consC = MoneyFormatter.parsePesoToCents(conservativeText) ?: settings.conservativeAllowanceCents
-          val debtResC = MoneyFormatter.parsePesoToCents(debtReserveTargetText) ?: settings.weeklyDebtReserveTargetCents
-          val emergC = MoneyFormatter.parsePesoToCents(emergencyTargetText) ?: settings.weeklyEmergencySavingsTargetCents
-          val otherC = MoneyFormatter.parsePesoToCents(otherTargetText) ?: settings.weeklyOtherExpensesBudgetCents
-          onSave(
-            settings.copy(
-              minWeeklyAllowanceCents = minC,
-              maxWeeklyAllowanceCents = maxOf(minC, maxC),
-              conservativeAllowanceCents = consC,
-              schoolDaysPerWeek = days,
-              foodPerSchoolDayCents = perDay,
-              weeklyFoodBudgetCents = FinancialCalculator.calculateWeeklyFoodBudget(days, perDay),
-              weeklyDebtReserveTargetCents = debtResC,
-              weeklyEmergencySavingsTargetCents = emergC,
-              weeklyOtherExpensesBudgetCents = otherC
-            )
-          )
-          onDismiss()
+          val days = schoolDaysText.toIntOrNull()
+          val perDay = MoneyFormatter.parsePesoToCents(foodPerDayText)
+          val minC = MoneyFormatter.parsePesoToCents(minText)
+          val maxC = MoneyFormatter.parsePesoToCents(maxText)
+          val consC = MoneyFormatter.parsePesoToCents(conservativeText)
+          val debtResC = MoneyFormatter.parsePesoToCents(debtReserveTargetText)
+          val emergC = MoneyFormatter.parsePesoToCents(emergencyTargetText)
+          val otherC = MoneyFormatter.parsePesoToCents(otherTargetText)
+          when {
+            days == null || days !in 0..7 ->
+              errorText = "School days per week must be between 0 and 7"
+            listOf(perDay, minC, maxC, consC, debtResC, emergC, otherC).any { it == null || it < 0L } ->
+              errorText = "Enter valid peso amounts (0 or greater)"
+            maxC!! < minC!! ->
+              errorText = "Max allowance must be at least min allowance"
+            else -> {
+              onSave(
+                settings.copy(
+                  minWeeklyAllowanceCents = minC,
+                  maxWeeklyAllowanceCents = maxC,
+                  conservativeAllowanceCents = consC!!,
+                  schoolDaysPerWeek = days,
+                  foodPerSchoolDayCents = perDay!!,
+                  weeklyFoodBudgetCents = FinancialCalculator.calculateWeeklyFoodBudget(days, perDay),
+                  weeklyDebtReserveTargetCents = debtResC!!,
+                  weeklyEmergencySavingsTargetCents = emergC!!,
+                  weeklyOtherExpensesBudgetCents = otherC!!
+                )
+              )
+              onDismiss()
+            }
+          }
         }
       )
     }
@@ -976,6 +1000,13 @@ fun DebtEditorDialog(
   var dateStatus by remember { mutableStateOf(existing?.dateStatus ?: DueDateStatus.UNCONFIRMED) }
   var notes by remember { mutableStateOf(existing?.notes ?: "") }
   var errorText by remember { mutableStateOf<String?>(null) }
+  val scrollState = rememberScrollState()
+
+  LaunchedEffect(errorText) {
+    if (errorText != null) {
+      scrollState.animateScrollTo(scrollState.maxValue)
+    }
+  }
 
   ModalBottomSheet(
     onDismissRequest = onDismiss,
@@ -985,11 +1016,11 @@ fun DebtEditorDialog(
     Column(
       modifier = Modifier
         .fillMaxWidth()
-        .verticalScroll(rememberScrollState())
+        .verticalScroll(scrollState)
         .navigationBarsPadding()
         .imePadding()
         .padding(horizontal = 20.dp)
-        .padding(bottom = 20.dp),
+        .padding(bottom = 28.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
       Text(
@@ -1079,6 +1110,7 @@ fun DebtEditorDialog(
         dateIso = nextDueDate,
         onDateChanged = { picked ->
           nextDueDate = picked
+          errorText = null
           if (picked == null && dateStatus == DueDateStatus.CONFIRMED) {
             dateStatus = DueDateStatus.UNCONFIRMED
           }
@@ -1098,7 +1130,10 @@ fun DebtEditorDialog(
         DueDateStatus.entries.forEach { st ->
           FilterChip(
             selected = dateStatus == st,
-            onClick = { dateStatus = st },
+            onClick = {
+              dateStatus = st
+              errorText = null
+            },
             label = { Text(st.label) }
           )
         }
@@ -1215,6 +1250,12 @@ fun DebtEditorDialog(
         confirmText = "Save debt",
         onCancel = onDismiss,
         onConfirm = {
+          fun parseOptionalPeso(raw: String): Pair<Boolean, Long?> {
+            if (raw.isBlank()) return true to null
+            val parsed = MoneyFormatter.parsePesoToCents(raw)
+            return (parsed != null && parsed >= 0L) to parsed
+          }
+
           val remBalance = MoneyFormatter.parsePesoToCents(remainingBalanceText)
           if (name.isBlank()) {
             errorText = "Debt name is required"
@@ -1224,9 +1265,45 @@ fun DebtEditorDialog(
             errorText = "Enter a valid remaining balance"
             return@SheetButtonRow
           }
-          val instAmt = MoneyFormatter.parsePesoToCents(installmentAmountText) ?: 0L
-          val remCount = remainingCountText.toIntOrNull() ?: if (remBalance > 0L && instAmt > 0L) 1 else 0
-          val priorPaidParsed = MoneyFormatter.parsePesoToCents(priorPaidText)
+          val (instOk, instParsed) = parseOptionalPeso(installmentAmountText)
+          val (origOk, origPrincipal) = parseOptionalPeso(originalPrincipalText)
+          val (recvOk, amountReceived) = parseOptionalPeso(amountReceivedText)
+          val (intOk, interestCents) = parseOptionalPeso(interestText)
+          val (svcOk, serviceFeeCents) = parseOptionalPeso(serviceFeeText)
+          val (procOk, processingFeeCents) = parseOptionalPeso(processingFeeText)
+          val (schedOk, totalScheduled) = parseOptionalPeso(totalScheduledText)
+          val (priorOk, priorPaidParsed) = parseOptionalPeso(priorPaidText)
+          if (!instOk || !origOk || !recvOk || !intOk || !svcOk || !procOk || !schedOk || !priorOk) {
+            errorText = "Check peso amounts — enter numbers only or leave optional fields blank"
+            return@SheetButtonRow
+          }
+          val customDays = if (frequency == RepaymentFrequency.CUSTOM_DAYS) {
+            customDaysText.toIntOrNull()?.takeIf { it > 0 }
+          } else null
+          if (frequency == RepaymentFrequency.CUSTOM_DAYS && customDays == null) {
+            errorText = "Enter custom interval days (at least 1)"
+            return@SheetButtonRow
+          }
+          if (remBalance > 0L && dateStatus == DueDateStatus.CONFIRMED && nextDueDate == null) {
+            errorText = "Select the confirmed next due date first"
+            return@SheetButtonRow
+          }
+          val instAmt = instParsed ?: 0L
+          val remCount = if (remainingCountText.isNotBlank()) {
+            val parsedCount = remainingCountText.toIntOrNull()
+            if (parsedCount == null || parsedCount < 0) {
+              errorText = "Enter a valid number of payments left"
+              return@SheetButtonRow
+            }
+            parsedCount
+          } else {
+            if (remBalance > 0L && instAmt > 0L) 1 else 0
+          }
+          val resolvedStatus = when {
+            existing?.status == DebtStatus.ARCHIVED -> DebtStatus.ARCHIVED
+            remBalance == 0L -> DebtStatus.PAID
+            else -> DebtStatus.ACTIVE
+          }
           val entity = (existing ?: DebtEntity(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
@@ -1236,22 +1313,22 @@ fun DebtEditorDialog(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
             category = category.ifBlank { "Loan" },
-            originalPrincipalCents = MoneyFormatter.parsePesoToCents(originalPrincipalText),
-            amountReceivedCents = MoneyFormatter.parsePesoToCents(amountReceivedText),
-            interestCents = MoneyFormatter.parsePesoToCents(interestText),
-            serviceFeeCents = MoneyFormatter.parsePesoToCents(serviceFeeText),
-            processingFeeCents = MoneyFormatter.parsePesoToCents(processingFeeText),
-            totalScheduledRepaymentCents = MoneyFormatter.parsePesoToCents(totalScheduledText),
+            originalPrincipalCents = origPrincipal,
+            amountReceivedCents = amountReceived,
+            interestCents = interestCents,
+            serviceFeeCents = serviceFeeCents,
+            processingFeeCents = processingFeeCents,
+            totalScheduledRepaymentCents = totalScheduled,
             priorPaidCents = priorPaidParsed ?: 0L,
             isPriorPaidKnown = priorPaidParsed != null,
             remainingBalanceCents = remBalance,
             installmentAmountCents = instAmt,
             remainingInstallmentsCount = remCount,
             frequency = frequency,
-            customIntervalDays = customDaysText.toIntOrNull(),
+            customIntervalDays = customDays,
             nextDueDate = nextDueDate,
             dateStatus = dateStatus,
-            status = if (remBalance == 0L) DebtStatus.PAID else DebtStatus.ACTIVE,
+            status = resolvedStatus,
             isManuallyEntered = true,
             notes = notes.trim()
           )
@@ -1382,19 +1459,29 @@ fun GenerateScheduleDialog(
         onConfirm = {
           val count = countText.toIntOrNull()
           val amt = MoneyFormatter.parsePesoToCents(amountText)
-          if (count == null || count <= 0 || amt == null || amt <= 0L) {
-            errorText = "Enter valid payment count and peso amount"
-            return@SheetButtonRow
+          val customDays = if (frequency == RepaymentFrequency.CUSTOM_DAYS) customDaysText.toIntOrNull() else null
+          when {
+            ManilaTime.parseDate(startDateIso) == null -> {
+              errorText = "Select a valid start date"
+            }
+            frequency == RepaymentFrequency.CUSTOM_DAYS && (customDays == null || customDays <= 0) -> {
+              errorText = "Enter custom interval days (at least 1)"
+            }
+            count == null || count <= 0 || amt == null || amt <= 0L -> {
+              errorText = "Enter valid payment count and peso amount"
+            }
+            else -> {
+              onGenerate(
+                startDateIso,
+                count,
+                amt,
+                frequency,
+                customDays,
+                if (confirmed) DueDateStatus.CONFIRMED else DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+              )
+              onDismiss()
+            }
           }
-          onGenerate(
-            startDateIso,
-            count,
-            amt,
-            frequency,
-            customDaysText.toIntOrNull(),
-            if (confirmed) DueDateStatus.CONFIRMED else DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
-          )
-          onDismiss()
         }
       )
     }
@@ -1520,6 +1607,7 @@ fun CorrectTransactionDialog(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
       )
+      val isAdjustment = tx.type == TransactionType.ADJUSTMENT
       OutlinedTextField(
         value = title,
         onValueChange = { title = it },
@@ -1528,15 +1616,26 @@ fun CorrectTransactionDialog(
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
+      val amountSupportingText: (@Composable () -> Unit)? = when {
+        errorText != null -> {
+          { Text(errorText!!) }
+        }
+        isAdjustment -> {
+          { Text("Amount is locked for adjustments — void & revert to undo") }
+        }
+        else -> null
+      }
       OutlinedTextField(
         value = amountText,
         onValueChange = { amountText = it; errorText = null },
         label = { Text("Amount") },
         prefix = { Text("₱") },
+        enabled = !isAdjustment,
+        readOnly = isAdjustment,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         singleLine = true,
         isError = errorText != null,
-        supportingText = errorText?.let { msg -> { Text(msg) } },
+        supportingText = amountSupportingText,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
@@ -1573,7 +1672,7 @@ fun CorrectTransactionDialog(
         confirmText = "Save changes",
         onCancel = onDismiss,
         onConfirm = {
-          val cents = MoneyFormatter.parsePesoToCents(amountText)
+          val cents = if (isAdjustment) tx.amountCents else MoneyFormatter.parsePesoToCents(amountText)
           if (cents == null || cents <= 0L) {
             errorText = "Enter a valid peso amount"
           } else {

@@ -41,12 +41,13 @@ class ReminderWorker(
       val totalOverdue = overview.overduePayments.sumOf { it.amountCents }
       val first = overview.overduePayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated date)" else ""
+      val extra = if (overview.overduePayments.size > 1) " (+${overview.overduePayments.size - 1} more)" else ""
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_OVERDUE,
         title = "Overdue Payment Alert (${overview.overduePayments.size})",
-        body = "${first.debtName}$tag · ${MoneyFormatter.formatPeso(totalOverdue)} overdue. Open Calendar to review or confirm.",
+        body = "${first.debtName}$tag$extra · ${MoneyFormatter.formatPeso(totalOverdue)} overdue. Open Calendar to review or confirm.",
         highPriority = true
       )
     }
@@ -54,12 +55,13 @@ class ReminderWorker(
     if (overview.dueTodayPayments.isNotEmpty()) {
       val first = overview.dueTodayPayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated)" else ""
+      val extra = if (overview.dueTodayPayments.size > 1) " (+${overview.dueTodayPayments.size - 1} more)" else ""
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_DUE_TODAY,
         title = "Payment Due Today",
-        body = "${first.debtName}$tag: ${MoneyFormatter.formatPeso(first.amountCents)} due today (${ManilaTime.formatDisplay(today)}).",
+        body = "${first.debtName}$tag$extra: ${MoneyFormatter.formatPeso(first.amountCents)} due today (${ManilaTime.formatDisplay(today)}).",
         highPriority = true
       )
     }
@@ -67,12 +69,13 @@ class ReminderWorker(
     if (overview.dueTomorrowPayments.isNotEmpty()) {
       val first = overview.dueTomorrowPayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated)" else ""
+      val extra = if (overview.dueTomorrowPayments.size > 1) " (+${overview.dueTomorrowPayments.size - 1} more)" else ""
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_DUE_TOMORROW,
         title = "Payment Due Tomorrow",
-        body = "${first.debtName}$tag: ${MoneyFormatter.formatPeso(first.amountCents)} due tomorrow.",
+        body = "${first.debtName}$tag$extra: ${MoneyFormatter.formatPeso(first.amountCents)} due tomorrow.",
         highPriority = false
       )
     }
@@ -88,12 +91,13 @@ class ReminderWorker(
     }
     if (upcomingSoon.isNotEmpty()) {
       val (first, deltaDays) = upcomingSoon.first()
+      val extra = if (upcomingSoon.size > 1) " (+${upcomingSoon.size - 1} more)" else ""
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_UPCOMING,
         title = "Upcoming Payment in $deltaDays Days",
-        body = "${first.debtName}: ${MoneyFormatter.formatPeso(first.amountCents)} on ${ManilaTime.formatDisplay(first.dueDateIso)}.",
+        body = "${first.debtName}$extra: ${MoneyFormatter.formatPeso(first.amountCents)} on ${ManilaTime.formatDisplay(first.dueDateIso)}.",
         highPriority = false
       )
     }

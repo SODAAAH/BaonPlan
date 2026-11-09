@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -86,8 +87,10 @@ fun DebtDetailScreen(
 
   Scaffold(
     containerColor = MaterialTheme.colorScheme.background,
+    contentWindowInsets = WindowInsets(0),
     topBar = {
       TopAppBar(
+        windowInsets = WindowInsets(0),
         title = {
           Text(
             text = debt?.name ?: "Debt details",
@@ -176,33 +179,49 @@ fun DebtDetailScreen(
           CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
 
           Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val installmentLabel = if (debt.installmentAmountCents > 0L) {
-              "${MoneyFormatter.formatPeso(debt.installmentAmountCents)} · ${debt.remainingInstallmentsCount} left"
-            } else {
-              "Not specified"
+            val isSettled = debt.status == DebtStatus.PAID || debt.remainingBalanceCents <= 0L
+            if (!isSettled) {
+              val installmentLabel = if (debt.installmentAmountCents > 0L) {
+                "${MoneyFormatter.formatPeso(debt.installmentAmountCents)} · ${debt.remainingInstallmentsCount} left"
+              } else {
+                "Not specified"
+              }
+              MetricRow(label = "Next installment", value = installmentLabel, boldValue = false)
             }
-            MetricRow(label = "Next installment", value = installmentLabel, boldValue = false)
             MetricRow(label = "Frequency", value = debt.frequency.label, boldValue = false)
-            Row(
-              modifier = Modifier.fillMaxWidth(),
-              horizontalArrangement = Arrangement.SpaceBetween,
-              verticalAlignment = Alignment.CenterVertically
-            ) {
-              Text(
-                text = "Next due date",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-              )
-              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (!isSettled) {
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+              ) {
                 Text(
-                  text = ManilaTime.formatDisplay(debt.nextDueDate),
+                  text = "Next due date",
                   style = MaterialTheme.typography.bodyMedium,
-                  color = MaterialTheme.colorScheme.onSurface
+                  color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (debt.status == DebtStatus.ACTIVE) {
-                  DueDateStatusBadge(status = debt.dateStatus)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                  Text(
+                    text = ManilaTime.formatDisplay(debt.nextDueDate),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                  )
+                  if (debt.status == DebtStatus.ACTIVE) {
+                    DueDateStatusBadge(status = debt.dateStatus)
+                  }
                 }
               }
+            } else {
+              MetricRow(
+                label = "Status",
+                value = if (debt.lastKnownPaidDate != null) {
+                  "Paid in full · ${ManilaTime.formatDisplay(debt.lastKnownPaidDate)}"
+                } else {
+                  "Paid in full"
+                },
+                valueColor = semantic.positive,
+                boldValue = false
+              )
             }
           }
         }
@@ -237,11 +256,13 @@ fun DebtDetailScreen(
           ) {
             Text("Edit debt")
           }
-          OutlinedButton(
-            onClick = { onGenerateSchedule(debt) },
-            shape = RoundedCornerShape(12.dp)
-          ) {
-            Text("View schedule")
+          if (debt.status == DebtStatus.ACTIVE && debt.remainingBalanceCents > 0L) {
+            OutlinedButton(
+              onClick = { onGenerateSchedule(debt) },
+              shape = RoundedCornerShape(12.dp)
+            ) {
+              Text("View schedule")
+            }
           }
         }
       }
@@ -312,10 +333,13 @@ fun DebtDetailScreen(
 
       // 4. Payment Schedule
       item {
+        val canManageSchedule = debt.status == DebtStatus.ACTIVE && debt.remainingBalanceCents > 0L
         SectionHeader(
           title = "Payment schedule (${installments.size})",
-          actionLabel = "Update",
-          onAction = { onGenerateSchedule(debt) }
+          actionLabel = if (canManageSchedule) "Update" else null,
+          onAction = if (canManageSchedule) {
+            { onGenerateSchedule(debt) }
+          } else null
         )
         Spacer(modifier = Modifier.height(6.dp))
         if (installments.isEmpty()) {
@@ -368,14 +392,17 @@ fun DebtDetailScreen(
                       color = semantic.positive
                     )
                   }
-                  if (inst.status != InstallmentStatus.PAID) {
+                  if (debt.status == DebtStatus.ACTIVE &&
+                    debt.remainingBalanceCents > 0L &&
+                    inst.status != InstallmentStatus.PAID
+                  ) {
                     TextButton(
                       onClick = { onMarkInstallmentPaid(inst) },
                       contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
                     ) {
                       Text("Mark paid")
                     }
-                  } else {
+                  } else if (inst.status == InstallmentStatus.PAID) {
                     Text(
                       text = ManilaTime.formatShort(inst.paidDate),
                       style = MaterialTheme.typography.labelSmall,

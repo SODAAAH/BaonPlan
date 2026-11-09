@@ -25,6 +25,7 @@ import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.ThemeMode
 import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.util.ManilaTime
+import com.baonplan.finance.domain.util.MoneyFormatter
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.time.LocalDate
@@ -880,8 +881,8 @@ class BaonPlanRepository(
       val tx = transactionDao.getById(transactionId) ?: return@withTransaction
       if (tx.isVoided) return@withTransaction
 
-      val effectiveTitle = newTitle?.takeIf { it.isNotBlank() } ?: tx.title
-      val effectiveDate = newDateIso?.takeIf { it.isNotBlank() } ?: tx.date
+      val effectiveTitle = newTitle?.trim()?.takeIf { it.isNotBlank() } ?: tx.title
+      val effectiveDate = newDateIso?.takeIf { it.isNotBlank() && ManilaTime.parseDate(it) != null } ?: tx.date
       val effectiveNotes = newNotes ?: tx.notes
 
       when (tx.type) {
@@ -890,18 +891,31 @@ class BaonPlanRepository(
           if (voidTransaction) {
             if (debt != null) {
               // Revert installments linked to this transaction first so unpaid count & dates stay accurate
-              val linkedInsts = installmentDao.getByDebtId(debt.id).filter { it.linkedTransactionId == tx.id }
+              val allInstBeforeRevert = installmentDao.getByDebtId(debt.id)
+              val primaryLinked = allInstBeforeRevert
+                .filter { it.linkedTransactionId == tx.id || it.id == tx.installmentId }
+                .sortedByDescending { it.installmentNumber }
+              val fallbackLinked = allInstBeforeRevert
+                .filter { it.paidAmountCents > 0L && it.linkedTransactionId != tx.id && it.id != tx.installmentId }
+                .sortedByDescending { it.installmentNumber }
+
               var toRevert = tx.amountCents
-              for (inst in linkedInsts.sortedByDescending { it.installmentNumber }) {
+              for (inst in primaryLinked + fallbackLinked) {
                 if (toRevert <= 0L) break
+                if (inst.paidAmountCents <= 0L) continue
                 val revertAmt = minOf(inst.paidAmountCents, toRevert)
                 val newPaid = (inst.paidAmountCents - revertAmt).coerceAtLeast(0L)
+                val nextStatus = when {
+                  newPaid >= inst.amountDueCents -> InstallmentStatus.PAID
+                  newPaid > 0L -> InstallmentStatus.PARTIAL
+                  else -> InstallmentStatus.UPCOMING
+                }
                 installmentDao.update(
                   inst.copy(
                     paidAmountCents = newPaid,
-                    status = if (newPaid == 0L) InstallmentStatus.UPCOMING else InstallmentStatus.PARTIAL,
-                    paidDate = if (newPaid < inst.amountDueCents) null else inst.paidDate,
-                    linkedTransactionId = if (newPaid == 0L) null else inst.linkedTransactionId
+                    status = nextStatus,
+                    paidDate = if (nextStatus == InstallmentStatus.PAID) inst.paidDate else null,
+                    linkedTransactionId = if (newPaid == 0L || inst.linkedTransactionId == tx.id) null else inst.linkedTransactionId
                   )
                 )
                 toRevert -= revertAmt
@@ -928,6 +942,13 @@ class BaonPlanRepository(
                   ceil(restoredRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
                 else -> debt.remainingInstallmentsCount
               }
+              val restoredNextDueDate = firstUnpaidAfterRevert?.dueDate ?: debt.nextDueDate
+              val restoredDateStatus = when {
+                firstUnpaidAfterRevert != null -> firstUnpaidAfterRevert.dateStatus
+                restoredNextDueDate == null && restoredRemaining > 0L && debt.dateStatus == DueDateStatus.CONFIRMED ->
+                  DueDateStatus.UNCONFIRMED
+                else -> debt.dateStatus
+              }
 
               val remainingRepaymentDates = transactionDao.getAll()
                 .filter { !it.isVoided && it.id != tx.id && it.debtId == debt.id && it.type == TransactionType.DEBT_REPAYMENT }
@@ -939,8 +960,8 @@ class BaonPlanRepository(
                   trackedPaidCents = restoredTracked,
                   remainingBalanceCents = restoredRemaining,
                   remainingInstallmentsCount = restoredInstallmentCount,
-                  nextDueDate = firstUnpaidAfterRevert?.dueDate ?: debt.nextDueDate,
-                  dateStatus = firstUnpaidAfterRevert?.dateStatus ?: debt.dateStatus,
+                  nextDueDate = restoredNextDueDate,
+                  dateStatus = restoredDateStatus,
                   lastKnownPaidDate = remainingRepaymentDates,
                   status = restoredStatus,
                   updatedAtEpochMillis = ManilaTime.nowMillis()
@@ -962,9 +983,105 @@ class BaonPlanRepository(
               )
             )
           } else {
-            val targetAmount = (newAmountCents ?: tx.amountCents).coerceAtLeast(1L)
+            val targetAmount = newAmountCents ?: tx.amountCents
+            if (targetAmount <= 0L) {
+              throw IllegalArgumentException("Repayment amount must be positive.")
+            }
+            if (debt != null) {
+              val maxAllowed = tx.amountCents + debt.remainingBalanceCents
+              if (targetAmount > maxAllowed) {
+                throw IllegalArgumentException(
+                  "Cannot exceed remaining loan balance (${MoneyFormatter.formatPeso(maxAllowed)})."
+                )
+              }
+            }
+
+            // If edited downward below the reserve-funded portion, restore unused reserve back
+            var updatedFundedReserve = tx.fundedFromReserveCents
+            if (tx.fundedFromReserveCents > 0L && targetAmount < tx.fundedFromReserveCents) {
+              val excessReserve = tx.fundedFromReserveCents - targetAmount
+              restoreReserves(ReserveType.DEBT_REPAYMENT_RESERVE, excessReserve)
+              updatedFundedReserve = targetAmount
+            }
+
             val delta = targetAmount - tx.amountCents
-            if (debt != null && delta != 0L) {
+            if (debt != null && (delta != 0L || effectiveDate != tx.date)) {
+              val allInstBefore = installmentDao.getByDebtId(debt.id)
+              if (delta < 0L) {
+                var toRevert = -delta
+                val primary = allInstBefore
+                  .filter { it.linkedTransactionId == tx.id || it.id == tx.installmentId }
+                  .sortedByDescending { it.installmentNumber }
+                val fallback = allInstBefore
+                  .filter { it.paidAmountCents > 0L && it.linkedTransactionId != tx.id && it.id != tx.installmentId }
+                  .sortedByDescending { it.installmentNumber }
+                for (inst in primary + fallback) {
+                  if (toRevert <= 0L) break
+                  if (inst.paidAmountCents <= 0L) continue
+                  val revertAmt = minOf(inst.paidAmountCents, toRevert)
+                  val newPaid = (inst.paidAmountCents - revertAmt).coerceAtLeast(0L)
+                  val nextStatus = when {
+                    newPaid >= inst.amountDueCents -> InstallmentStatus.PAID
+                    newPaid > 0L -> InstallmentStatus.PARTIAL
+                    else -> InstallmentStatus.UPCOMING
+                  }
+                  installmentDao.update(
+                    inst.copy(
+                      paidAmountCents = newPaid,
+                      status = nextStatus,
+                      paidDate = if (nextStatus == InstallmentStatus.PAID) inst.paidDate else null,
+                      linkedTransactionId = if (newPaid == 0L) null else inst.linkedTransactionId
+                    )
+                  )
+                  toRevert -= revertAmt
+                }
+              } else if (delta > 0L) {
+                val pending = allInstBefore.filter {
+                  it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
+                }
+                val ordered = if (tx.installmentId != null) {
+                  val target = pending.firstOrNull { it.id == tx.installmentId }
+                  if (target != null) listOf(target) + pending.filter { it.id != tx.installmentId } else pending
+                } else {
+                  pending
+                }
+                var toAllocate = delta
+                for (inst in ordered) {
+                  if (toAllocate <= 0L) break
+                  val remainingDue = (inst.amountDueCents - inst.paidAmountCents).coerceAtLeast(0L)
+                  if (remainingDue <= 0L) continue
+                  val chunk = minOf(toAllocate, remainingDue)
+                  val newPaid = inst.paidAmountCents + chunk
+                  val isNowPaid = newPaid >= inst.amountDueCents
+                  installmentDao.update(
+                    inst.copy(
+                      paidAmountCents = newPaid,
+                      status = if (isNowPaid) InstallmentStatus.PAID else InstallmentStatus.PARTIAL,
+                      paidDate = if (isNowPaid) effectiveDate else inst.paidDate,
+                      linkedTransactionId = tx.id
+                    )
+                  )
+                  toAllocate -= chunk
+                }
+              }
+
+              if (effectiveDate != tx.date) {
+                val refreshedForDates = installmentDao.getByDebtId(debt.id)
+                for (inst in refreshedForDates.filter { it.linkedTransactionId == tx.id && it.status == InstallmentStatus.PAID }) {
+                  if (inst.paidDate != effectiveDate) {
+                    installmentDao.update(inst.copy(paidDate = effectiveDate))
+                  }
+                }
+              }
+
+              val allInstAfter = installmentDao.getByDebtId(debt.id)
+              val firstUnpaid = allInstAfter.firstOrNull {
+                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
+              }
+              val unpaidCount = allInstAfter.count {
+                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
+              }
+
               val newTracked = (debt.trackedPaidCents + delta).coerceAtLeast(0L)
               val newRemaining = (debt.remainingBalanceCents - delta).coerceAtLeast(0L)
               val newStatus = when {
@@ -972,40 +1089,53 @@ class BaonPlanRepository(
                 debt.status == DebtStatus.PAID && newRemaining > 0L -> DebtStatus.ACTIVE
                 else -> debt.status
               }
-              val newCount = if (newRemaining == 0L) 0 else if (debt.installmentAmountCents > 0L) {
-                ceil(newRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
-              } else debt.remainingInstallmentsCount
+              val newCount = when {
+                newRemaining == 0L -> 0
+                allInstAfter.isNotEmpty() -> unpaidCount
+                debt.installmentAmountCents > 0L ->
+                  ceil(newRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+                else -> debt.remainingInstallmentsCount
+              }
+              val newNextDueDate: String?
+              val newDateStatus: DueDateStatus
+              if (newRemaining == 0L) {
+                newNextDueDate = null
+                newDateStatus = DueDateStatus.CONFIRMED
+              } else if (firstUnpaid != null) {
+                newNextDueDate = firstUnpaid.dueDate
+                newDateStatus = firstUnpaid.dateStatus
+              } else {
+                newNextDueDate = debt.nextDueDate
+                newDateStatus = if (debt.nextDueDate == null && debt.dateStatus == DueDateStatus.CONFIRMED) {
+                  DueDateStatus.UNCONFIRMED
+                } else {
+                  debt.dateStatus
+                }
+              }
+              val latestPaidDate = transactionDao.getAll()
+                .filter { !it.isVoided && it.debtId == debt.id && it.type == TransactionType.DEBT_REPAYMENT }
+                .map { if (it.id == tx.id) effectiveDate else it.date }
+                .maxOrNull()
 
               debtDao.update(
                 debt.copy(
                   trackedPaidCents = newTracked,
                   remainingBalanceCents = newRemaining,
                   remainingInstallmentsCount = newCount,
+                  nextDueDate = newNextDueDate,
+                  dateStatus = newDateStatus,
+                  lastKnownPaidDate = latestPaidDate,
                   status = newStatus,
                   updatedAtEpochMillis = ManilaTime.nowMillis()
                 )
               )
-              val linkedInst = tx.installmentId?.let { installmentDao.getById(it) }
-              if (linkedInst != null) {
-                val updatedPaid = (linkedInst.paidAmountCents + delta).coerceIn(0L, linkedInst.amountDueCents)
-                installmentDao.update(
-                  linkedInst.copy(
-                    paidAmountCents = updatedPaid,
-                    status = when {
-                      updatedPaid >= linkedInst.amountDueCents -> InstallmentStatus.PAID
-                      updatedPaid > 0L -> InstallmentStatus.PARTIAL
-                      else -> InstallmentStatus.UPCOMING
-                    },
-                    paidDate = if (updatedPaid >= linkedInst.amountDueCents) effectiveDate else null
-                  )
-                )
-              }
             }
             transactionDao.update(
               tx.copy(
                 title = effectiveTitle,
                 amountCents = targetAmount,
                 date = effectiveDate,
+                fundedFromReserveCents = updatedFundedReserve,
                 notes = effectiveNotes,
                 isCorrected = true,
                 correctionReason = reason
@@ -1022,7 +1152,10 @@ class BaonPlanRepository(
               tx.copy(isVoided = true, isCorrected = true, correctionReason = reason)
             )
           } else {
-            val targetAmount = (newAmountCents ?: tx.amountCents).coerceAtLeast(1L)
+            val targetAmount = newAmountCents ?: tx.amountCents
+            if (targetAmount <= 0L) {
+              throw IllegalArgumentException("Allowance amount must be positive.")
+            }
             if (record != null) {
               val parsed = ManilaTime.parseDate(effectiveDate) ?: LocalDate.now(ManilaTime.ZONE)
               allowanceDao.update(
@@ -1059,7 +1192,16 @@ class BaonPlanRepository(
               tx.copy(isVoided = true, isCorrected = true, correctionReason = reason)
             )
           } else {
-            val targetAmount = (newAmountCents ?: tx.amountCents).coerceAtLeast(1L)
+            val targetAmount = newAmountCents ?: tx.amountCents
+            if (targetAmount <= 0L) {
+              throw IllegalArgumentException("Expense amount must be positive.")
+            }
+            var updatedFundedReserve = tx.fundedFromReserveCents
+            if (tx.fundedFromReserveCents > 0L && targetAmount < tx.fundedFromReserveCents) {
+              val excessReserve = tx.fundedFromReserveCents - targetAmount
+              restoreReserves(ReserveType.EMERGENCY_SAVINGS, excessReserve)
+              updatedFundedReserve = targetAmount
+            }
             if (expense != null) {
               expenseDao.update(
                 expense.copy(
@@ -1075,6 +1217,7 @@ class BaonPlanRepository(
                 title = effectiveTitle,
                 amountCents = targetAmount,
                 date = effectiveDate,
+                fundedFromReserveCents = updatedFundedReserve,
                 notes = effectiveNotes,
                 isCorrected = true,
                 correctionReason = reason
@@ -1086,6 +1229,11 @@ class BaonPlanRepository(
         TransactionType.DEBT_RESERVE, TransactionType.EMERGENCY_SAVINGS -> {
           val reserve = tx.reserveId?.let { reserveDao.getById(it) }
           if (voidTransaction) {
+            if (reserve != null && reserve.appliedAmountCents > 0L) {
+              throw IllegalStateException(
+                "Cannot void a reserve that already funded payments or withdrawals (${MoneyFormatter.formatPeso(reserve.appliedAmountCents)} used). Void those transactions first, or release only the unused remainder from Budget."
+              )
+            }
             if (reserve != null) {
               reserveDao.update(reserve.copy(status = ReserveStatus.RELEASED))
             }
@@ -1093,14 +1241,27 @@ class BaonPlanRepository(
               tx.copy(isVoided = true, isCorrected = true, correctionReason = reason)
             )
           } else {
-            val targetAmount = (newAmountCents ?: tx.amountCents).coerceAtLeast(1L)
+            val targetAmount = newAmountCents ?: tx.amountCents
+            if (targetAmount <= 0L) {
+              throw IllegalArgumentException("Reserve amount must be positive.")
+            }
             if (reserve != null) {
-              val clamped = maxOf(targetAmount, reserve.appliedAmountCents)
+              if (targetAmount < reserve.appliedAmountCents) {
+                throw IllegalArgumentException(
+                  "Reserve amount cannot be less than ${MoneyFormatter.formatPeso(reserve.appliedAmountCents)} already used."
+                )
+              }
+              val parsed = ManilaTime.parseDate(effectiveDate) ?: LocalDate.now(ManilaTime.ZONE)
               reserveDao.update(
                 reserve.copy(
-                  amountCents = clamped,
+                  amountCents = targetAmount,
+                  weekStartDate = ManilaTime.formatIso(ManilaTime.weekStart(parsed)),
                   notes = effectiveNotes,
-                  status = if (clamped <= reserve.appliedAmountCents) ReserveStatus.APPLIED else ReserveStatus.RESERVED
+                  status = when {
+                    reserve.status == ReserveStatus.RELEASED -> ReserveStatus.RELEASED
+                    targetAmount <= reserve.appliedAmountCents -> ReserveStatus.APPLIED
+                    else -> ReserveStatus.RESERVED
+                  }
                 )
               )
             }
@@ -1118,6 +1279,11 @@ class BaonPlanRepository(
         }
 
         TransactionType.ADJUSTMENT -> {
+          if (!voidTransaction && newAmountCents != null && newAmountCents != tx.amountCents) {
+            throw IllegalArgumentException(
+              "Cannot change the amount of an adjustment directly. Void & revert it instead."
+            )
+          }
           if (voidTransaction && tx.fundedFromReserveCents > 0L) {
             when (tx.category) {
               "Emergency Withdrawal" ->
@@ -1139,7 +1305,7 @@ class BaonPlanRepository(
           transactionDao.update(
             tx.copy(
               title = effectiveTitle,
-              amountCents = newAmountCents ?: tx.amountCents,
+              amountCents = tx.amountCents,
               date = effectiveDate,
               notes = effectiveNotes,
               isVoided = voidTransaction,

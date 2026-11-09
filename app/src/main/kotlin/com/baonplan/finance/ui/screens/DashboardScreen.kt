@@ -120,10 +120,14 @@ fun DashboardScreen(
         )
         Spacer(modifier = Modifier.height(6.dp))
         val debtNote = when {
-          progress.activeLoansCount == 0 && progress.completedLoansCount == 0 ->
+          progress.activeLoansCount == 0 && progress.completedLoansCount == 0 && progress.archivedLoansCount == 0 ->
             "No debts recorded yet"
-          progress.activeLoansCount == 0 ->
+          progress.activeLoansCount == 0 && progress.completedLoansCount > 0 && progress.archivedLoansCount > 0 ->
+            "All tracked debts paid off · ${progress.archivedLoansCount} archived"
+          progress.activeLoansCount == 0 && progress.completedLoansCount > 0 ->
             "All tracked debts paid off"
+          progress.activeLoansCount == 0 ->
+            "No active debts · ${progress.archivedLoansCount} archived"
           else -> {
             val pct = (progress.progressFraction * 100).toInt()
             "${progress.activeLoansCount} active · $pct% paid off"
@@ -298,23 +302,61 @@ fun DashboardScreen(
             value = MoneyFormatter.formatPeso(weekly.recordedAllowanceCents),
             boldValue = false
           )
+          if (weekly.cashAddedFromReservesThisWeekCents > 0L) {
+            MetricRow(
+              label = "From prior reserves",
+              value = "+${MoneyFormatter.formatPeso(weekly.cashAddedFromReservesThisWeekCents)}",
+              valueColor = semantic.positive,
+              boldValue = false
+            )
+          }
           MetricRow(
             label = "Food",
             subtitle = "Budget ${MoneyFormatter.formatPesoCompact(weekly.plannedFoodBudgetCents)}",
             value = MoneyFormatter.formatPeso(weekly.actualFoodExpensesCents),
             boldValue = false
           )
+          val paidFromWeekReserve =
+            (weekly.debtReservedThisWeekCents - weekly.activeDebtReserveThisWeekCents)
+              .coerceAtLeast(0L)
+          val debtReserveSubtitle = when {
+            weekly.debtReservedThisWeekCents == 0L && weekly.activeDebtReserveCents > 0L ->
+              "${MoneyFormatter.formatPesoCompact(weekly.activeDebtReserveCents)} active from prior weeks"
+            paidFromWeekReserve > 0L && weekly.activeDebtReserveThisWeekCents > 0L ->
+              "${MoneyFormatter.formatPesoCompact(weekly.activeDebtReserveThisWeekCents)} active · ${MoneyFormatter.formatPesoCompact(paidFromWeekReserve)} paid from reserve"
+            paidFromWeekReserve > 0L ->
+              "${MoneyFormatter.formatPesoCompact(paidFromWeekReserve)} paid from reserve"
+            weekly.activeDebtReserveCents > weekly.activeDebtReserveThisWeekCents ->
+              "${MoneyFormatter.formatPesoCompact(weekly.activeDebtReserveCents)} total active"
+            else -> null
+          }
           MetricRow(
             label = "Debt reserved",
-            value = MoneyFormatter.formatPeso(weekly.activeDebtReserveCents),
+            subtitle = debtReserveSubtitle,
+            value = MoneyFormatter.formatPeso(weekly.debtReservedThisWeekCents),
             boldValue = false
           )
-          val otherOutflows = weekly.actualOtherExpensesCents +
-            weekly.emergencySavingsThisWeekCents +
+          val cashOtherExpenses =
+            (weekly.actualOtherExpensesCents - weekly.emergencyFundedExpensesThisWeekCents)
+              .coerceAtLeast(0L)
+          val otherOutflows = cashOtherExpenses +
+            weekly.netEmergencySavingsThisWeekCents +
             weekly.directRepaymentsFromCashCents
-          if (otherOutflows > 0L) {
+          if (otherOutflows > 0L || weekly.emergencyFundedExpensesThisWeekCents > 0L) {
+            val otherSubtitle = buildList {
+              if (weekly.directRepaymentsFromCashCents > 0L) {
+                add("${MoneyFormatter.formatPesoCompact(weekly.directRepaymentsFromCashCents)} paid direct")
+              }
+              if (weekly.netEmergencySavingsThisWeekCents > 0L) {
+                add("${MoneyFormatter.formatPesoCompact(weekly.netEmergencySavingsThisWeekCents)} emergency saved")
+              }
+              if (weekly.emergencyFundedExpensesThisWeekCents > 0L) {
+                add("Plus ${MoneyFormatter.formatPesoCompact(weekly.emergencyFundedExpensesThisWeekCents)} from savings")
+              }
+            }.joinToString(" · ").takeIf { it.isNotBlank() }
             MetricRow(
               label = "Other & direct payments",
+              subtitle = otherSubtitle,
               value = MoneyFormatter.formatPeso(otherOutflows),
               boldValue = false
             )
