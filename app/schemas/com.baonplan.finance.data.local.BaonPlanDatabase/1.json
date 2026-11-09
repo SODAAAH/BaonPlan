@@ -1,0 +1,761 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "f1be62ae426720408e75ea6339c66a90",
+    "entities": [
+      {
+        "tableName": "debts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `lender` TEXT NOT NULL, `category` TEXT NOT NULL, `originalPrincipalCents` INTEGER, `amountReceivedCents` INTEGER, `interestCents` INTEGER, `serviceFeeCents` INTEGER, `processingFeeCents` INTEGER, `totalScheduledRepaymentCents` INTEGER, `priorPaidCents` INTEGER NOT NULL, `isPriorPaidKnown` INTEGER NOT NULL, `trackedPaidCents` INTEGER NOT NULL, `remainingBalanceCents` INTEGER NOT NULL, `installmentAmountCents` INTEGER NOT NULL, `remainingInstallmentsCount` INTEGER NOT NULL, `frequency` TEXT NOT NULL, `customIntervalDays` INTEGER, `lastKnownPaidDate` TEXT, `nextDueDate` TEXT, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lender",
+            "columnName": "lender",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalPrincipalCents",
+            "columnName": "originalPrincipalCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "amountReceivedCents",
+            "columnName": "amountReceivedCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "interestCents",
+            "columnName": "interestCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "serviceFeeCents",
+            "columnName": "serviceFeeCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "processingFeeCents",
+            "columnName": "processingFeeCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "totalScheduledRepaymentCents",
+            "columnName": "totalScheduledRepaymentCents",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "priorPaidCents",
+            "columnName": "priorPaidCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isPriorPaidKnown",
+            "columnName": "isPriorPaidKnown",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackedPaidCents",
+            "columnName": "trackedPaidCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remainingBalanceCents",
+            "columnName": "remainingBalanceCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "installmentAmountCents",
+            "columnName": "installmentAmountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remainingInstallmentsCount",
+            "columnName": "remainingInstallmentsCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "frequency",
+            "columnName": "frequency",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customIntervalDays",
+            "columnName": "customIntervalDays",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastKnownPaidDate",
+            "columnName": "lastKnownPaidDate",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "nextDueDate",
+            "columnName": "nextDueDate",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "dateStatus",
+            "columnName": "dateStatus",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtEpochMillis",
+            "columnName": "updatedAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "installments",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `installmentNumber` INTEGER NOT NULL, `dueDate` TEXT, `amountDueCents` INTEGER NOT NULL, `paidAmountCents` INTEGER NOT NULL, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `paidDate` TEXT, `linkedTransactionId` INTEGER, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "debtId",
+            "columnName": "debtId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "installmentNumber",
+            "columnName": "installmentNumber",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dueDate",
+            "columnName": "dueDate",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "amountDueCents",
+            "columnName": "amountDueCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "paidAmountCents",
+            "columnName": "paidAmountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dateStatus",
+            "columnName": "dateStatus",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "paidDate",
+            "columnName": "paidDate",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "linkedTransactionId",
+            "columnName": "linkedTransactionId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_installments_debtId",
+            "unique": false,
+            "columnNames": [
+              "debtId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_installments_debtId` ON `${TABLE_NAME}` (`debtId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "debts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "debtId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "transactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `type` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `date` TEXT NOT NULL, `debtId` INTEGER, `installmentId` INTEGER, `reserveId` INTEGER, `expenseId` INTEGER, `allowanceId` INTEGER, `fundedFromReserveCents` INTEGER NOT NULL, `category` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `isCorrected` INTEGER NOT NULL, `isVoided` INTEGER NOT NULL, `correctionReason` TEXT, `createdAtEpochMillis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "type",
+            "columnName": "type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amountCents",
+            "columnName": "amountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "debtId",
+            "columnName": "debtId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "installmentId",
+            "columnName": "installmentId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "reserveId",
+            "columnName": "reserveId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "expenseId",
+            "columnName": "expenseId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "allowanceId",
+            "columnName": "allowanceId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "fundedFromReserveCents",
+            "columnName": "fundedFromReserveCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCorrected",
+            "columnName": "isCorrected",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isVoided",
+            "columnName": "isVoided",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "correctionReason",
+            "columnName": "correctionReason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_transactions_date",
+            "unique": false,
+            "columnNames": [
+              "date"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `${TABLE_NAME}` (`date`)"
+          },
+          {
+            "name": "index_transactions_debtId",
+            "unique": false,
+            "columnNames": [
+              "debtId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_debtId` ON `${TABLE_NAME}` (`debtId`)"
+          },
+          {
+            "name": "index_transactions_installmentId",
+            "unique": false,
+            "columnNames": [
+              "installmentId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_installmentId` ON `${TABLE_NAME}` (`installmentId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "allowance_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `receivedDate` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `sourceLabel` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weekStartDate",
+            "columnName": "weekStartDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivedDate",
+            "columnName": "receivedDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amountCents",
+            "columnName": "amountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceLabel",
+            "columnName": "sourceLabel",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_allowance_records_weekStartDate",
+            "unique": false,
+            "columnNames": [
+              "weekStartDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_allowance_records_weekStartDate` ON `${TABLE_NAME}` (`weekStartDate`)"
+          }
+        ]
+      },
+      {
+        "tableName": "expenses",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `date` TEXT NOT NULL, `category` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `isSchoolDay` INTEGER NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "category",
+            "columnName": "category",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amountCents",
+            "columnName": "amountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isSchoolDay",
+            "columnName": "isSchoolDay",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_expenses_date",
+            "unique": false,
+            "columnNames": [
+              "date"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_expenses_date` ON `${TABLE_NAME}` (`date`)"
+          }
+        ]
+      },
+      {
+        "tableName": "debt_reserves",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `targetDebtId` INTEGER, `reserveType` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `appliedAmountCents` INTEGER NOT NULL, `status` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weekStartDate",
+            "columnName": "weekStartDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDebtId",
+            "columnName": "targetDebtId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "reserveType",
+            "columnName": "reserveType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amountCents",
+            "columnName": "amountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appliedAmountCents",
+            "columnName": "appliedAmountCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtEpochMillis",
+            "columnName": "createdAtEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_debt_reserves_weekStartDate",
+            "unique": false,
+            "columnNames": [
+              "weekStartDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_debt_reserves_weekStartDate` ON `${TABLE_NAME}` (`weekStartDate`)"
+          },
+          {
+            "name": "index_debt_reserves_targetDebtId",
+            "unique": false,
+            "columnNames": [
+              "targetDebtId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_debt_reserves_targetDebtId` ON `${TABLE_NAME}` (`targetDebtId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "user_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `minWeeklyAllowanceCents` INTEGER NOT NULL, `maxWeeklyAllowanceCents` INTEGER NOT NULL, `conservativeAllowanceCents` INTEGER NOT NULL, `schoolDaysPerWeek` INTEGER NOT NULL, `foodPerSchoolDayCents` INTEGER NOT NULL, `weeklyFoodBudgetCents` INTEGER NOT NULL, `weeklyOtherExpensesBudgetCents` INTEGER NOT NULL, `weeklyEmergencySavingsTargetCents` INTEGER NOT NULL, `weeklyDebtReserveTargetCents` INTEGER NOT NULL, `remindersEnabled` INTEGER NOT NULL, `allowanceReminderDayOfWeek` INTEGER NOT NULL, `reminderHour` INTEGER NOT NULL, `reminderMinute` INTEGER NOT NULL, `isManuallyEntered` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "minWeeklyAllowanceCents",
+            "columnName": "minWeeklyAllowanceCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxWeeklyAllowanceCents",
+            "columnName": "maxWeeklyAllowanceCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conservativeAllowanceCents",
+            "columnName": "conservativeAllowanceCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schoolDaysPerWeek",
+            "columnName": "schoolDaysPerWeek",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "foodPerSchoolDayCents",
+            "columnName": "foodPerSchoolDayCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weeklyFoodBudgetCents",
+            "columnName": "weeklyFoodBudgetCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weeklyOtherExpensesBudgetCents",
+            "columnName": "weeklyOtherExpensesBudgetCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weeklyEmergencySavingsTargetCents",
+            "columnName": "weeklyEmergencySavingsTargetCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "weeklyDebtReserveTargetCents",
+            "columnName": "weeklyDebtReserveTargetCents",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remindersEnabled",
+            "columnName": "remindersEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowanceReminderDayOfWeek",
+            "columnName": "allowanceReminderDayOfWeek",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reminderHour",
+            "columnName": "reminderHour",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reminderMinute",
+            "columnName": "reminderMinute",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isManuallyEntered",
+            "columnName": "isManuallyEntered",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f1be62ae426720408e75ea6339c66a90')"
+    ]
+  }
+}

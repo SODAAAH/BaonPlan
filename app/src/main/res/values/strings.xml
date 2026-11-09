@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">BaonPlan</string>
+    <string name="notification_channel_payments_name">Payment Reminders</string>
+    <string name="notification_channel_payments_desc">Upcoming, due today, due tomorrow, and overdue installment alerts.</string>
+    <string name="notification_channel_allowance_name">Weekly Allowance Reminders</string>
+    <string name="notification_channel_allowance_desc">Weekly prompt to record your baon allowance and review school food &amp; debt reserves.</string>
+</resources>

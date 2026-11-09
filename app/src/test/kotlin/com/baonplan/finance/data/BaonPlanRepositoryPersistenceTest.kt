@@ -1,0 +1,386 @@
+package com.baonplan.finance.data
+
+import android.app.Application
+import android.content.Context
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.baonplan.finance.data.local.BaonPlanDatabase
+import com.baonplan.finance.data.local.SettingsPreferencesDataStore
+import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.repository.BaonPlanRepository
+import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.model.DebtStatus
+import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.model.ReserveStatus
+import com.baonplan.finance.domain.model.ReserveType
+import kotlinx.coroutines.test.runTest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.File
+
+@RunWith(RobolectricTestRunner::class)
+@Config(application = Application::class, sdk = [34])
+class BaonPlanRepositoryPersistenceTest {
+
+  private lateinit var context: Context
+  private lateinit var dbFile: File
+  private lateinit var db: BaonPlanDatabase
+  private lateinit var prefs: SettingsPreferencesDataStore
+  private lateinit var repo: BaonPlanRepository
+
+  @Before
+  fun setup() {
+    context = ApplicationProvider.getApplicationContext()
+    dbFile = File(context.cacheDir, "test_baonplan_${System.nanoTime()}.db")
+    db = Room.databaseBuilder(context, BaonPlanDatabase::class.java, dbFile.absolutePath)
+      .allowMainThreadQueries()
+      .build()
+    prefs = SettingsPreferencesDataStore(context)
+    repo = BaonPlanRepository(db, prefs)
+  }
+
+  @After
+  fun tearDown() {
+    if (db.isOpen) db.close()
+    dbFile.delete()
+  }
+
+  @Test
+  fun firstLaunch_ensureInitializedStartsWithZeroLoansAndDefaultSettings() = runTest {
+    repo.ensureInitialized()
+
+    assertEquals(0, db.debtDao().getAll().size)
+    assertEquals(0, db.installmentDao().getAll().size)
+    assertEquals(0, db.transactionDao().getAll().size)
+    assertEquals(0L, FinancialCalculator.calculateTotalActiveDebt(db.debtDao().getAll()))
+
+    val settings = db.userSettingsDao().getSettings()
+    assertNotNull(settings)
+    assertEquals(40_000L, settings!!.minWeeklyAllowanceCents)
+    assertEquals(50_000L, settings.maxWeeklyAllowanceCents)
+    assertEquals(10_000L, settings.weeklyFoodBudgetCents)
+  }
+
+  @Test
+  fun partialRepaymentsAndMarkPaid_neverDoubleCountAndCorrectRevertsProperly() = runTest {
+    repo.ensureInitialized()
+
+    val debtId = repo.saveDebt(
+      DebtEntity(
+        name = "Sample Weekly Loan",
+        lender = "Sample Lender",
+        category = "Cash Loan",
+        remainingBalanceCents = 44_455L,
+        installmentAmountCents = 2_615L,
+        remainingInstallmentsCount = 17,
+        frequency = RepaymentFrequency.WEEKLY,
+        nextDueDate = "2026-11-16",
+        dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+      )
+    )
+    assertTrue(
+      repo.generateInstallmentSchedule(
+        debtId = debtId,
+        startDateIso = "2026-11-16",
+        count = 17,
+        installmentAmountCents = 2_615L,
+        frequency = RepaymentFrequency.WEEKLY,
+        customIntervalDays = null,
+        dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+      )
+    )
+    val firstInstId = db.installmentDao().getByDebtId(debtId).first().id
+
+    // Partial payment of ₱10.00 (1000 cents) on first ₱26.15 installment
+    val tx1 = repo.recordRepayment(
+      debtId = debtId,
+      amountCents = 1_000L,
+      dateIso = "2026-11-16",
+      targetInstallmentId = firstInstId
+    )
+    assertNotNull(tx1)
+
+    val afterPartial = db.debtDao().getById(debtId)!!
+    assertEquals(43_455L, afterPartial.remainingBalanceCents)
+    assertEquals(1_000L, afterPartial.trackedPaidCents)
+    val instAfterPartial = db.installmentDao().getById(firstInstId)!!
+    assertEquals(1_000L, instAfterPartial.paidAmountCents)
+    assertEquals(InstallmentStatus.PARTIAL, instAfterPartial.status)
+
+    // Marking the installment paid now pays ONLY the remaining ₱16.15 (1615 cents)
+    val tx2 = repo.markInstallmentPaid(installmentId = firstInstId, dateIso = "2026-11-16")
+    assertNotNull(tx2)
+    val afterInst = db.debtDao().getById(debtId)!!
+    assertEquals(41_840L, afterInst.remainingBalanceCents) // 44455 - 2615 = 41840
+    assertEquals(2_615L, afterInst.trackedPaidCents)
+    assertEquals(InstallmentStatus.PAID, db.installmentDao().getById(firstInstId)!!.status)
+
+    // Calling markInstallmentPaid a second time MUST do nothing (no double-counting!)
+    val duplicate = repo.markInstallmentPaid(installmentId = firstInstId, dateIso = "2026-11-16")
+    assertNull(duplicate)
+    assertEquals(41_840L, db.debtDao().getById(debtId)!!.remainingBalanceCents)
+
+    // Correct tx1 from ₱10.00 -> ₱15.00 (+500 cents delta)
+    repo.correctOrVoidTransaction(
+      transactionId = tx1!!,
+      newAmountCents = 1_500L,
+      voidTransaction = false,
+      reason = "Typo"
+    )
+    assertEquals(41_340L, db.debtDao().getById(debtId)!!.remainingBalanceCents)
+
+    // Void tx2 (₱16.15) -> restores ₱16.15 to remaining balance
+    repo.correctOrVoidTransaction(
+      transactionId = tx2!!,
+      voidTransaction = true,
+      reason = "Mistaken duplicate"
+    )
+    assertEquals(42_955L, db.debtDao().getById(debtId)!!.remainingBalanceCents)
+    assertTrue(db.transactionDao().getById(tx2)!!.isVoided)
+  }
+
+  @Test
+  fun reserveDoesNotReduceDebtUntilRepaymentAndPersistsAcrossDatabaseRestart() = runTest {
+    repo.ensureInitialized()
+
+    val bnplId = repo.saveDebt(
+      DebtEntity(
+        name = "Sample BNPL",
+        lender = "Sample Marketplace",
+        category = "BNPL",
+        totalScheduledRepaymentCents = 22_917L,
+        remainingBalanceCents = 22_917L,
+        installmentAmountCents = 22_917L,
+        remainingInstallmentsCount = 1,
+        frequency = RepaymentFrequency.ONE_TIME,
+        nextDueDate = "2026-12-15",
+        dateStatus = DueDateStatus.CONFIRMED
+      )
+    )
+    val otherLoanId = repo.saveDebt(
+      DebtEntity(
+        name = "Other Loan",
+        lender = "Sample Lender",
+        category = "Cash Loan",
+        remainingBalanceCents = 30_000L,
+        installmentAmountCents = 10_000L,
+        remainingInstallmentsCount = 3,
+        frequency = RepaymentFrequency.MONTHLY,
+        nextDueDate = "2026-12-20",
+        dateStatus = DueDateStatus.CONFIRMED
+      )
+    )
+
+    // Create a ₱150.00 debt reserve
+    repo.createReserve(
+      reserveType = ReserveType.DEBT_REPAYMENT_RESERVE,
+      amountCents = 15_000L,
+      dateIso = "2026-11-09",
+      targetDebtId = bnplId
+    )
+
+    // Total debt MUST remain unchanged until repayment is actually recorded!
+    assertEquals(52_917L, FinancialCalculator.calculateTotalActiveDebt(db.debtDao().getAll()))
+
+    // Pay Sample BNPL (₱229.17) using the ₱150.00 debt reserve + cash remainder
+    repo.recordRepayment(
+      debtId = bnplId,
+      amountCents = 22_917L,
+      dateIso = "2026-12-15",
+      useDebtReserve = true
+    )
+
+    val bnpl = db.debtDao().getById(bnplId)!!
+    assertEquals(0L, bnpl.remainingBalanceCents)
+    assertEquals(DebtStatus.PAID, bnpl.status)
+    assertEquals(ReserveStatus.APPLIED, db.debtReserveDao().getAll().first().status)
+
+    // Simulate app close / process kill / device reboot by closing and reopening SQLite file
+    db.close()
+    val reopenedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, dbFile.absolutePath)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val reopenedDebts = reopenedDb.debtDao().getAll()
+      assertEquals(2, reopenedDebts.size)
+      assertEquals(0L, reopenedDb.debtDao().getById(bnplId)!!.remainingBalanceCents)
+      assertEquals(DebtStatus.PAID, reopenedDb.debtDao().getById(bnplId)!!.status)
+      assertEquals(30_000L, FinancialCalculator.calculateTotalActiveDebt(reopenedDebts))
+      assertEquals(otherLoanId, reopenedDebts.first { it.status == DebtStatus.ACTIVE }.id)
+    } finally {
+      reopenedDb.close()
+    }
+  }
+
+  @Test
+  fun clearAllData_persistsEmptyStateAcrossSimulatedRestart() = runTest {
+    repo.ensureInitialized()
+    repo.saveDebt(
+      DebtEntity(
+        name = "Loan to Clear",
+        lender = "Sample Lender",
+        category = "Cash Loan",
+        remainingBalanceCents = 10_000L
+      )
+    )
+    assertEquals(1, db.debtDao().getAll().size)
+
+    repo.clearAllData()
+    assertEquals(0, db.debtDao().getAll().size)
+    assertEquals(0, db.installmentDao().getAll().size)
+    assertNotNull(db.userSettingsDao().getSettings())
+
+    // Simulate app restart: close Room, open again, run ensureInitialized()
+    db.close()
+    val restartedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, dbFile.absolutePath)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val restartedRepo = BaonPlanRepository(restartedDb, prefs)
+      restartedRepo.ensureInitialized()
+
+      assertEquals(0, restartedDb.debtDao().getAll().size)
+      assertEquals(0, restartedDb.installmentDao().getAll().size)
+      assertNotNull(restartedDb.userSettingsDao().getSettings())
+    } finally {
+      restartedDb.close()
+    }
+  }
+
+  @Test
+  fun allowanceExpenseReserveCorrections_syncUnderlyingEntitiesAndPersist() = runTest {
+    repo.ensureInitialized()
+
+    repo.recordAllowance(
+      amountCents = 40_000L,
+      receivedDateIso = "2026-11-09",
+      sourceLabel = "Weekly Baon"
+    )
+    repo.recordExpense(
+      title = "Campus Lunch",
+      amountCents = 5_000L,
+      dateIso = "2026-11-09",
+      category = ExpenseCategory.SCHOOL_FOOD,
+      isSchoolDay = true
+    )
+    repo.createReserve(
+      reserveType = ReserveType.EMERGENCY_SAVINGS,
+      amountCents = 5_000L,
+      dateIso = "2026-11-09"
+    )
+
+    val txs = db.transactionDao().getAll()
+    val allowanceTx = txs.first { it.allowanceId != null }
+    val expenseTx = txs.first { it.expenseId != null }
+    val reserveTx = txs.first { it.reserveId != null }
+
+    // Edit allowance from ₱400 to ₱500
+    repo.correctOrVoidTransaction(
+      transactionId = allowanceTx.id,
+      newAmountCents = 50_000L,
+      reason = "Received ₱500 this week"
+    )
+    assertEquals(50_000L, db.allowanceRecordDao().getById(allowanceTx.allowanceId!!)!!.amountCents)
+
+    // Edit expense from ₱50 to ₱65
+    repo.correctOrVoidTransaction(
+      transactionId = expenseTx.id,
+      newAmountCents = 6_500L,
+      reason = "Added bottled water"
+    )
+    assertEquals(6_500L, db.expenseDao().getById(expenseTx.expenseId!!)!!.amountCents)
+
+    // Void reserve -> sets reserve status to RELEASED
+    repo.correctOrVoidTransaction(
+      transactionId = reserveTx.id,
+      voidTransaction = true,
+      reason = "Needed cash for school project"
+    )
+    assertEquals(ReserveStatus.RELEASED, db.debtReserveDao().getById(reserveTx.reserveId!!)!!.status)
+
+    // Reopen database to verify full SQLite persistence
+    db.close()
+    val reopenedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, dbFile.absolutePath)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      assertEquals(50_000L, reopenedDb.allowanceRecordDao().getAll().single().amountCents)
+      assertEquals(6_500L, reopenedDb.expenseDao().getAll().single().amountCents)
+      assertEquals(ReserveStatus.RELEASED, reopenedDb.debtReserveDao().getAll().single().status)
+    } finally {
+      reopenedDb.close()
+    }
+  }
+
+  @Test
+  fun confirmDebtDateAndUnknownFrequencyRefusal_respectConfirmedVsUnknownRules() = runTest {
+    repo.ensureInitialized()
+
+    val biweeklyLoanId = repo.saveDebt(
+      DebtEntity(
+        name = "Sample Biweekly Loan",
+        lender = "Sample Lender",
+        category = "E-Wallet",
+        remainingBalanceCents = 33_507L,
+        installmentAmountCents = 11_169L,
+        remainingInstallmentsCount = 3,
+        frequency = RepaymentFrequency.EVERY_14_DAYS,
+        dateStatus = DueDateStatus.UNCONFIRMED
+      )
+    )
+    val unknownLoanId = repo.saveDebt(
+      DebtEntity(
+        name = "Sample Unknown Loan",
+        lender = "Sample Lender",
+        category = "Cash Loan",
+        remainingBalanceCents = 108_738L,
+        installmentAmountCents = 5_178L,
+        remainingInstallmentsCount = 21,
+        frequency = RepaymentFrequency.UNKNOWN,
+        dateStatus = DueDateStatus.UNKNOWN
+      )
+    )
+
+    // Confirm biweekly loan (3 x ₱111.69, EVERY_14_DAYS) with full schedule
+    repo.confirmDebtDate(
+      debtId = biweeklyLoanId,
+      confirmedDateIso = "2026-11-20",
+      generateFullSchedule = true
+    )
+    val confirmedLoan = db.debtDao().getById(biweeklyLoanId)!!
+    assertEquals("2026-11-20", confirmedLoan.nextDueDate)
+    assertEquals(DueDateStatus.CONFIRMED, confirmedLoan.dateStatus)
+    val schedule = db.installmentDao().getByDebtId(biweeklyLoanId)
+    assertEquals(3, schedule.size)
+    assertEquals("2026-11-20", schedule[0].dueDate)
+    assertEquals("2026-12-04", schedule[1].dueDate)
+    assertEquals("2026-12-18", schedule[2].dueDate)
+    assertEquals(33_507L, schedule.sumOf { it.amountDueCents })
+
+    // Unknown frequency loan MUST refuse automatic schedule generation
+    val generatedForUnknown = repo.generateInstallmentSchedule(
+      debtId = unknownLoanId,
+      startDateIso = "2026-11-20",
+      count = 21,
+      installmentAmountCents = 5_178L,
+      frequency = RepaymentFrequency.UNKNOWN,
+      customIntervalDays = null,
+      dateStatus = DueDateStatus.UNKNOWN
+    )
+    assertFalse(generatedForUnknown)
+    assertTrue(db.installmentDao().getByDebtId(unknownLoanId).isEmpty())
+    assertNull(db.debtDao().getById(unknownLoanId)!!.nextDueDate)
+  }
+}
