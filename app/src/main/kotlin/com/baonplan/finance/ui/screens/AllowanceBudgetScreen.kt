@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
@@ -38,6 +39,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.ExpensePreset
+import com.baonplan.finance.domain.model.PriorWeekCarryOverCandidate
 import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.ScenarioPlan
@@ -62,10 +66,16 @@ fun AllowanceBudgetScreen(
   onOpenRecordAllowanceDialog: () -> Unit,
   onDeleteAllowance: (Long) -> Unit,
   onQuickSchoolMealExpense: () -> Unit,
+  onQuickPresetExpense: (ExpensePreset) -> Unit,
+  onDeleteExpense: (Long) -> Unit,
   onOpenAddExpenseDialog: () -> Unit,
   onOpenAdjustBudget: () -> Unit,
   onOpenCreateReserveDialog: (ReserveType) -> Unit,
   onReleaseReserve: (Long) -> Unit,
+  onOpenUseEmergencySavings: () -> Unit,
+  onCarryOverPriorWeek: (PriorWeekCarryOverCandidate) -> Unit,
+  onSweepPriorWeekToReserve: (PriorWeekCarryOverCandidate, ReserveType) -> Unit,
+  onDismissCarryOver: (String) -> Unit,
   modifier: Modifier = Modifier
 ) {
   val semantic = LocalBaonColors.current
@@ -73,6 +83,13 @@ fun AllowanceBudgetScreen(
   val settings = state.settings
   val activeReserves = remember(state.reserves) {
     state.reserves.filter { it.status == ReserveStatus.RESERVED }
+  }
+  val weekExpenses = remember(state.expenses, state.today) {
+    val weekStart = ManilaTime.weekStart(state.today)
+    state.expenses.filter { ManilaTime.isInWeek(it.date, weekStart) }
+  }
+  val secondaryQuickPreset = remember(state.preferences.expensePresets) {
+    state.preferences.expensePresets.firstOrNull { it.category != ExpenseCategory.SCHOOL_FOOD }
   }
 
   var customAllowancePesos by remember(settings.conservativeAllowanceCents) {
@@ -117,6 +134,71 @@ fun AllowanceBudgetScreen(
           style = MaterialTheme.typography.bodyMedium,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+      }
+    }
+
+    // Optional Prior-Week Leftover Carry-Over / Sweep
+    state.priorWeekCarryOver?.let { carryOver ->
+      item {
+        BaonCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text(
+                text = "Unspent from last week",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+              )
+              Spacer(modifier = Modifier.height(2.dp))
+              Text(
+                text = "${MoneyFormatter.formatPeso(carryOver.leftoverCents)} left from ${ManilaTime.formatShort(ManilaTime.formatIso(carryOver.weekStartDate))}–${ManilaTime.formatShort(ManilaTime.formatIso(carryOver.weekEndDate))}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+            IconButton(
+              onClick = { onDismissCarryOver(carryOver.weekStartIso) },
+              modifier = Modifier.size(32.dp)
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.Close,
+                contentDescription = "Dismiss",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+          }
+          Spacer(modifier = Modifier.height(10.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            FilledTonalButton(
+              onClick = { onCarryOverPriorWeek(carryOver) },
+              shape = RoundedCornerShape(10.dp),
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+              Text("Carry to this week")
+            }
+            OutlinedButton(
+              onClick = { onSweepPriorWeekToReserve(carryOver, ReserveType.EMERGENCY_SAVINGS) },
+              shape = RoundedCornerShape(10.dp),
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+              Text("Save emergency")
+            }
+            OutlinedButton(
+              onClick = { onSweepPriorWeekToReserve(carryOver, ReserveType.DEBT_REPAYMENT_RESERVE) },
+              shape = RoundedCornerShape(10.dp),
+              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+              Text("Debt reserve")
+            }
+          }
+        }
       }
     }
 
@@ -216,7 +298,7 @@ fun AllowanceBudgetScreen(
             Text("Food budget", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-              text = "${settings.schoolDaysPerWeek} school days × ${MoneyFormatter.formatPesoCompact(settings.foodPerSchoolDayCents)}/day",
+              text = "${settings.schoolDaysPerWeek} school days × ${MoneyFormatter.formatPesoCompact(settings.foodPerSchoolDayCents)}/day · ${weekly.schoolDaysLoggedThisWeek}/${settings.schoolDaysPerWeek} days logged",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -250,11 +332,21 @@ fun AllowanceBudgetScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
           )
-          TextButton(
-            onClick = onQuickSchoolMealExpense,
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-          ) {
-            Text("+ ${MoneyFormatter.formatPesoCompact(settings.foodPerSchoolDayCents)} meal")
+          FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(
+              onClick = onQuickSchoolMealExpense,
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+              Text("+ ${MoneyFormatter.formatPesoCompact(settings.foodPerSchoolDayCents)} meal")
+            }
+            if (secondaryQuickPreset != null) {
+              TextButton(
+                onClick = { onQuickPresetExpense(secondaryQuickPreset) },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+              ) {
+                Text("+ ${MoneyFormatter.formatPesoCompact(secondaryQuickPreset.amountCents)} ${secondaryQuickPreset.label.lowercase()}")
+              }
+            }
           }
         }
         if (weekly.actualOtherExpensesCents > 0L) {
@@ -313,12 +405,57 @@ fun AllowanceBudgetScreen(
         }
         if (state.emergencySavingsTotalCents > 0L || weekly.emergencySavingsThisWeekCents > 0L) {
           CalmDivider(modifier = Modifier.padding(vertical = 8.dp))
-          MetricRow(
-            label = "Emergency savings",
-            value = MoneyFormatter.formatPeso(state.emergencySavingsTotalCents),
-            valueColor = semantic.positive,
-            boldValue = false
-          )
+          val goalCents = state.preferences.emergencySavingsGoalCents
+          val goalProgress = if (goalCents > 0L) {
+            (state.emergencySavingsTotalCents.toFloat() / goalCents.toFloat()).coerceIn(0f, 1f)
+          } else 0f
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text("Emergency savings", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              if (goalCents > 0L) {
+                Text(
+                  text = "Goal ${MoneyFormatter.formatPesoCompact(goalCents)} (${(goalProgress * 100).toInt()}%)",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+              }
+            }
+            Text(
+              text = MoneyFormatter.formatPeso(state.emergencySavingsTotalCents),
+              style = MaterialTheme.typography.bodyLarge,
+              fontWeight = FontWeight.SemiBold,
+              color = semantic.positive
+            )
+          }
+          if (goalCents > 0L) {
+            Spacer(modifier = Modifier.height(6.dp))
+            LinearProgressIndicator(
+              progress = { goalProgress },
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(5.dp)
+                .clip(RoundedCornerShape(3.dp)),
+              color = semantic.positive,
+              trackColor = MaterialTheme.colorScheme.surfaceContainer,
+              strokeCap = StrokeCap.Round
+            )
+          }
+          if (state.emergencySavingsTotalCents > 0L) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+              TextButton(
+                onClick = onOpenUseEmergencySavings,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+              ) {
+                Text("Use emergency savings")
+              }
+            }
+          }
         }
       }
     }
@@ -387,15 +524,16 @@ fun AllowanceBudgetScreen(
       }
     }
 
-    // 6. Progressive Disclosure: Recorded Allowance & Reserve Entries
+    // 6. Progressive Disclosure: This Week's Expenses, Allowances & Active Reserves
     item {
+      val shownAllowances = state.allowances.take(12)
       ExpandableSection(
-        title = "Allowance & reserve entries (${state.allowances.size + activeReserves.size})",
-        subtitle = "Review logged allowances or release reserved money"
+        title = "Entries this week & reserves (${activeReserves.size + weekExpenses.size + shownAllowances.size})",
+        subtitle = "Review or remove expenses, reserves, and allowances"
       ) {
-        if (state.allowances.isEmpty() && activeReserves.isEmpty()) {
+        if (shownAllowances.isEmpty() && activeReserves.isEmpty() && weekExpenses.isEmpty()) {
           Text(
-            text = "No allowance or active reserve entries yet.",
+            text = "No allowance, expense, or active reserve entries yet.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
           )
@@ -421,15 +559,57 @@ fun AllowanceBudgetScreen(
                     Text("Release")
                   }
                 }
-                if (idx < activeReserves.lastIndex || state.allowances.isNotEmpty()) {
+                if (idx < activeReserves.lastIndex || weekExpenses.isNotEmpty() || shownAllowances.isNotEmpty()) {
                   CalmDivider()
                 }
               }
             }
 
-            if (state.allowances.isNotEmpty()) {
+            if (weekExpenses.isNotEmpty()) {
+              CalmSectionLabel("Expenses this week", modifier = Modifier.padding(0.dp))
+              weekExpenses.forEachIndexed { idx, expense ->
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+                ) {
+                  Column(modifier = Modifier.weight(1f)) {
+                    Text(expense.title, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                      text = buildString {
+                        append("${ManilaTime.formatDisplay(expense.date)} · ${expense.category.label}")
+                        if (expense.isSchoolDay) append(" · School day")
+                      },
+                      style = MaterialTheme.typography.bodySmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                      text = "-${MoneyFormatter.formatPeso(expense.amountCents)}",
+                      style = MaterialTheme.typography.bodyLarge,
+                      fontWeight = FontWeight.SemiBold,
+                      color = MaterialTheme.colorScheme.onSurface
+                    )
+                    IconButton(onClick = { onDeleteExpense(expense.id) }) {
+                      Icon(
+                        Icons.Outlined.DeleteOutline,
+                        contentDescription = "Delete expense",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                      )
+                    }
+                  }
+                }
+                if (idx < weekExpenses.lastIndex || shownAllowances.isNotEmpty()) {
+                  CalmDivider()
+                }
+              }
+            }
+
+            if (shownAllowances.isNotEmpty()) {
               CalmSectionLabel("Allowance history", modifier = Modifier.padding(0.dp))
-              state.allowances.take(12).forEachIndexed { idx, record ->
+              shownAllowances.forEachIndexed { idx, record ->
                 Row(
                   modifier = Modifier.fillMaxWidth(),
                   horizontalArrangement = Arrangement.SpaceBetween,
@@ -460,7 +640,7 @@ fun AllowanceBudgetScreen(
                     }
                   }
                 }
-                if (idx < state.allowances.take(12).lastIndex) {
+                if (idx < shownAllowances.lastIndex) {
                   CalmDivider()
                 }
               }

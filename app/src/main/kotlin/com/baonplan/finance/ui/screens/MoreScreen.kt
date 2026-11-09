@@ -1,27 +1,40 @@
 package com.baonplan.finance.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.baonplan.finance.BuildConfig
+import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.BaonPlanUiState
 import com.baonplan.finance.ui.components.BaonCard
@@ -33,6 +46,7 @@ import com.baonplan.finance.ui.components.CalmSectionLabel
 fun MoreScreen(
   state: BaonPlanUiState,
   hasNotificationPermission: Boolean,
+  onToggleAppLock: (Boolean) -> Unit,
   onOpenCalendar: () -> Unit,
   onOpenTransactions: () -> Unit,
   onOpenReports: () -> Unit,
@@ -50,6 +64,11 @@ fun MoreScreen(
   }
   val budgetSummary =
     "${MoneyFormatter.formatPesoCompact(state.settings.minWeeklyAllowanceCents)}–${MoneyFormatter.formatPesoCompact(state.settings.maxWeeklyAllowanceCents)} · ${state.settings.schoolDaysPerWeek} school days"
+  val backupSubtitle = if (state.preferences.lastBackupEpochMillis > 0L) {
+    "Last backup: ${ManilaTime.formatTimestamp(state.preferences.lastBackupEpochMillis)}"
+  } else {
+    "Export JSON, CSV, or clear records"
+  }
 
   LazyColumn(
     modifier = modifier.fillMaxSize(),
@@ -129,9 +148,46 @@ fun MoreScreen(
             onClick = onOpenBudgetDefaults
           )
           CalmDivider()
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clickable { onToggleAppLock(!state.preferences.appLockEnabled) }
+              .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.Fingerprint,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+              Text(
+                text = "App lock",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+              )
+              Spacer(modifier = Modifier.height(2.dp))
+              Text(
+                text = "Require fingerprint or device PIN to open",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+              )
+            }
+            Switch(
+              checked = state.preferences.appLockEnabled,
+              onCheckedChange = onToggleAppLock
+            )
+          }
+          CalmDivider()
           BaonListRow(
             title = "Backup and restore",
-            subtitle = "Export JSON, CSV, or clear records",
+            subtitle = backupSubtitle,
             icon = Icons.Outlined.SaveAlt,
             onClick = onOpenBackup
           )
@@ -146,7 +202,7 @@ fun MoreScreen(
         BaonCard(contentPadding = 0.dp) {
           BaonListRow(
             title = "About BaonPlan",
-            subtitle = "PHP · Asia/Manila · Version 1.0",
+            subtitle = "PHP · Asia/Manila · Version ${BuildConfig.VERSION_NAME}",
             icon = Icons.Outlined.Info,
             onClick = onOpenAbout
           )

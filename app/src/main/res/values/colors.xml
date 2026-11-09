@@ -1,0 +1,10 @@
+<resources>
+    <color name="widget_bg">#FFFFFF</color>
+    <color name="widget_border">#E5E3DD</color>
+    <color name="widget_title">#1B1E21</color>
+    <color name="widget_subtitle">#5D636A</color>
+    <color name="widget_positive">#14796F</color>
+    <color name="widget_danger">#B33A34</color>
+    <color name="widget_button_bg">#DDF1EE</color>
+    <color name="widget_button_fg">#0A3A36</color>
+</resources>

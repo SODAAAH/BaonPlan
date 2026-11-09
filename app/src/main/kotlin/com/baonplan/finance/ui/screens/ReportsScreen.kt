@@ -37,15 +37,18 @@ import androidx.compose.ui.unit.dp
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.BaonPlanUiState
 import com.baonplan.finance.ui.components.BadgeTone
 import com.baonplan.finance.ui.components.BaonCard
+import com.baonplan.finance.ui.components.CalmDivider
 import com.baonplan.finance.ui.components.InfoCallout
 import com.baonplan.finance.ui.components.MetricRow
 import com.baonplan.finance.ui.components.SectionHeader
 import com.baonplan.finance.ui.theme.LocalBaonColors
 import java.util.Locale
+import androidx.compose.foundation.layout.padding
 
 @Composable
 fun ReportsScreen(
@@ -183,6 +186,24 @@ fun ReportsScreen(
           trackColor = MaterialTheme.colorScheme.surfaceContainer,
           strokeCap = StrokeCap.Round
         )
+        val payoff = state.payoffInsights
+        if (payoff.includedDebtsCount > 0 && payoff.estimatedDebtFreeDateIso != null) {
+          Spacer(modifier = Modifier.height(12.dp))
+          MetricRow(
+            label = "Est. debt-free (scheduled)",
+            subtitle = buildString {
+              payoff.estimatedWeeksRemaining?.let { weeks ->
+                append("~${weeks}w remaining")
+              }
+              if (payoff.includesEstimatedDates) {
+                if (isNotEmpty()) append(" · ")
+                append("Includes estimated dates")
+              }
+            },
+            value = ManilaTime.formatDisplay(payoff.estimatedDebtFreeDateIso),
+            boldValue = false
+          )
+        }
         if (unconfirmedOrUnknown.isNotEmpty()) {
           Spacer(modifier = Modifier.height(12.dp))
           InfoCallout(
@@ -191,6 +212,44 @@ fun ReportsScreen(
             body = "Debts with unknown or unconfirmed schedules (${unconfirmedOrUnknown.joinToString { it.name }}) are left out of automated payoff projections.",
             tone = BadgeTone.WARNING
           )
+        }
+      }
+    }
+
+    // 2b. Repayment Priority Advisor
+    val payoffAdvisor = state.payoffInsights
+    if (activeDebts.isNotEmpty() && (payoffAdvisor.soonestDueDebt != null || payoffAdvisor.quickestWinDebt != null)) {
+      item {
+        SectionHeader(title = "Repayment focus")
+        Spacer(modifier = Modifier.height(8.dp))
+        BaonCard {
+          payoffAdvisor.soonestDueDebt?.let { soonest ->
+            MetricRow(
+              label = "Due soonest",
+              subtitle = "${soonest.debtName} · ${soonest.dueDateIso?.let { ManilaTime.formatDisplay(it) } ?: soonest.dateStatus.label}",
+              value = MoneyFormatter.formatPeso(soonest.amountCents)
+            )
+          }
+          payoffAdvisor.quickestWinDebt?.let { quickest ->
+            val sameDebt = payoffAdvisor.soonestDueDebt?.debtId == quickest.debtId
+            if (payoffAdvisor.soonestDueDebt != null) {
+              CalmDivider(modifier = Modifier.padding(vertical = 10.dp))
+            }
+            MetricRow(
+              label = if (sameDebt) "Smallest balance (same loan)" else "Smallest balance first",
+              subtitle = "${quickest.name} · ${quickest.frequency.label}",
+              value = MoneyFormatter.formatPeso(quickest.remainingBalanceCents),
+              valueColor = semantic.positive
+            )
+            if (!sameDebt) {
+              Spacer(modifier = Modifier.height(6.dp))
+              Text(
+                text = "Putting any extra ₱50–₱100 reserve toward ${quickest.name} finishes a recurring bill faster and frees up weekly baon.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+          }
         }
       }
     }
@@ -237,6 +296,85 @@ fun ReportsScreen(
                     cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
                   )
                 }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 3b. Last 4 Weeks Comparison
+    val trends = state.weeklyTrends
+    if (trends.any { it.allowanceCents > 0L || it.expensesCents > 0L || it.repaymentsCents > 0L }) {
+      item {
+        SectionHeader(title = "Last 4 weeks")
+        Spacer(modifier = Modifier.height(8.dp))
+        BaonCard {
+          val maxWeekCents = trends
+            .maxOf { maxOf(it.allowanceCents, it.expensesCents, it.repaymentsCents) }
+            .coerceAtLeast(10_000L)
+          val barAllowanceColor = palette.getOrElse(0) { semantic.positive }
+          val barExpenseColor = palette.getOrElse(1) { MaterialTheme.colorScheme.primary }
+          val barPaidColor = semantic.positive
+
+          Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            trends.forEachIndexed { idx, point ->
+              Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+                ) {
+                  Text(
+                    text = point.label,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                  )
+                  Text(
+                    text = "${ManilaTime.formatShort(ManilaTime.formatIso(point.weekStartDate))}–${ManilaTime.formatShort(ManilaTime.formatIso(point.weekEndDate))}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+                }
+                Text(
+                  text = "In ${MoneyFormatter.formatPesoCompact(point.allowanceCents)} · Spent ${MoneyFormatter.formatPesoCompact(point.expensesCents)} · Paid ${MoneyFormatter.formatPesoCompact(point.repaymentsCents)}",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Canvas(
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .height(14.dp)
+                ) {
+                  val barH = 3.5.dp.toPx()
+                  val gap = 1.5.dp.toPx()
+                  val items = listOf(
+                    point.allowanceCents to barAllowanceColor,
+                    point.expensesCents to barExpenseColor,
+                    point.repaymentsCents to barPaidColor
+                  )
+                  items.forEachIndexed { barIdx, (cents, color) ->
+                    val y = barIdx * (barH + gap)
+                    drawRoundRect(
+                      color = color.copy(alpha = 0.14f),
+                      topLeft = Offset(0f, y),
+                      size = Size(size.width, barH),
+                      cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                    )
+                    val ratio = (cents.toFloat() / maxWeekCents.toFloat()).coerceIn(0f, 1f)
+                    if (ratio > 0f) {
+                      drawRoundRect(
+                        color = color,
+                        topLeft = Offset(0f, y),
+                        size = Size(size.width * ratio, barH),
+                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                      )
+                    }
+                  }
+                }
+              }
+              if (idx < trends.lastIndex) {
+                CalmDivider()
               }
             }
           }

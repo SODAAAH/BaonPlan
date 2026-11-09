@@ -19,8 +19,12 @@ import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.data.repository.BaonPlanRepository
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.ExpensePreset
+import com.baonplan.finance.domain.model.PayoffProjectionSummary
 import com.baonplan.finance.domain.model.PaymentOverview
+import com.baonplan.finance.domain.model.PriorWeekCarryOverCandidate
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.RepaymentProgressSummary
 import com.baonplan.finance.domain.model.ReserveStatus
@@ -28,6 +32,8 @@ import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.ScenarioPlan
 import com.baonplan.finance.domain.model.ThemeMode
 import com.baonplan.finance.domain.model.WeeklyBudgetSummary
+import com.baonplan.finance.domain.model.WeeklyDuesReadiness
+import com.baonplan.finance.domain.model.WeeklyTrendPoint
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.notifications.NotificationHelper
@@ -87,7 +93,29 @@ data class BaonPlanUiState(
     emergencySavingsCents = 5_000L
   ),
   val activeDebtReserveTotalCents: Long = 0L,
-  val emergencySavingsTotalCents: Long = 0L
+  val emergencySavingsTotalCents: Long = 0L,
+  val duesReadiness: WeeklyDuesReadiness = WeeklyDuesReadiness(
+    dueNext7DaysCents = 0L,
+    overdueCents = 0L,
+    dueNext7DaysCount = 0,
+    activeDebtReserveCents = 0L,
+    availableCashCents = 0L,
+    shortfallAfterReserveCents = 0L,
+    unmetShortfallCents = 0L,
+    status = DuesCoverageStatus.NO_DUES
+  ),
+  val payoffInsights: PayoffProjectionSummary = PayoffProjectionSummary(
+    includedDebtsCount = 0,
+    excludedDebtsCount = 0,
+    includedTotalBalanceCents = 0L,
+    estimatedDebtFreeDateIso = null,
+    estimatedWeeksRemaining = null,
+    includesEstimatedDates = false,
+    quickestWinDebt = null,
+    soonestDueDebt = null
+  ),
+  val weeklyTrends: List<WeeklyTrendPoint> = emptyList(),
+  val priorWeekCarryOver: PriorWeekCarryOverCandidate? = null
 )
 
 private data class CoreLedgerBundle(
@@ -164,8 +192,37 @@ class BaonPlanViewModel(
       .sumOf { it.remainingReservedCents }
 
     val emergencySavingsTotal = reserves
-      .filter { it.reserveType == ReserveType.EMERGENCY_SAVINGS && it.status != ReserveStatus.RELEASED }
-      .sumOf { it.amountCents }
+      .filter { it.reserveType == ReserveType.EMERGENCY_SAVINGS && it.status == ReserveStatus.RESERVED }
+      .sumOf { it.remainingReservedCents }
+
+    val duesReadiness = FinancialCalculator.calculateWeeklyDuesReadiness(
+      today = today,
+      paymentOverview = paymentOverview,
+      weeklySummary = weeklySummary,
+      activeDebtReserveTotalCents = activeDebtReserveTotal
+    )
+    val payoffInsights = FinancialCalculator.calculatePayoffInsights(
+      debts = ledger.debts,
+      installments = ledger.installments,
+      paymentOverview = paymentOverview,
+      today = today
+    )
+    val weeklyTrends = FinancialCalculator.calculateWeeklyTrends(
+      today = today,
+      allowances = ledger.allowances,
+      expenses = ledger.expenses,
+      transactions = ledger.transactions,
+      weeksCount = 4
+    )
+    val priorWeekCarryOver = FinancialCalculator.calculatePriorWeekCarryOverCandidate(
+      today = today,
+      settings = settings,
+      allowances = ledger.allowances,
+      expenses = ledger.expenses,
+      reserves = reserves,
+      transactions = ledger.transactions,
+      resolvedWeekIso = prefs.lastResolvedCarryOverWeekIso
+    )
 
     BaonPlanUiState(
       isLoading = false,
@@ -185,7 +242,11 @@ class BaonPlanViewModel(
       scenario400 = scenarioMin,
       scenario500 = scenarioMax,
       activeDebtReserveTotalCents = activeDebtReserveTotal,
-      emergencySavingsTotalCents = emergencySavingsTotal
+      emergencySavingsTotalCents = emergencySavingsTotal,
+      duesReadiness = duesReadiness,
+      payoffInsights = payoffInsights,
+      weeklyTrends = weeklyTrends,
+      priorWeekCarryOver = priorWeekCarryOver
     )
   }.stateIn(
     scope = viewModelScope,
@@ -279,10 +340,58 @@ class BaonPlanViewModel(
     }
   }
 
+  fun withdrawEmergencySavings(
+    amountCents: Long,
+    dateIso: String,
+    logAsExpense: Boolean,
+    title: String,
+    notes: String
+  ) {
+    viewModelScope.launch {
+      val ok = repository.withdrawEmergencySavings(amountCents, dateIso, logAsExpense, title, notes)
+      emitMessage(
+        if (ok) {
+          if (logAsExpense) "Used ${MoneyFormatter.formatPeso(amountCents)} from emergency savings"
+          else "Moved ${MoneyFormatter.formatPeso(amountCents)} to this week's cash"
+        } else {
+          "Insufficient emergency savings balance"
+        }
+      )
+    }
+  }
+
+  fun carryOverPriorWeek(prevWeekStartIso: String, amountCents: Long, todayIso: String) {
+    viewModelScope.launch {
+      repository.carryOverPriorWeekCash(prevWeekStartIso, amountCents, todayIso)
+      emitMessage("Carried ${MoneyFormatter.formatPeso(amountCents)} into this week")
+    }
+  }
+
+  fun sweepPriorWeekToReserve(prevWeekStartIso: String, reserveType: ReserveType, amountCents: Long) {
+    viewModelScope.launch {
+      repository.sweepPriorWeekCashToReserve(prevWeekStartIso, reserveType, amountCents)
+      val dest = if (reserveType == ReserveType.DEBT_REPAYMENT_RESERVE) "debt reserve" else "emergency savings"
+      emitMessage("Moved ${MoneyFormatter.formatPeso(amountCents)} to $dest")
+    }
+  }
+
+  fun dismissPriorWeekCarryOver(prevWeekStartIso: String) {
+    viewModelScope.launch {
+      repository.dismissPriorWeekCarryOver(prevWeekStartIso)
+    }
+  }
+
   fun saveDebt(debt: DebtEntity) {
     viewModelScope.launch {
       repository.saveDebt(debt)
       emitMessage("Saved ${debt.name}")
+    }
+  }
+
+  fun deleteDebt(debtId: Long, name: String) {
+    viewModelScope.launch {
+      repository.deleteDebt(debtId)
+      emitMessage("Deleted $name")
     }
   }
 
@@ -394,6 +503,34 @@ class BaonPlanViewModel(
   fun setThemeMode(mode: ThemeMode) {
     viewModelScope.launch {
       repository.setThemeMode(mode)
+    }
+  }
+
+  fun setReminderLeadDays(days: Int) {
+    viewModelScope.launch {
+      repository.setReminderLeadDays(days)
+      emitMessage("Advance notice set to $days day${if (days == 1) "" else "s"}")
+    }
+  }
+
+  fun setEmergencySavingsGoalCents(goalCents: Long) {
+    viewModelScope.launch {
+      repository.setEmergencySavingsGoalCents(goalCents)
+      emitMessage("Emergency fund goal updated")
+    }
+  }
+
+  fun setAppLockEnabled(enabled: Boolean) {
+    viewModelScope.launch {
+      repository.setAppLockEnabled(enabled)
+      emitMessage(if (enabled) "App lock enabled" else "App lock turned off")
+    }
+  }
+
+  fun setExpensePresets(presets: List<ExpensePreset>) {
+    viewModelScope.launch {
+      repository.setExpensePresets(presets)
+      emitMessage("Quick presets saved")
     }
   }
 

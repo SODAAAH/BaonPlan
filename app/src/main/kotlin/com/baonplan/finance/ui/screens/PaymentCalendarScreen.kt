@@ -45,18 +45,21 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.NextPaymentItem
 import com.baonplan.finance.domain.model.PaymentUrgency
 import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.BaonPlanUiState
+import com.baonplan.finance.ui.components.BadgeTone
 import com.baonplan.finance.ui.components.BaonCard
 import com.baonplan.finance.ui.components.CalmDivider
 import com.baonplan.finance.ui.components.CalmSectionLabel
 import com.baonplan.finance.ui.components.CalmSegmentedToggle
 import com.baonplan.finance.ui.components.DueDateStatusBadge
 import com.baonplan.finance.ui.components.EmptyStateCard
+import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.components.UrgencyBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
 import java.time.DayOfWeek
@@ -292,6 +295,49 @@ fun PaymentCalendarScreen(
         }
       }
     } else {
+      val dues = state.duesReadiness
+      if (dues.status != DuesCoverageStatus.NO_DUES) {
+        item {
+          BaonCard {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.Top
+            ) {
+              Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                CalmSectionLabel("Next 7 days due", modifier = Modifier.padding(0.dp))
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                  text = MoneyFormatter.formatPeso(dues.dueNext7DaysCents),
+                  style = MaterialTheme.typography.headlineSmall,
+                  color = MaterialTheme.colorScheme.onSurface
+                )
+              }
+              val (badgeLabel, badgeTone) = when (dues.status) {
+                DuesCoverageStatus.COVERED_BY_RESERVE -> "Covered by reserve" to BadgeTone.POSITIVE
+                DuesCoverageStatus.COVERED_WITH_CASH -> "Covered with cash" to BadgeTone.POSITIVE
+                DuesCoverageStatus.SHORTFALL -> "${MoneyFormatter.formatPesoCompact(dues.unmetShortfallCents)} short" to BadgeTone.WARNING
+                DuesCoverageStatus.NO_DUES -> "" to BadgeTone.NEUTRAL
+              }
+              StatusBadge(text = badgeLabel, tone = badgeTone)
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+              text = buildString {
+                append("${dues.dueNext7DaysCount} payment${if (dues.dueNext7DaysCount == 1) "" else "s"}")
+                append(" · Reserve ${MoneyFormatter.formatPesoCompact(dues.activeDebtReserveCents)}")
+                append(" · Cash left ${MoneyFormatter.formatPesoCompact(dues.availableCashCents)}")
+                if (dues.overdueCents > 0L) {
+                  append(" · Overdue ${MoneyFormatter.formatPesoCompact(dues.overdueCents)}")
+                }
+              },
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+          }
+        }
+      }
+
       val hasAnyUpcomingOrUnconfirmed = overview.overduePayments.isNotEmpty() ||
         overview.dueTodayPayments.isNotEmpty() ||
         overview.dueTomorrowPayments.isNotEmpty() ||

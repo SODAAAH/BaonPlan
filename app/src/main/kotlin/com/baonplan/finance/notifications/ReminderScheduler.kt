@@ -29,7 +29,7 @@ object ReminderScheduler {
     }
 
     val initialDelayMinutes = computeInitialDelayMinutes(reminderHour, reminderMinute)
-    val request = PeriodicWorkRequestBuilder<ReminderWorker>(12, TimeUnit.HOURS)
+    val request = PeriodicWorkRequestBuilder<ReminderWorker>(24, TimeUnit.HOURS)
       .setInitialDelay(initialDelayMinutes, TimeUnit.MINUTES)
       .build()
 

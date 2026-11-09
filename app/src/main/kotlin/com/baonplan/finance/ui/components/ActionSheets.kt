@@ -49,12 +49,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.ExpensePreset
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.util.ManilaTime
@@ -260,6 +262,7 @@ fun RecordAllowanceDialog(
 @Composable
 fun AddExpenseDialog(
   defaultFoodCents: Long,
+  presets: List<ExpensePreset> = emptyList(),
   today: LocalDate,
   onConfirm: (
     title: String,
@@ -273,6 +276,7 @@ fun AddExpenseDialog(
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var category by remember { mutableStateOf(ExpenseCategory.SCHOOL_FOOD) }
+  var isSchoolDay by remember { mutableStateOf(true) }
   var amountText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(defaultFoodCents)) }
   var dateIso by remember { mutableStateOf(ManilaTime.formatIso(today)) }
   var notes by remember { mutableStateOf("") }
@@ -303,6 +307,28 @@ fun AddExpenseDialog(
       verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
       Text("Add expense", style = MaterialTheme.typography.headlineSmall)
+      if (presets.isNotEmpty()) {
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+          presets.forEach { preset ->
+            FilterChip(
+              selected = category == preset.category &&
+                MoneyFormatter.parsePesoToCents(amountText) == preset.amountCents &&
+                notes.trim() == preset.label,
+              onClick = {
+                category = preset.category
+                amountText = MoneyFormatter.formatEditableAmount(preset.amountCents)
+                isSchoolDay = preset.isSchoolDay
+                notes = preset.label
+                errorText = null
+              },
+              label = { Text("${preset.label} · ${MoneyFormatter.formatPesoCompact(preset.amountCents)}") }
+            )
+          }
+        }
+      }
       OutlinedTextField(
         value = amountText,
         onValueChange = {
@@ -333,6 +359,7 @@ fun AddExpenseDialog(
               selected = category == cat,
               onClick = {
                 category = cat
+                isSchoolDay = (cat == ExpenseCategory.SCHOOL_FOOD || cat == ExpenseCategory.TRANSPORT)
                 if (cat == ExpenseCategory.SCHOOL_FOOD && amountText.isBlank()) {
                   amountText = MoneyFormatter.formatEditableAmount(defaultFoodCents)
                 }
@@ -341,6 +368,18 @@ fun AddExpenseDialog(
             )
           }
         }
+      }
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+      ) {
+        Text(
+          text = "Count toward school days",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Switch(checked = isSchoolDay, onCheckedChange = { isSchoolDay = it })
       }
       DatePickerField(
         label = "Date",
@@ -372,7 +411,7 @@ fun AddExpenseDialog(
               cents,
               dateIso,
               category,
-              category == ExpenseCategory.SCHOOL_FOOD,
+              isSchoolDay,
               cleanNote
             )
             onDismiss()
@@ -1545,4 +1584,191 @@ fun CorrectTransactionDialog(
       )
     }
   }
+}
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun UseEmergencySavingsDialog(
+  availableSavingsCents: Long,
+  today: LocalDate,
+  onConfirm: (
+    amountCents: Long,
+    dateIso: String,
+    logAsExpense: Boolean,
+    title: String,
+    notes: String
+  ) -> Unit,
+  onDismiss: () -> Unit
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val suggestedDefault = minOf(availableSavingsCents, 5_000L).takeIf { it > 0L } ?: availableSavingsCents
+  var amountText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(suggestedDefault)) }
+  var logAsExpense by remember { mutableStateOf(true) }
+  var title by remember { mutableStateOf("") }
+  var dateIso by remember { mutableStateOf(ManilaTime.formatIso(today)) }
+  var notes by remember { mutableStateOf("") }
+  var errorText by remember { mutableStateOf<String?>(null) }
+
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.surface
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .verticalScroll(rememberScrollState())
+        .navigationBarsPadding()
+        .imePadding()
+        .padding(horizontal = 20.dp)
+        .padding(bottom = 20.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+      Text("Use emergency savings", style = MaterialTheme.typography.headlineSmall)
+      Text(
+        text = "Available balance: ${MoneyFormatter.formatPeso(availableSavingsCents)}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+      )
+      FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+          selected = logAsExpense,
+          onClick = { logAsExpense = true },
+          label = { Text("Spend as emergency expense") }
+        )
+        FilterChip(
+          selected = !logAsExpense,
+          onClick = { logAsExpense = false },
+          label = { Text("Move to this week's cash") }
+        )
+      }
+      val quickAmounts = listOfNotNull(
+        5_000L.takeIf { it < availableSavingsCents },
+        10_000L.takeIf { it < availableSavingsCents },
+        availableSavingsCents
+      ).distinct()
+      if (quickAmounts.isNotEmpty()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          quickAmounts.forEach { cents ->
+            val label = if (cents == availableSavingsCents) {
+              "All (${MoneyFormatter.formatPesoCompact(cents)})"
+            } else {
+              MoneyFormatter.formatPesoCompact(cents)
+            }
+            FilterChip(
+              selected = MoneyFormatter.parsePesoToCents(amountText) == cents,
+              onClick = {
+                amountText = MoneyFormatter.formatEditableAmount(cents)
+                errorText = null
+              },
+              label = { Text(label) }
+            )
+          }
+        }
+      }
+      OutlinedTextField(
+        value = amountText,
+        onValueChange = { amountText = it; errorText = null },
+        label = { Text("Amount to withdraw") },
+        prefix = { Text("₱") },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        singleLine = true,
+        isError = errorText != null,
+        supportingText = errorText?.let { msg -> { Text(msg) } },
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+      )
+      OutlinedTextField(
+        value = title,
+        onValueChange = { title = it },
+        label = { Text(if (logAsExpense) "What was it for? (optional)" else "Label (optional)") },
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+      )
+      DatePickerField(
+        label = "Date",
+        dateIso = dateIso,
+        onDateChanged = { if (it != null) dateIso = it }
+      )
+      OutlinedTextField(
+        value = notes,
+        onValueChange = { notes = it },
+        label = { Text("Note (optional)") },
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+      )
+      SheetButtonRow(
+        confirmText = if (logAsExpense) "Use savings" else "Move to cash",
+        onCancel = onDismiss,
+        onConfirm = {
+          val cents = MoneyFormatter.parsePesoToCents(amountText)
+          when {
+            cents == null || cents <= 0L -> errorText = "Enter a valid peso amount"
+            cents > availableSavingsCents -> errorText = "Cannot exceed ${MoneyFormatter.formatPeso(availableSavingsCents)}"
+            else -> {
+              onConfirm(cents, dateIso, logAsExpense, title.trim(), notes.trim())
+              onDismiss()
+            }
+          }
+        }
+      )
+    }
+  }
+}
+
+@Composable
+fun ConfirmMarkInstallmentDialog(
+  debtName: String,
+  installment: InstallmentEntity,
+  availableDebtReserveCents: Long,
+  onConfirm: (useDebtReserve: Boolean) -> Unit,
+  onDismiss: () -> Unit
+) {
+  val remainingDue = (installment.amountDueCents - installment.paidAmountCents).coerceAtLeast(0L)
+  var useReserve by remember { mutableStateOf(availableDebtReserveCents > 0L) }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Mark payment #${installment.installmentNumber} paid?") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+          text = "$debtName · ${MoneyFormatter.formatPeso(remainingDue)} (${ManilaTime.formatDisplay(installment.dueDate)})",
+          style = MaterialTheme.typography.bodyMedium
+        )
+        if (availableDebtReserveCents > 0L) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("Use debt reserve", style = MaterialTheme.typography.labelLarge)
+              Text(
+                text = "${MoneyFormatter.formatPeso(availableDebtReserveCents)} reserved",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+            Switch(checked = useReserve, onCheckedChange = { useReserve = it })
+          }
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = {
+          onConfirm(availableDebtReserveCents > 0L && useReserve)
+          onDismiss()
+        }
+      ) {
+        Text("Confirm paid")
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) { Text("Cancel") }
+    }
+  )
 }

@@ -18,9 +18,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Unarchive
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -33,6 +36,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -71,9 +78,11 @@ fun DebtDetailScreen(
   onGenerateSchedule: (DebtEntity) -> Unit,
   onMarkInstallmentPaid: (InstallmentEntity) -> Unit,
   onArchiveToggle: (DebtEntity) -> Unit,
+  onDeleteDebt: (DebtEntity) -> Unit,
   onCorrectTransaction: (TransactionEntity) -> Unit
 ) {
   val semantic = LocalBaonColors.current
+  var showDeleteConfirm by remember { mutableStateOf(false) }
 
   Scaffold(
     containerColor = MaterialTheme.colorScheme.background,
@@ -448,6 +457,56 @@ fun DebtDetailScreen(
           }
         }
       }
+
+      // 6. Permanent Delete Option
+      item {
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+          horizontalArrangement = Arrangement.Center
+        ) {
+          TextButton(
+            onClick = { showDeleteConfirm = true },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+          ) {
+            Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Delete debt")
+          }
+        }
+      }
     }
+  }
+
+  if (showDeleteConfirm && debt != null) {
+    val activeTxCount = transactions.count { !it.isVoided }
+    AlertDialog(
+      onDismissRequest = { showDeleteConfirm = false },
+      title = { Text("Delete ${debt.name}?") },
+      text = {
+        Text(
+          buildString {
+            append("This permanently removes ${debt.name} and its payment schedule from your device.")
+            if (activeTxCount > 0) {
+              append("\n\n$activeTxCount linked payment record(s) will be voided, and any debt reserve used for them will be restored.")
+            }
+          }
+        )
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            showDeleteConfirm = false
+            onDeleteDebt(debt)
+            onBack()
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ) {
+          Text("Delete")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+      }
+    )
   }
 }

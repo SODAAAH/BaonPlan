@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +35,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -44,15 +47,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.baonplan.finance.BuildConfig
+import com.baonplan.finance.data.local.defaultExpensePresets
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.model.ExpensePreset
 import com.baonplan.finance.domain.model.ThemeMode
+import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.BaonPlanUiState
 import com.baonplan.finance.ui.components.BadgeTone
 import com.baonplan.finance.ui.components.BaonCard
 import com.baonplan.finance.ui.components.CalmDivider
 import com.baonplan.finance.ui.components.CalmSectionLabel
+import com.baonplan.finance.ui.components.ExpandableSection
 import com.baonplan.finance.ui.components.InfoCallout
 import com.baonplan.finance.ui.components.MetricRow
 import com.baonplan.finance.ui.components.StatusBadge
@@ -144,12 +152,13 @@ fun AppearanceScreen(
   }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun NotificationsScreen(
   state: BaonPlanUiState,
   hasNotificationPermission: Boolean,
   onSaveSettings: (UserSettingsEntity) -> Unit,
+  onSaveLeadDays: (Int) -> Unit,
   onRequestNotificationPermission: () -> Unit,
   onOpenSystemNotificationSettings: () -> Unit,
   onSendTestNotification: () -> Unit,
@@ -157,6 +166,8 @@ fun NotificationsScreen(
   modifier: Modifier = Modifier
 ) {
   val settings = state.settings
+  var showTimePicker by remember { mutableStateOf(false) }
+
   LazyColumn(
     modifier = modifier.fillMaxSize(),
     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
@@ -186,6 +197,37 @@ fun NotificationsScreen(
           )
         }
         CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+            Text("Preferred check time", style = MaterialTheme.typography.labelLarge)
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+              text = ManilaTime.formatTime12h(settings.reminderHour, settings.reminderMinute),
+              style = MaterialTheme.typography.bodyMedium,
+              color = MaterialTheme.colorScheme.primary
+            )
+          }
+          TextButton(onClick = { showTimePicker = true }) {
+            Text("Change")
+          }
+        }
+        CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
+        Text("Advance due-date notice", style = MaterialTheme.typography.labelLarge)
+        Spacer(modifier = Modifier.height(8.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+          listOf(1, 2, 3, 7).forEach { days ->
+            FilterChip(
+              selected = state.preferences.reminderLeadDays == days,
+              onClick = { onSaveLeadDays(days) },
+              label = { Text("$days day${if (days == 1) "" else "s"}") }
+            )
+          }
+        }
+        CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
         Text("Weekly allowance check-in day", style = MaterialTheme.typography.labelLarge)
         Spacer(modifier = Modifier.height(8.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -202,10 +244,11 @@ fun NotificationsScreen(
     }
 
     item {
+      val lastCheck = ManilaTime.formatTimestamp(state.preferences.lastReminderNotificationEpochMillis)
       InfoCallout(
         icon = Icons.Outlined.NotificationsActive,
         title = if (hasNotificationPermission) "Notification permission granted" else "Permission needed on Android 13+",
-        body = "Background reminder checks use WorkManager and may be delayed by Android Doze mode or manufacturer battery restrictions.",
+        body = "Last background check: $lastCheck. Checks use WorkManager and may be delayed by Android Doze mode or battery optimization.",
         tone = if (hasNotificationPermission) BadgeTone.POSITIVE else BadgeTone.WARNING
       )
     }
@@ -247,12 +290,49 @@ fun NotificationsScreen(
       }
     }
   }
+
+  if (showTimePicker) {
+    val timePickerState = rememberTimePickerState(
+      initialHour = settings.reminderHour,
+      initialMinute = settings.reminderMinute,
+      is24Hour = false
+    )
+    AlertDialog(
+      onDismissRequest = { showTimePicker = false },
+      title = { Text("Preferred check time") },
+      text = {
+        TimePicker(state = timePickerState)
+      },
+      confirmButton = {
+        Button(
+          onClick = {
+            onSaveSettings(
+              settings.copy(
+                reminderHour = timePickerState.hour,
+                reminderMinute = timePickerState.minute
+              )
+            )
+            showTimePicker = false
+          }
+        ) {
+          Text("Save")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showTimePicker = false }) { Text("Cancel") }
+      }
+    )
+  }
 }
 
 @Composable
 fun BudgetDefaultsScreen(
   settings: UserSettingsEntity,
+  emergencyGoalCents: Long,
+  expensePresets: List<ExpensePreset>,
   onSaveSettings: (UserSettingsEntity) -> Unit,
+  onSaveEmergencyGoal: (Long) -> Unit,
+  onSaveExpensePresets: (List<ExpensePreset>) -> Unit,
   modifier: Modifier = Modifier
 ) {
   var minAllowanceText by remember(settings.minWeeklyAllowanceCents) {
@@ -278,6 +358,18 @@ fun BudgetDefaultsScreen(
   }
   var debtReserveTargetText by remember(settings.weeklyDebtReserveTargetCents) {
     mutableStateOf(MoneyFormatter.formatEditableAmount(settings.weeklyDebtReserveTargetCents))
+  }
+  var overallEmergencyGoalText by remember(emergencyGoalCents) {
+    mutableStateOf(MoneyFormatter.formatEditableAmount(emergencyGoalCents))
+  }
+
+  val basePresets = remember(expensePresets) {
+    expensePresets.ifEmpty { defaultExpensePresets() }
+  }
+  var presetDrafts by remember(basePresets) {
+    mutableStateOf(
+      basePresets.map { it.label to MoneyFormatter.formatEditableAmount(it.amountCents) }
+    )
   }
 
   val computedFoodBudget = FinancialCalculator.calculateWeeklyFoodBudget(
@@ -365,6 +457,28 @@ fun BudgetDefaultsScreen(
             OutlinedTextField(
               value = emergencyTargetText,
               onValueChange = { emergencyTargetText = it },
+              label = { Text("Weekly emergency") },
+              prefix = { Text("₱") },
+              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+              singleLine = true,
+              shape = RoundedCornerShape(12.dp),
+              modifier = Modifier.weight(1f)
+            )
+          }
+          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(
+              value = debtReserveTargetText,
+              onValueChange = { debtReserveTargetText = it },
+              label = { Text("Weekly debt reserve") },
+              prefix = { Text("₱") },
+              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+              singleLine = true,
+              shape = RoundedCornerShape(12.dp),
+              modifier = Modifier.weight(1f)
+            )
+            OutlinedTextField(
+              value = overallEmergencyGoalText,
+              onValueChange = { overallEmergencyGoalText = it },
               label = { Text("Emergency goal") },
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -373,16 +487,6 @@ fun BudgetDefaultsScreen(
               modifier = Modifier.weight(1f)
             )
           }
-          OutlinedTextField(
-            value = debtReserveTargetText,
-            onValueChange = { debtReserveTargetText = it },
-            label = { Text("Planned weekly debt reserve") },
-            prefix = { Text("₱") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-          )
           Spacer(modifier = Modifier.height(4.dp))
           Button(
             onClick = {
@@ -394,6 +498,7 @@ fun BudgetDefaultsScreen(
               val otherC = MoneyFormatter.parsePesoToCents(otherBufferText) ?: settings.weeklyOtherExpensesBudgetCents
               val emergC = MoneyFormatter.parsePesoToCents(emergencyTargetText) ?: settings.weeklyEmergencySavingsTargetCents
               val debtResC = MoneyFormatter.parsePesoToCents(debtReserveTargetText) ?: settings.weeklyDebtReserveTargetCents
+              val overallGoalC = MoneyFormatter.parsePesoToCents(overallEmergencyGoalText)
               onSaveSettings(
                 settings.copy(
                   minWeeklyAllowanceCents = minC,
@@ -407,6 +512,9 @@ fun BudgetDefaultsScreen(
                   weeklyDebtReserveTargetCents = debtResC
                 )
               )
+              if (overallGoalC != null && overallGoalC >= 0L) {
+                onSaveEmergencyGoal(overallGoalC)
+              }
             },
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
@@ -416,11 +524,92 @@ fun BudgetDefaultsScreen(
         }
       }
     }
+
+    item {
+      ExpandableSection(
+        title = "Quick expense presets",
+        subtitle = "1-tap chips shown in Add expense & Budget"
+      ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+          basePresets.forEachIndexed { idx, preset ->
+            val draft = presetDrafts.getOrElse(idx) {
+              preset.label to MoneyFormatter.formatEditableAmount(preset.amountCents)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+              Text(
+                text = preset.category.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                  value = draft.first,
+                  onValueChange = { newLabel ->
+                    presetDrafts = presetDrafts.toMutableList().also { list ->
+                      if (idx in list.indices) list[idx] = newLabel to draft.second
+                    }
+                  },
+                  label = { Text("Label") },
+                  singleLine = true,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier.weight(1.3f)
+                )
+                OutlinedTextField(
+                  value = draft.second,
+                  onValueChange = { newAmt ->
+                    presetDrafts = presetDrafts.toMutableList().also { list ->
+                      if (idx in list.indices) list[idx] = draft.first to newAmt
+                    }
+                  },
+                  label = { Text("Amount") },
+                  prefix = { Text("₱") },
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                  singleLine = true,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier.weight(1f)
+                )
+              }
+            }
+          }
+          Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+              onClick = {
+                val defaults = defaultExpensePresets()
+                presetDrafts = defaults.map { it.label to MoneyFormatter.formatEditableAmount(it.amountCents) }
+                onSaveExpensePresets(defaults)
+              },
+              shape = RoundedCornerShape(12.dp),
+              modifier = Modifier.weight(1f)
+            ) {
+              Text("Reset")
+            }
+            Button(
+              onClick = {
+                val updated = basePresets.mapIndexed { idx, preset ->
+                  val draft = presetDrafts.getOrNull(idx)
+                  val label = draft?.first?.trim()?.takeIf { it.isNotEmpty() } ?: preset.label
+                  val amt = draft?.second?.let { MoneyFormatter.parsePesoToCents(it) }
+                    ?.takeIf { it > 0L } ?: preset.amountCents
+                  preset.copy(label = label, amountCents = amt)
+                }
+                onSaveExpensePresets(updated)
+              },
+              shape = RoundedCornerShape(12.dp),
+              modifier = Modifier.weight(1.4f)
+            ) {
+              Text("Save presets")
+            }
+          }
+        }
+      }
+    }
   }
 }
 
 @Composable
 fun BackupRestoreScreen(
+  lastBackupEpochMillis: Long,
+  hasAnyRecords: Boolean,
   onExportBackupJson: () -> Unit,
   onImportBackupJson: () -> Unit,
   onExportTransactionsCsv: () -> Unit,
@@ -434,6 +623,28 @@ fun BackupRestoreScreen(
     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
     verticalArrangement = Arrangement.spacedBy(16.dp)
   ) {
+    if (lastBackupEpochMillis > 0L || hasAnyRecords) {
+      val fourteenDaysMillis = 14L * 86_400_000L
+      val isOverdue = lastBackupEpochMillis == 0L ||
+        (ManilaTime.nowMillis() - lastBackupEpochMillis > fourteenDaysMillis)
+      item {
+        InfoCallout(
+          icon = Icons.Outlined.Download,
+          title = if (lastBackupEpochMillis > 0L) {
+            "Last backup: ${ManilaTime.formatTimestamp(lastBackupEpochMillis)}"
+          } else {
+            "No local backup exported yet"
+          },
+          body = if (lastBackupEpochMillis > 0L && !isOverdue) {
+            "Keep your backup JSON file in a safe folder on your device or personal drive."
+          } else {
+            "Export a JSON backup periodically so your records are safe if you switch or reset phones."
+          },
+          tone = if (isOverdue) BadgeTone.WARNING else BadgeTone.POSITIVE
+        )
+      }
+    }
+
     item {
       BaonCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -566,6 +777,7 @@ fun AboutScreen(
         )
         CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          MetricRow(label = "Version", value = BuildConfig.VERSION_NAME, boldValue = false)
           MetricRow(label = "Application ID", value = "com.baonplan.finance", boldValue = false)
           MetricRow(label = "Currency", value = "PHP (₱)", boldValue = false)
           MetricRow(label = "Timezone", value = "Asia/Manila", boldValue = false)

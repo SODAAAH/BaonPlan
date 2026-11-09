@@ -66,6 +66,7 @@ import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
@@ -76,12 +77,15 @@ import com.baonplan.finance.ui.components.AddExpenseDialog
 import com.baonplan.finance.ui.components.AdjustBudgetSheet
 import com.baonplan.finance.ui.components.CalmDivider
 import com.baonplan.finance.ui.components.ConfirmDueDateDialog
+import com.baonplan.finance.ui.components.ConfirmMarkInstallmentDialog
 import com.baonplan.finance.ui.components.CorrectTransactionDialog
 import com.baonplan.finance.ui.components.CreateReserveDialog
 import com.baonplan.finance.ui.components.DebtEditorDialog
 import com.baonplan.finance.ui.components.GenerateScheduleDialog
 import com.baonplan.finance.ui.components.RecordAllowanceDialog
 import com.baonplan.finance.ui.components.RecordRepaymentDialog
+import com.baonplan.finance.ui.components.UseEmergencySavingsDialog
+import com.baonplan.finance.widget.BaonWidgetProvider
 import com.baonplan.finance.ui.navigation.AboutKey
 import com.baonplan.finance.ui.navigation.AllowanceBudgetKey
 import com.baonplan.finance.ui.navigation.AppearanceKey
@@ -140,7 +144,11 @@ private fun secondaryTitleFor(key: NavKey): String = when (key) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BaonPlanRoot(
-  viewModel: BaonPlanViewModel
+  viewModel: BaonPlanViewModel,
+  pendingQuickAction: String? = null,
+  onConsumeQuickAction: () -> Unit = {},
+  onSuppressNextRelock: () -> Unit = {},
+  onToggleAppLock: (Boolean) -> Unit = {}
 ) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val context = LocalContext.current
@@ -174,6 +182,7 @@ fun BaonPlanRoot(
   }
 
   val openNotificationSettings: () -> Unit = {
+    onSuppressNextRelock()
     val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
       putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
     }
@@ -218,10 +227,42 @@ fun BaonPlanRoot(
   var scheduleTargetDebt by remember { mutableStateOf<DebtEntity?>(null) }
   var confirmDateTargetDebt by remember { mutableStateOf<DebtEntity?>(null) }
   var correctionTargetTx by remember { mutableStateOf<TransactionEntity?>(null) }
+  var showUseEmergencyDialog by remember { mutableStateOf(false) }
+  var markInstallmentTarget by remember { mutableStateOf<Pair<DebtEntity, InstallmentEntity>?>(null) }
 
   LaunchedEffect(Unit) {
     viewModel.messages.collect { msg ->
       snackbarHostState.showSnackbar(msg)
+    }
+  }
+
+  LaunchedEffect(
+    state.isLoading,
+    state.weeklySummary.availableSpendingMoneyCents,
+    state.totalActiveDebtCents,
+    state.paymentOverview
+  ) {
+    if (!state.isLoading) {
+      BaonWidgetProvider.requestUpdate(context)
+    }
+  }
+
+  val activeDebts = remember(state.debts) {
+    state.debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
+  }
+
+  LaunchedEffect(state.isLoading, pendingQuickAction) {
+    if (!state.isLoading && pendingQuickAction != null) {
+      when (pendingQuickAction) {
+        BaonWidgetProvider.ACTION_ADD_EXPENSE -> {
+          showExpenseDialog = true
+        }
+        BaonWidgetProvider.ACTION_RECORD_PAYMENT -> {
+          repaymentTargetDebtId = activeDebts.firstOrNull()?.id
+          showRepaymentDialog = true
+        }
+      }
+      onConsumeQuickAction()
     }
   }
 
@@ -243,10 +284,6 @@ fun BaonPlanRoot(
     if (currentKey != target) {
       backStack.add(target)
     }
-  }
-
-  val activeDebts = remember(state.debts) {
-    state.debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
   }
 
   if (state.isLoading) {
@@ -374,6 +411,11 @@ fun BaonPlanRoot(
                   repaymentTargetDebtId = activeDebts.firstOrNull()?.id
                   showRepaymentDialog = true
                 },
+                onQuickRecordAllowance = { showAllowanceDialog = true },
+                onQuickAddDebt = {
+                  debtEditorTarget = null
+                  showDebtEditor = true
+                },
                 onOpenDebts = { navigateToTopLevel(DebtsKey) },
                 onOpenDebtDetail = { id -> pushScreen(DebtDetailKey(id)) },
                 onOpenCalendar = { pushScreen(CalendarKey) }
@@ -401,13 +443,41 @@ fun BaonPlanRoot(
                     isSchoolDay = true
                   )
                 },
+                onQuickPresetExpense = { preset ->
+                  viewModel.recordExpense(
+                    title = preset.label,
+                    amountCents = preset.amountCents,
+                    dateIso = ManilaTime.formatIso(state.today),
+                    category = preset.category,
+                    isSchoolDay = preset.isSchoolDay
+                  )
+                },
+                onDeleteExpense = { viewModel.deleteExpense(it) },
                 onOpenAddExpenseDialog = { showExpenseDialog = true },
                 onOpenAdjustBudget = { showAdjustBudgetSheet = true },
                 onOpenCreateReserveDialog = { type ->
                   reserveInitialType = type
                   showReserveDialog = true
                 },
-                onReleaseReserve = { viewModel.releaseReserve(it) }
+                onReleaseReserve = { viewModel.releaseReserve(it) },
+                onOpenUseEmergencySavings = { showUseEmergencyDialog = true },
+                onCarryOverPriorWeek = { candidate ->
+                  viewModel.carryOverPriorWeek(
+                    prevWeekStartIso = candidate.weekStartIso,
+                    amountCents = candidate.leftoverCents,
+                    todayIso = ManilaTime.formatIso(state.today)
+                  )
+                },
+                onSweepPriorWeekToReserve = { candidate, reserveType ->
+                  viewModel.sweepPriorWeekToReserve(
+                    prevWeekStartIso = candidate.weekStartIso,
+                    reserveType = reserveType,
+                    amountCents = candidate.leftoverCents
+                  )
+                },
+                onDismissCarryOver = { weekIso ->
+                  viewModel.dismissPriorWeekCarryOver(weekIso)
+                }
               )
             }
 
@@ -426,6 +496,7 @@ fun BaonPlanRoot(
               MoreScreen(
                 state = state,
                 hasNotificationPermission = hasNotificationPermission,
+                onToggleAppLock = onToggleAppLock,
                 onOpenCalendar = { pushScreen(CalendarKey) },
                 onOpenTransactions = { pushScreen(TransactionsKey) },
                 onOpenReports = { pushScreen(ReportsKey) },
@@ -460,6 +531,7 @@ fun BaonPlanRoot(
               ReportsScreen(
                 state = state,
                 onExportCsv = {
+                  onSuppressNextRelock()
                   exportCsvLauncher.launch("baonplan-transactions-${ManilaTime.formatIso(state.today)}.csv")
                 }
               )
@@ -477,6 +549,7 @@ fun BaonPlanRoot(
                 state = state,
                 hasNotificationPermission = hasNotificationPermission,
                 onSaveSettings = { updated -> viewModel.updateSettings(context, updated) },
+                onSaveLeadDays = { days -> viewModel.setReminderLeadDays(days) },
                 onRequestNotificationPermission = requestNotifPermission,
                 onOpenSystemNotificationSettings = openNotificationSettings,
                 onSendTestNotification = { viewModel.sendTestNotification(context) },
@@ -487,19 +560,31 @@ fun BaonPlanRoot(
             entry<BudgetDefaultsKey> {
               BudgetDefaultsScreen(
                 settings = state.settings,
-                onSaveSettings = { updated -> viewModel.updateSettings(context, updated) }
+                emergencyGoalCents = state.preferences.emergencySavingsGoalCents,
+                expensePresets = state.preferences.expensePresets,
+                onSaveSettings = { updated -> viewModel.updateSettings(context, updated) },
+                onSaveEmergencyGoal = { goal -> viewModel.setEmergencySavingsGoalCents(goal) },
+                onSaveExpensePresets = { presets -> viewModel.setExpensePresets(presets) }
               )
             }
 
             entry<BackupKey> {
               BackupRestoreScreen(
+                lastBackupEpochMillis = state.preferences.lastBackupEpochMillis,
+                hasAnyRecords = state.debts.isNotEmpty() ||
+                  state.transactions.isNotEmpty() ||
+                  state.allowances.isNotEmpty() ||
+                  state.expenses.isNotEmpty(),
                 onExportBackupJson = {
+                  onSuppressNextRelock()
                   exportJsonLauncher.launch("baonplan-backup-${ManilaTime.formatIso(state.today)}.json")
                 },
                 onImportBackupJson = {
+                  onSuppressNextRelock()
                   importJsonLauncher.launch(arrayOf("application/json", "*/*"))
                 },
                 onExportTransactionsCsv = {
+                  onSuppressNextRelock()
                   exportCsvLauncher.launch("baonplan-transactions-${ManilaTime.formatIso(state.today)}.csv")
                 },
                 onClearAllData = { viewModel.clearAllData() }
@@ -530,17 +615,18 @@ fun BaonPlanRoot(
                 onConfirmDate = { confirmDateTargetDebt = it },
                 onGenerateSchedule = { scheduleTargetDebt = it },
                 onMarkInstallmentPaid = { inst ->
-                  viewModel.markInstallmentPaid(
-                    installmentId = inst.id,
-                    dateIso = ManilaTime.formatIso(state.today),
-                    useDebtReserve = state.activeDebtReserveTotalCents > 0L
-                  )
+                  if (debt != null) {
+                    markInstallmentTarget = debt to inst
+                  }
                 },
                 onArchiveToggle = { target ->
                   viewModel.setDebtArchived(
                     debtId = target.id,
                     archived = target.status != DebtStatus.ARCHIVED
                   )
+                },
+                onDeleteDebt = { target ->
+                  viewModel.deleteDebt(target.id, target.name)
                 },
                 onCorrectTransaction = { correctionTargetTx = it }
               )
@@ -568,6 +654,7 @@ fun BaonPlanRoot(
   if (showExpenseDialog) {
     AddExpenseDialog(
       defaultFoodCents = state.settings.foodPerSchoolDayCents,
+      presets = state.preferences.expensePresets,
       today = state.today,
       onConfirm = { title, amount, dateIso, category, isSchoolDay, notes ->
         viewModel.recordExpense(title, amount, dateIso, category, isSchoolDay, notes)
@@ -669,6 +756,33 @@ fun BaonPlanRoot(
         )
       },
       onDismiss = { correctionTargetTx = null }
+    )
+  }
+
+  if (showUseEmergencyDialog) {
+    UseEmergencySavingsDialog(
+      availableSavingsCents = state.emergencySavingsTotalCents,
+      today = state.today,
+      onConfirm = { amount, dateIso, logAsExpense, title, notes ->
+        viewModel.withdrawEmergencySavings(amount, dateIso, logAsExpense, title, notes)
+      },
+      onDismiss = { showUseEmergencyDialog = false }
+    )
+  }
+
+  markInstallmentTarget?.let { (targetDebt, inst) ->
+    ConfirmMarkInstallmentDialog(
+      debtName = targetDebt.name,
+      installment = inst,
+      availableDebtReserveCents = state.activeDebtReserveTotalCents,
+      onConfirm = { useReserve ->
+        viewModel.markInstallmentPaid(
+          installmentId = inst.id,
+          dateIso = ManilaTime.formatIso(state.today),
+          useDebtReserve = useReserve
+        )
+      },
+      onDismiss = { markInstallmentTarget = null }
     )
   }
 

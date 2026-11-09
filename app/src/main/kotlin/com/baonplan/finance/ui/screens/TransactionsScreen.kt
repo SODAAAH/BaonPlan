@@ -122,6 +122,50 @@ fun TransactionsScreen(
       }
     }
 
+    if (filtered.isNotEmpty()) {
+      item {
+        val countLabel = "${filtered.size} entr${if (filtered.size == 1) "y" else "ies"} · ${selectedFilter.label}"
+        val summaryPair: Pair<String, androidx.compose.ui.graphics.Color> = when (selectedFilter) {
+          TxFilter.ALLOWANCE ->
+            "+${MoneyFormatter.formatPeso(filtered.sumOf { it.amountCents })}" to semantic.positive
+          TxFilter.EXPENSE ->
+            "-${MoneyFormatter.formatPeso(filtered.sumOf { it.amountCents })}" to MaterialTheme.colorScheme.onSurface
+          TxFilter.REPAYMENT ->
+            "-${MoneyFormatter.formatPeso(filtered.sumOf { it.amountCents })}" to MaterialTheme.colorScheme.primary
+          TxFilter.RESERVES ->
+            MoneyFormatter.formatPeso(filtered.sumOf { it.amountCents }) to MaterialTheme.colorScheme.onSurface
+          TxFilter.VOIDED ->
+            MoneyFormatter.formatPeso(filtered.sumOf { it.amountCents }) to MaterialTheme.colorScheme.outline
+          TxFilter.ALL -> {
+            val inflows = filtered.filter { it.type == TransactionType.ALLOWANCE }.sumOf { it.amountCents }
+            val outflows = filtered
+              .filter { it.type != TransactionType.ALLOWANCE && it.type != TransactionType.ADJUSTMENT }
+              .sumOf { it.amountCents }
+            "In ${MoneyFormatter.formatPesoCompact(inflows)} · Out ${MoneyFormatter.formatPesoCompact(outflows)}" to MaterialTheme.colorScheme.onSurface
+          }
+        }
+        BaonCard(contentPadding = 12.dp) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Text(
+              text = countLabel,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+              text = summaryPair.first,
+              style = MaterialTheme.typography.titleSmall,
+              fontWeight = FontWeight.SemiBold,
+              color = summaryPair.second
+            )
+          }
+        }
+      }
+    }
+
     if (filtered.isEmpty()) {
       item {
         EmptyStateCard(

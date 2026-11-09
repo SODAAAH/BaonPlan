@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.DefaultSettingsProvider
+import com.baonplan.finance.widget.BaonWidgetProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,6 +25,7 @@ class BootCompletedReceiver : BroadcastReceiver() {
           reminderHour = settings.reminderHour,
           reminderMinute = settings.reminderMinute
         )
+        BaonWidgetProvider.requestUpdate(context)
       } finally {
         pendingResult.finish()
       }

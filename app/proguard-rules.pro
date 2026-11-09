@@ -28,4 +28,12 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 -keep class com.baonplan.finance.ui.navigation.** { *; }
+-keep,includedescriptorclasses class com.baonplan.finance.domain.model.**$$serializer { *; }
+-keepclassmembers class com.baonplan.finance.domain.model.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.baonplan.finance.domain.model.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
 -keep class com.baonplan.finance.domain.model.** { *; }
+-keep class com.baonplan.finance.widget.** { *; }

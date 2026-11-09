@@ -10,6 +10,8 @@ import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
+import com.baonplan.finance.widget.BaonWidgetProvider
+import kotlinx.coroutines.flow.first
 
 class ReminderWorker(
   appContext: Context,
@@ -20,8 +22,11 @@ class ReminderWorker(
     val db = BaonPlanDatabase.getInstance(applicationContext)
     val prefs = SettingsPreferencesDataStore(applicationContext)
     val settings = db.userSettingsDao().getSettings() ?: DefaultSettingsProvider.defaultSettings()
+    val appPrefs = prefs.preferencesFlow.first()
+    val leadDays = appPrefs.reminderLeadDays.toLong().coerceIn(1L, 7L)
 
     if (!settings.remindersEnabled) {
+      BaonWidgetProvider.requestUpdate(applicationContext)
       return Result.success()
     }
 
@@ -72,10 +77,14 @@ class ReminderWorker(
       )
     }
 
-    val upcomingSoon = overview.upcomingDatedPayments.mapNotNull { item ->
-      val due = ManilaTime.parseDate(item.dueDateIso) ?: return@mapNotNull null
-      val delta = ManilaTime.daysUntil(today, due)
-      if (delta in 2L..3L) item to delta else null
+    val upcomingSoon = if (leadDays >= 2L) {
+      overview.upcomingDatedPayments.mapNotNull { item ->
+        val due = ManilaTime.parseDate(item.dueDateIso) ?: return@mapNotNull null
+        val delta = ManilaTime.daysUntil(today, due)
+        if (delta in 2L..leadDays) item to delta else null
+      }
+    } else {
+      emptyList()
     }
     if (upcomingSoon.isNotEmpty()) {
       val (first, deltaDays) = upcomingSoon.first()
@@ -93,17 +102,21 @@ class ReminderWorker(
     val weekStart = ManilaTime.weekStart(today)
     val hasAllowanceThisWeek = allowances.any { ManilaTime.isInWeek(it.receivedDate, weekStart) }
     if (!hasAllowanceThisWeek && today.dayOfWeek.value == settings.allowanceReminderDayOfWeek) {
+      val minStr = MoneyFormatter.formatPesoCompact(settings.minWeeklyAllowanceCents)
+      val maxStr = MoneyFormatter.formatPesoCompact(settings.maxWeeklyAllowanceCents)
+      val rangeLabel = if (minStr == maxStr) minStr else "$minStr–$maxStr"
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_ALLOWANCE,
         notificationId = NotificationHelper.NOTIFICATION_ID_ALLOWANCE,
         title = "Weekly Baon Check-In",
-        body = "Record this week's allowance (₱400–₱500) to calculate your school food budget and safe debt reserve.",
+        body = "Record this week's allowance ($rangeLabel) to calculate your school food budget and safe debt reserve.",
         highPriority = false
       )
     }
 
     prefs.setLastReminderEpochMillis(ManilaTime.nowMillis())
+    BaonWidgetProvider.requestUpdate(applicationContext)
     return Result.success()
   }
 }

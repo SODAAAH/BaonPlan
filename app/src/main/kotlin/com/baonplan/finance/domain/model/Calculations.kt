@@ -1,6 +1,70 @@
 package com.baonplan.finance.domain.model
 
+import kotlinx.serialization.Serializable
 import java.time.LocalDate
+
+@Serializable
+data class ExpensePreset(
+  val id: String,
+  val label: String,
+  val amountCents: Long,
+  val category: ExpenseCategory,
+  val isSchoolDay: Boolean
+)
+
+enum class DuesCoverageStatus {
+  NO_DUES,
+  COVERED_BY_RESERVE,
+  COVERED_WITH_CASH,
+  SHORTFALL
+}
+
+data class WeeklyDuesReadiness(
+  val dueNext7DaysCents: Long,
+  val overdueCents: Long,
+  val dueNext7DaysCount: Int,
+  val activeDebtReserveCents: Long,
+  val availableCashCents: Long,
+  val shortfallAfterReserveCents: Long,
+  val unmetShortfallCents: Long,
+  val status: DuesCoverageStatus
+)
+
+data class WeeklyTrendPoint(
+  val weekStartDate: LocalDate,
+  val weekEndDate: LocalDate,
+  val label: String,
+  val allowanceCents: Long,
+  val expensesCents: Long,
+  val repaymentsCents: Long
+)
+
+data class PriorWeekCarryOverCandidate(
+  val weekStartDate: LocalDate,
+  val weekEndDate: LocalDate,
+  val weekStartIso: String,
+  val leftoverCents: Long
+)
+
+data class PayoffDebtCandidate(
+  val debtId: Long,
+  val name: String,
+  val lender: String,
+  val remainingBalanceCents: Long,
+  val installmentAmountCents: Long,
+  val frequency: RepaymentFrequency
+)
+
+data class PayoffProjectionSummary(
+  val includedDebtsCount: Int,
+  val excludedDebtsCount: Int,
+  val includedTotalBalanceCents: Long,
+  val estimatedDebtFreeDateIso: String?,
+  val estimatedWeeksRemaining: Int?,
+  val includesEstimatedDates: Boolean,
+  val quickestWinDebt: PayoffDebtCandidate?,
+  val soonestDueDebt: NextPaymentItem?
+)
 
 data class LoanCostBreakdown(
   val originalPrincipalCents: Long?,
@@ -46,7 +110,12 @@ data class WeeklyBudgetSummary(
   val repaymentsPaidThisWeekCents: Long,
   val directRepaymentsFromCashCents: Long,
   val remainingFoodBudgetCents: Long,
-  val availableSpendingMoneyCents: Long
+  val availableSpendingMoneyCents: Long,
+  val schoolDaysLoggedThisWeek: Int = 0,
+  val plannedSchoolDaysPerWeek: Int = 0,
+  val emergencyFundedExpensesThisWeekCents: Long = 0L,
+  val emergencyWithdrawalsToCashThisWeekCents: Long = 0L,
+  val releasedPriorReservesToCashThisWeekCents: Long = 0L
 )
 
 data class NextPaymentItem(

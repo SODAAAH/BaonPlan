@@ -4,4 +4,9 @@
     <string name="notification_channel_payments_desc">Upcoming, due today, due tomorrow, and overdue installment alerts.</string>
     <string name="notification_channel_allowance_name">Weekly Allowance Reminders</string>
     <string name="notification_channel_allowance_desc">Weekly prompt to record your baon allowance and review school food &amp; debt reserves.</string>
+    <string name="widget_description">Shows money left this week, next payment due, and a quick expense shortcut.</string>
+    <string name="shortcut_add_expense_short">Add expense</string>
+    <string name="shortcut_add_expense_long">Record a school or daily expense</string>
+    <string name="shortcut_record_payment_short">Record payment</string>
+    <string name="shortcut_record_payment_long">Record a debt or installment payment</string>
 </resources>

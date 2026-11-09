@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@android:drawable/ic_input_add"
+        android:shortcutId="add_expense"
+        android:shortcutLongLabel="@string/shortcut_add_expense_long"
+        android:shortcutShortLabel="@string/shortcut_add_expense_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.baonplan.finance.MainActivity"
+            android:targetPackage="com.baonplan.finance">
+            <extra
+                android:name="baonplan_quick_action"
+                android:value="add_expense" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_today"
+        android:shortcutId="record_payment"
+        android:shortcutLongLabel="@string/shortcut_record_payment_long"
+        android:shortcutShortLabel="@string/shortcut_record_payment_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.baonplan.finance.MainActivity"
+            android:targetPackage="com.baonplan.finance">
+            <extra
+                android:name="baonplan_quick_action"
+                android:value="record_payment" />
+        </intent>
+    </shortcut>
+</shortcuts>

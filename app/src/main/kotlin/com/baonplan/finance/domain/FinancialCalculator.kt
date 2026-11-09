@@ -9,13 +9,17 @@ import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.GeneratedInstallmentSpec
 import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.LoanCostBreakdown
 import com.baonplan.finance.domain.model.NextPaymentItem
+import com.baonplan.finance.domain.model.PayoffDebtCandidate
+import com.baonplan.finance.domain.model.PayoffProjectionSummary
 import com.baonplan.finance.domain.model.PaymentOverview
 import com.baonplan.finance.domain.model.PaymentUrgency
+import com.baonplan.finance.domain.model.PriorWeekCarryOverCandidate
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.RepaymentProgressSummary
 import com.baonplan.finance.domain.model.ReserveStatus
@@ -23,8 +27,12 @@ import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.ScenarioPlan
 import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.model.WeeklyBudgetSummary
+import com.baonplan.finance.domain.model.WeeklyDuesReadiness
+import com.baonplan.finance.domain.model.WeeklyTrendPoint
 import com.baonplan.finance.domain.util.ManilaTime
 import java.time.LocalDate
+import java.time.temporal.ChronoUnit
+import kotlin.math.ceil
 
 object FinancialCalculator {
 
@@ -182,6 +190,11 @@ object FinancialCalculator {
     val actualOtherExpenses = weekExpenses
       .filter { it.category != ExpenseCategory.SCHOOL_FOOD }
       .sumOf { it.amountCents }
+    val schoolDaysLogged = weekExpenses
+      .filter { it.isSchoolDay }
+      .map { it.date }
+      .distinct()
+      .size
 
     // Active reserved debt money across all weeks (not yet paid as a debt repayment)
     val activeDebtReserveTotal = reserves
@@ -209,10 +222,12 @@ object FinancialCalculator {
       }
       .sumOf { it.amountCents }
 
-    val weekRepayments = transactions.filter {
-      !it.isVoided &&
-        it.type == TransactionType.DEBT_REPAYMENT &&
-        ManilaTime.isInWeek(it.date, weekStart)
+    val weekTransactions = transactions.filter {
+      !it.isVoided && ManilaTime.isInWeek(it.date, weekStart)
+    }
+
+    val weekRepayments = weekTransactions.filter {
+      it.type == TransactionType.DEBT_REPAYMENT
     }
 
     val repaymentsPaidThisWeek = weekRepayments.sumOf { it.amountCents }
@@ -220,15 +235,30 @@ object FinancialCalculator {
       (it.amountCents - it.fundedFromReserveCents).coerceAtLeast(0L)
     }
 
+    val emergencyFundedExpensesThisWeek = weekTransactions
+      .filter { it.type == TransactionType.EXPENSE && it.fundedFromReserveCents > 0L }
+      .sumOf { minOf(it.amountCents, it.fundedFromReserveCents) }
+
+    val emergencyWithdrawalsToCashThisWeek = weekTransactions
+      .filter { it.type == TransactionType.ADJUSTMENT && it.category == "Emergency Withdrawal" }
+      .sumOf { it.amountCents.coerceAtLeast(0L) }
+
+    val releasedPriorReservesToCashThisWeek = weekTransactions
+      .filter { it.type == TransactionType.ADJUSTMENT && it.category == "Reserve Release" }
+      .sumOf { it.amountCents.coerceAtLeast(0L) }
+
     val plannedFoodBudget = settings.weeklyFoodBudgetCents
     val remainingFoodBudget = plannedFoodBudget - actualFoodExpenses
 
     val availableSpendingMoney = recordedAllowanceThisWeek -
       actualFoodExpenses -
-      actualOtherExpenses -
+      actualOtherExpenses +
+      emergencyFundedExpensesThisWeek -
       debtReservedThisWeek -
       emergencySavingsThisWeek -
-      directRepaymentsFromCashThisWeek
+      directRepaymentsFromCashThisWeek +
+      emergencyWithdrawalsToCashThisWeek +
+      releasedPriorReservesToCashThisWeek
 
     return WeeklyBudgetSummary(
       weekStartDate = weekStart,
@@ -245,7 +275,12 @@ object FinancialCalculator {
       repaymentsPaidThisWeekCents = repaymentsPaidThisWeek,
       directRepaymentsFromCashCents = directRepaymentsFromCashThisWeek,
       remainingFoodBudgetCents = remainingFoodBudget,
-      availableSpendingMoneyCents = availableSpendingMoney
+      availableSpendingMoneyCents = availableSpendingMoney,
+      schoolDaysLoggedThisWeek = schoolDaysLogged,
+      plannedSchoolDaysPerWeek = settings.schoolDaysPerWeek,
+      emergencyFundedExpensesThisWeekCents = emergencyFundedExpensesThisWeek,
+      emergencyWithdrawalsToCashThisWeekCents = emergencyWithdrawalsToCashThisWeek,
+      releasedPriorReservesToCashThisWeekCents = releasedPriorReservesToCashThisWeek
     )
   }
 
@@ -382,5 +417,218 @@ object FinancialCalculator {
     }
 
     return result
+  }
+
+  fun calculateWeeklyDuesReadiness(
+    today: LocalDate,
+    paymentOverview: PaymentOverview,
+    weeklySummary: WeeklyBudgetSummary,
+    activeDebtReserveTotalCents: Long
+  ): WeeklyDuesReadiness {
+    val horizon = today.plusDays(7)
+    val dueUpcoming7Days = paymentOverview.upcomingDatedPayments.filter { item ->
+      val due = ManilaTime.parseDate(item.dueDateIso) ?: return@filter false
+      !due.isAfter(horizon)
+    }
+    val allSoon = paymentOverview.overduePayments +
+      paymentOverview.dueTodayPayments +
+      paymentOverview.dueTomorrowPayments +
+      dueUpcoming7Days
+
+    val overdueCents = paymentOverview.overduePayments.sumOf { it.amountCents }
+    val dueNext7DaysCents = allSoon.sumOf { it.amountCents }
+    val availableCash = weeklySummary.availableSpendingMoneyCents.coerceAtLeast(0L)
+    val safeReserve = activeDebtReserveTotalCents.coerceAtLeast(0L)
+    val shortfallAfterReserve = (dueNext7DaysCents - safeReserve).coerceAtLeast(0L)
+    val unmetShortfall = (dueNext7DaysCents - (safeReserve + availableCash)).coerceAtLeast(0L)
+
+    val status = when {
+      dueNext7DaysCents <= 0L -> DuesCoverageStatus.NO_DUES
+      safeReserve >= dueNext7DaysCents -> DuesCoverageStatus.COVERED_BY_RESERVE
+      safeReserve + availableCash >= dueNext7DaysCents -> DuesCoverageStatus.COVERED_WITH_CASH
+      else -> DuesCoverageStatus.SHORTFALL
+    }
+
+    return WeeklyDuesReadiness(
+      dueNext7DaysCents = dueNext7DaysCents,
+      overdueCents = overdueCents,
+      dueNext7DaysCount = allSoon.size,
+      activeDebtReserveCents = safeReserve,
+      availableCashCents = availableCash,
+      shortfallAfterReserveCents = shortfallAfterReserve,
+      unmetShortfallCents = unmetShortfall,
+      status = status
+    )
+  }
+
+  fun calculatePayoffInsights(
+    debts: List<DebtEntity>,
+    installments: List<InstallmentEntity>,
+    paymentOverview: PaymentOverview,
+    today: LocalDate
+  ): PayoffProjectionSummary {
+    val activeDebts = debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
+    val installmentsByDebt = installments.groupBy { it.debtId }
+
+    var includedCount = 0
+    var excludedCount = 0
+    var includedTotalCents = 0L
+    var includesEstimated = false
+    var latestCompletionDate: LocalDate? = null
+
+    for (debt in activeDebts) {
+      val unpaidInst = (installmentsByDebt[debt.id] ?: emptyList())
+        .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+
+      var debtCompletionDate: LocalDate? = null
+      var debtEstimated = false
+
+      if (unpaidInst.isNotEmpty()) {
+        val allDated = unpaidInst.all {
+          ManilaTime.parseDate(it.dueDate) != null &&
+            (it.dateStatus == DueDateStatus.CONFIRMED || it.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
+        }
+        if (allDated && debt.frequency != RepaymentFrequency.UNKNOWN) {
+          debtCompletionDate = unpaidInst.mapNotNull { ManilaTime.parseDate(it.dueDate) }.maxOrNull()
+          debtEstimated = unpaidInst.any { it.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION }
+        }
+      } else if (
+        debt.frequency != RepaymentFrequency.UNKNOWN &&
+        (debt.dateStatus == DueDateStatus.CONFIRMED || debt.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
+      ) {
+        val firstDue = ManilaTime.parseDate(debt.nextDueDate)
+        if (firstDue != null) {
+          debtEstimated = debt.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+          if (debt.frequency == RepaymentFrequency.ONE_TIME) {
+            debtCompletionDate = firstDue
+          } else if (debt.installmentAmountCents > 0L) {
+            val count = maxOf(
+              debt.remainingInstallmentsCount,
+              ceil(debt.remainingBalanceCents.toDouble() / debt.installmentAmountCents.toDouble()).toInt()
+            ).coerceAtLeast(1)
+            var current: LocalDate? = firstDue
+            repeat(count - 1) {
+              current = current?.let { ManilaTime.advanceDate(it, debt.frequency, debt.customIntervalDays) }
+            }
+            debtCompletionDate = current
+          }
+        }
+      }
+
+      if (debtCompletionDate != null) {
+        includedCount++
+        includedTotalCents += debt.remainingBalanceCents
+        if (debtEstimated) includesEstimated = true
+        if (latestCompletionDate == null || debtCompletionDate.isAfter(latestCompletionDate)) {
+          latestCompletionDate = debtCompletionDate
+        }
+      } else {
+        excludedCount++
+      }
+    }
+
+    val weeksRemaining = latestCompletionDate?.let { end ->
+      val days = ChronoUnit.DAYS.between(today, end).coerceAtLeast(0L)
+      if (days == 0L) 0 else ((days + 6L) / 7L).toInt().coerceAtLeast(1)
+    }
+
+    val quickestWin = activeDebts
+      .minByOrNull { it.remainingBalanceCents }
+      ?.let {
+        PayoffDebtCandidate(
+          debtId = it.id,
+          name = it.name,
+          lender = it.lender,
+          remainingBalanceCents = it.remainingBalanceCents,
+          installmentAmountCents = it.installmentAmountCents,
+          frequency = it.frequency
+        )
+      }
+
+    val soonestDue = paymentOverview.overduePayments.firstOrNull()
+      ?: paymentOverview.dueTodayPayments.firstOrNull()
+      ?: paymentOverview.dueTomorrowPayments.firstOrNull()
+      ?: paymentOverview.upcomingDatedPayments.firstOrNull()
+
+    return PayoffProjectionSummary(
+      includedDebtsCount = includedCount,
+      excludedDebtsCount = excludedCount,
+      includedTotalBalanceCents = includedTotalCents,
+      estimatedDebtFreeDateIso = latestCompletionDate?.let { ManilaTime.formatIso(it) },
+      estimatedWeeksRemaining = weeksRemaining,
+      includesEstimatedDates = includesEstimated,
+      quickestWinDebt = quickestWin,
+      soonestDueDebt = soonestDue
+    )
+  }
+
+  fun calculateWeeklyTrends(
+    today: LocalDate,
+    allowances: List<AllowanceRecordEntity>,
+    expenses: List<ExpenseEntity>,
+    transactions: List<TransactionEntity>,
+    weeksCount: Int = 4
+  ): List<WeeklyTrendPoint> {
+    val safeCount = weeksCount.coerceIn(1, 8)
+    val currentWeekStart = ManilaTime.weekStart(today)
+    return (safeCount - 1 downTo 0).map { offset ->
+      val start = currentWeekStart.minusWeeks(offset.toLong())
+      val end = start.plusDays(6)
+      val label = when (offset) {
+        0 -> "This week"
+        1 -> "Last week"
+        else -> ManilaTime.formatShort(ManilaTime.formatIso(start))
+      }
+      val allowanceCents = allowances
+        .filter { ManilaTime.isInWeek(it.receivedDate, start) }
+        .sumOf { it.amountCents }
+      val expensesCents = expenses
+        .filter { ManilaTime.isInWeek(it.date, start) }
+        .sumOf { it.amountCents }
+      val repaymentsCents = transactions
+        .filter { !it.isVoided && it.type == TransactionType.DEBT_REPAYMENT && ManilaTime.isInWeek(it.date, start) }
+        .sumOf { it.amountCents }
+
+      WeeklyTrendPoint(
+        weekStartDate = start,
+        weekEndDate = end,
+        label = label,
+        allowanceCents = allowanceCents,
+        expensesCents = expensesCents,
+        repaymentsCents = repaymentsCents
+      )
+    }
+  }
+
+  fun calculatePriorWeekCarryOverCandidate(
+    today: LocalDate,
+    settings: UserSettingsEntity,
+    allowances: List<AllowanceRecordEntity>,
+    expenses: List<ExpenseEntity>,
+    reserves: List<DebtReserveEntity>,
+    transactions: List<TransactionEntity>,
+    resolvedWeekIso: String?
+  ): PriorWeekCarryOverCandidate? {
+    val prevWeekStart = ManilaTime.weekStart(today).minusWeeks(1)
+    val prevWeekIso = ManilaTime.formatIso(prevWeekStart)
+    if (resolvedWeekIso == prevWeekIso) return null
+
+    val prevSummary = calculateWeeklyBudgetSummary(
+      today = prevWeekStart,
+      settings = settings,
+      allowances = allowances,
+      expenses = expenses,
+      reserves = reserves,
+      transactions = transactions
+    )
+    if (prevSummary.recordedAllowanceCents <= 0L || prevSummary.availableSpendingMoneyCents <= 0L) {
+      return null
+    }
+    return PriorWeekCarryOverCandidate(
+      weekStartDate = prevWeekStart,
+      weekEndDate = prevWeekStart.plusDays(6),
+      weekStartIso = prevWeekIso,
+      leftoverCents = prevSummary.availableSpendingMoneyCents
+    )
   }
 }

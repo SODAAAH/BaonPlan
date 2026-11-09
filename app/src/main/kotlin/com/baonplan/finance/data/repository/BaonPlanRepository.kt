@@ -17,6 +17,7 @@ import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.ExpensePreset
 import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
@@ -74,6 +75,7 @@ class BaonPlanRepository(
       debtDao.deleteAll()
       settingsDao.upsert(DefaultSettingsProvider.defaultSettings())
     }
+    prefs.clearOperationalPrefs()
   }
 
   suspend fun updateSettings(settings: UserSettingsEntity) {
@@ -82,6 +84,88 @@ class BaonPlanRepository(
 
   suspend fun setThemeMode(mode: ThemeMode) {
     prefs.setThemeMode(mode)
+  }
+
+  suspend fun setReminderLeadDays(days: Int) {
+    prefs.setReminderLeadDays(days)
+  }
+
+  suspend fun setEmergencySavingsGoalCents(goalCents: Long) {
+    prefs.setEmergencySavingsGoalCents(goalCents)
+  }
+
+  suspend fun setAppLockEnabled(enabled: Boolean) {
+    prefs.setAppLockEnabled(enabled)
+  }
+
+  suspend fun setExpensePresets(presets: List<ExpensePreset>) {
+    prefs.setExpensePresets(presets)
+  }
+
+  suspend fun carryOverPriorWeekCash(prevWeekStartIso: String, amountCents: Long, todayIso: String) {
+    if (amountCents > 0L) {
+      recordAllowance(
+        amountCents = amountCents,
+        receivedDateIso = todayIso,
+        sourceLabel = "Carried from last week",
+        notes = "Unspent balance from week of $prevWeekStartIso"
+      )
+    }
+    prefs.setLastResolvedCarryOverWeekIso(prevWeekStartIso)
+  }
+
+  suspend fun sweepPriorWeekCashToReserve(
+    prevWeekStartIso: String,
+    reserveType: ReserveType,
+    amountCents: Long
+  ) {
+    val prevStart = ManilaTime.parseDate(prevWeekStartIso) ?: return
+    if (amountCents > 0L) {
+      val prevEndIso = ManilaTime.formatIso(prevStart.plusDays(6))
+      val now = ManilaTime.nowMillis()
+      val title = if (reserveType == ReserveType.DEBT_REPAYMENT_RESERVE) {
+        "Debt Reserve (Last Week)"
+      } else {
+        "Emergency Savings (Last Week)"
+      }
+      db.withTransaction {
+        val reserveId = reserveDao.insert(
+          DebtReserveEntity(
+            weekStartDate = prevWeekStartIso,
+            targetDebtId = null,
+            reserveType = reserveType,
+            amountCents = amountCents,
+            appliedAmountCents = 0L,
+            status = ReserveStatus.RESERVED,
+            notes = "Swept unspent cash from week of $prevWeekStartIso",
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+        transactionDao.insert(
+          TransactionEntity(
+            type = if (reserveType == ReserveType.DEBT_REPAYMENT_RESERVE) {
+              TransactionType.DEBT_RESERVE
+            } else {
+              TransactionType.EMERGENCY_SAVINGS
+            },
+            title = title,
+            amountCents = amountCents,
+            date = prevEndIso,
+            reserveId = reserveId,
+            category = reserveType.label,
+            notes = "Swept unspent cash from week of $prevWeekStartIso",
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+      }
+    }
+    prefs.setLastResolvedCarryOverWeekIso(prevWeekStartIso)
+  }
+
+  suspend fun dismissPriorWeekCarryOver(prevWeekStartIso: String) {
+    prefs.setLastResolvedCarryOverWeekIso(prevWeekStartIso)
   }
 
   suspend fun markNotificationPermissionRequested() {
@@ -183,6 +267,9 @@ class BaonPlanRepository(
       expenseDao.deleteById(expenseId)
       val linkedTx = transactionDao.getAll().firstOrNull { it.expenseId == expenseId && !it.isVoided }
       if (linkedTx != null) {
+        if (linkedTx.fundedFromReserveCents > 0L) {
+          restoreReserves(ReserveType.EMERGENCY_SAVINGS, linkedTx.fundedFromReserveCents)
+        }
         transactionDao.update(
           linkedTx.copy(isVoided = true, isCorrected = true, correctionReason = "Expense deleted")
         )
@@ -245,13 +332,123 @@ class BaonPlanRepository(
     db.withTransaction {
       val reserve = reserveDao.getById(reserveId) ?: return@withTransaction
       if (reserve.status != ReserveStatus.RESERVED) return@withTransaction
-      reserveDao.update(reserve.copy(status = ReserveStatus.RELEASED))
-      val linkedTx = transactionDao.getAll().firstOrNull { it.reserveId == reserveId && !it.isVoided }
-      if (linkedTx != null) {
-        transactionDao.update(
-          linkedTx.copy(isVoided = true, isCorrected = true, correctionReason = "Reserve released back to spending cash")
+      val today = ManilaTime.today()
+      val currentWeekStartIso = ManilaTime.formatIso(ManilaTime.weekStart(today))
+      val remaining = reserve.remainingReservedCents
+
+      if (reserve.weekStartDate == currentWeekStartIso && reserve.appliedAmountCents == 0L) {
+        reserveDao.update(reserve.copy(status = ReserveStatus.RELEASED))
+        val linkedTx = transactionDao.getAll().firstOrNull { it.reserveId == reserveId && !it.isVoided }
+        if (linkedTx != null) {
+          transactionDao.update(
+            linkedTx.copy(isVoided = true, isCorrected = true, correctionReason = "Reserve released back to spending cash")
+          )
+        }
+      } else if (remaining > 0L) {
+        reserveDao.update(
+          reserve.copy(
+            appliedAmountCents = reserve.amountCents,
+            status = ReserveStatus.APPLIED
+          )
+        )
+        transactionDao.insert(
+          TransactionEntity(
+            type = TransactionType.ADJUSTMENT,
+            title = "Released ${reserve.reserveType.label.lowercase()}",
+            amountCents = remaining,
+            date = ManilaTime.formatIso(today),
+            debtId = reserve.targetDebtId,
+            reserveId = reserve.id,
+            fundedFromReserveCents = remaining,
+            category = "Reserve Release",
+            notes = "Moved back to this week's spending cash",
+            isManuallyEntered = true,
+            createdAtEpochMillis = ManilaTime.nowMillis()
+          )
         )
       }
+    }
+  }
+
+  suspend fun withdrawEmergencySavings(
+    amountCents: Long,
+    dateIso: String,
+    logAsExpense: Boolean,
+    title: String,
+    notes: String = ""
+  ): Boolean {
+    if (amountCents <= 0L) return false
+    return db.withTransaction {
+      val candidates = reserveDao.getAll()
+        .filter {
+          it.reserveType == ReserveType.EMERGENCY_SAVINGS &&
+            it.status == ReserveStatus.RESERVED &&
+            it.remainingReservedCents > 0L
+        }
+        .sortedWith(compareBy<DebtReserveEntity> { it.createdAtEpochMillis }.thenBy { it.id })
+
+      val totalAvailable = candidates.sumOf { it.remainingReservedCents }
+      if (amountCents > totalAvailable) return@withTransaction false
+
+      var remainingToWithdraw = amountCents
+      var primaryReserveId: Long? = null
+      for (res in candidates) {
+        if (remainingToWithdraw <= 0L) break
+        if (primaryReserveId == null) primaryReserveId = res.id
+        val take = minOf(res.remainingReservedCents, remainingToWithdraw)
+        val newApplied = res.appliedAmountCents + take
+        val newStatus = if (newApplied >= res.amountCents) ReserveStatus.APPLIED else ReserveStatus.RESERVED
+        reserveDao.update(res.copy(appliedAmountCents = newApplied, status = newStatus))
+        remainingToWithdraw -= take
+      }
+
+      val now = ManilaTime.nowMillis()
+      if (logAsExpense) {
+        val cleanTitle = title.ifBlank { "Emergency expense" }
+        val expenseId = expenseDao.insert(
+          ExpenseEntity(
+            date = dateIso,
+            category = ExpenseCategory.EMERGENCY,
+            title = cleanTitle,
+            amountCents = amountCents,
+            isSchoolDay = false,
+            notes = notes,
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+        transactionDao.insert(
+          TransactionEntity(
+            type = TransactionType.EXPENSE,
+            title = cleanTitle,
+            amountCents = amountCents,
+            date = dateIso,
+            reserveId = primaryReserveId,
+            expenseId = expenseId,
+            fundedFromReserveCents = amountCents,
+            category = ExpenseCategory.EMERGENCY.label,
+            notes = notes,
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+      } else {
+        transactionDao.insert(
+          TransactionEntity(
+            type = TransactionType.ADJUSTMENT,
+            title = title.ifBlank { "Emergency savings withdrawal" },
+            amountCents = amountCents,
+            date = dateIso,
+            reserveId = primaryReserveId,
+            fundedFromReserveCents = amountCents,
+            category = "Emergency Withdrawal",
+            notes = notes,
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+      }
+      true
     }
   }
 
@@ -262,13 +459,66 @@ class BaonPlanRepository(
     } else {
       debt.status
     }
-    return debtDao.insert(
-      debt.copy(
-        status = normalizedStatus,
-        updatedAtEpochMillis = now,
-        createdAtEpochMillis = if (debt.id == 0L) now else debt.createdAtEpochMillis
-      )
+    val normalized = debt.copy(
+      status = normalizedStatus,
+      updatedAtEpochMillis = now,
+      createdAtEpochMillis = if (debt.id == 0L) now else debt.createdAtEpochMillis
     )
+    return if (debt.id == 0L) {
+      debtDao.insert(normalized)
+    } else {
+      debtDao.update(normalized)
+      debt.id
+    }
+  }
+
+  suspend fun deleteDebt(debtId: Long) {
+    db.withTransaction {
+      // Unlink any reserves pointing to this debt
+      reserveDao.getAll()
+        .filter { it.targetDebtId == debtId }
+        .forEach { res ->
+          reserveDao.update(res.copy(targetDebtId = null))
+        }
+
+      // Revert any reserve portions used by linked non-voided repayments and unlink/void transactions
+      val linkedTxs = transactionDao.getAll().filter { it.debtId == debtId }
+      for (tx in linkedTxs) {
+        if (!tx.isVoided && tx.type == TransactionType.DEBT_REPAYMENT && tx.fundedFromReserveCents > 0L) {
+          restoreReserves(ReserveType.DEBT_REPAYMENT_RESERVE, tx.fundedFromReserveCents)
+        }
+        transactionDao.update(
+          tx.copy(
+            debtId = null,
+            installmentId = null,
+            isVoided = true,
+            isCorrected = true,
+            correctionReason = tx.correctionReason ?: "Loan deleted"
+          )
+        )
+      }
+
+      debtDao.deleteById(debtId)
+    }
+  }
+
+  private suspend fun restoreReserves(type: ReserveType, amountToRestoreCents: Long) {
+    if (amountToRestoreCents <= 0L) return
+    var toRestore = amountToRestoreCents
+    val reserves = reserveDao.getAll()
+      .filter { it.reserveType == type && it.appliedAmountCents > 0L }
+      .sortedByDescending { it.createdAtEpochMillis }
+    for (res in reserves) {
+      if (toRestore <= 0L) break
+      val giveBack = minOf(res.appliedAmountCents, toRestore)
+      reserveDao.update(
+        res.copy(
+          appliedAmountCents = res.appliedAmountCents - giveBack,
+          status = ReserveStatus.RESERVED
+        )
+      )
+      toRestore -= giveBack
+    }
   }
 
   suspend fun setDebtArchived(debtId: Long, archived: Boolean) {
@@ -639,28 +889,7 @@ class BaonPlanRepository(
           val debt = tx.debtId?.let { debtDao.getById(it) }
           if (voidTransaction) {
             if (debt != null) {
-              val restoredRemaining = debt.remainingBalanceCents + tx.amountCents
-              val restoredTracked = (debt.trackedPaidCents - tx.amountCents).coerceAtLeast(0L)
-              val restoredStatus = if (restoredRemaining > 0L && debt.status == DebtStatus.PAID) {
-                DebtStatus.ACTIVE
-              } else {
-                debt.status
-              }
-              val restoredInstallmentCount = if (debt.installmentAmountCents > 0L && restoredRemaining > 0L) {
-                ceil(restoredRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
-              } else {
-                debt.remainingInstallmentsCount
-              }
-              debtDao.update(
-                debt.copy(
-                  trackedPaidCents = restoredTracked,
-                  remainingBalanceCents = restoredRemaining,
-                  remainingInstallmentsCount = restoredInstallmentCount,
-                  status = restoredStatus,
-                  updatedAtEpochMillis = ManilaTime.nowMillis()
-                )
-              )
-              // Revert installments linked to this transaction
+              // Revert installments linked to this transaction first so unpaid count & dates stay accurate
               val linkedInsts = installmentDao.getByDebtId(debt.id).filter { it.linkedTransactionId == tx.id }
               var toRevert = tx.amountCents
               for (inst in linkedInsts.sortedByDescending { it.installmentNumber }) {
@@ -677,24 +906,50 @@ class BaonPlanRepository(
                 )
                 toRevert -= revertAmt
               }
+
+              val allInstAfterRevert = installmentDao.getByDebtId(debt.id)
+              val firstUnpaidAfterRevert = allInstAfterRevert.firstOrNull {
+                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
+              }
+              val unpaidCountAfterRevert = allInstAfterRevert.count {
+                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
+              }
+
+              val restoredRemaining = debt.remainingBalanceCents + tx.amountCents
+              val restoredTracked = (debt.trackedPaidCents - tx.amountCents).coerceAtLeast(0L)
+              val restoredStatus = if (restoredRemaining > 0L && debt.status == DebtStatus.PAID) {
+                DebtStatus.ACTIVE
+              } else {
+                debt.status
+              }
+              val restoredInstallmentCount = when {
+                unpaidCountAfterRevert > 0 -> unpaidCountAfterRevert
+                debt.installmentAmountCents > 0L && restoredRemaining > 0L ->
+                  ceil(restoredRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+                else -> debt.remainingInstallmentsCount
+              }
+
+              val remainingRepaymentDates = transactionDao.getAll()
+                .filter { !it.isVoided && it.id != tx.id && it.debtId == debt.id && it.type == TransactionType.DEBT_REPAYMENT }
+                .map { it.date }
+                .maxOrNull()
+
+              debtDao.update(
+                debt.copy(
+                  trackedPaidCents = restoredTracked,
+                  remainingBalanceCents = restoredRemaining,
+                  remainingInstallmentsCount = restoredInstallmentCount,
+                  nextDueDate = firstUnpaidAfterRevert?.dueDate ?: debt.nextDueDate,
+                  dateStatus = firstUnpaidAfterRevert?.dateStatus ?: debt.dateStatus,
+                  lastKnownPaidDate = remainingRepaymentDates,
+                  status = restoredStatus,
+                  updatedAtEpochMillis = ManilaTime.nowMillis()
+                )
+              )
             }
             // Restore funded reserve portion if applicable
             if (tx.fundedFromReserveCents > 0L) {
-              var toRestore = tx.fundedFromReserveCents
-              val reserves = reserveDao.getAll()
-                .filter { it.reserveType == ReserveType.DEBT_REPAYMENT_RESERVE && it.appliedAmountCents > 0L }
-                .sortedByDescending { it.createdAtEpochMillis }
-              for (res in reserves) {
-                if (toRestore <= 0L) break
-                val giveBack = minOf(res.appliedAmountCents, toRestore)
-                reserveDao.update(
-                  res.copy(
-                    appliedAmountCents = res.appliedAmountCents - giveBack,
-                    status = ReserveStatus.RESERVED
-                  )
-                )
-                toRestore -= giveBack
-              }
+              restoreReserves(ReserveType.DEBT_REPAYMENT_RESERVE, tx.fundedFromReserveCents)
             }
             transactionDao.update(
               tx.copy(
@@ -797,6 +1052,9 @@ class BaonPlanRepository(
           val expense = tx.expenseId?.let { expenseDao.getById(it) }
           if (voidTransaction) {
             if (expense != null) expenseDao.deleteById(expense.id)
+            if (tx.fundedFromReserveCents > 0L) {
+              restoreReserves(ReserveType.EMERGENCY_SAVINGS, tx.fundedFromReserveCents)
+            }
             transactionDao.update(
               tx.copy(isVoided = true, isCorrected = true, correctionReason = reason)
             )
@@ -860,6 +1118,24 @@ class BaonPlanRepository(
         }
 
         TransactionType.ADJUSTMENT -> {
+          if (voidTransaction && tx.fundedFromReserveCents > 0L) {
+            when (tx.category) {
+              "Emergency Withdrawal" ->
+                restoreReserves(ReserveType.EMERGENCY_SAVINGS, tx.fundedFromReserveCents)
+              "Reserve Release" -> {
+                val targetRes = tx.reserveId?.let { reserveDao.getById(it) }
+                if (targetRes != null) {
+                  val restoredApplied = (targetRes.appliedAmountCents - tx.fundedFromReserveCents).coerceAtLeast(0L)
+                  reserveDao.update(
+                    targetRes.copy(
+                      appliedAmountCents = restoredApplied,
+                      status = if (restoredApplied < targetRes.amountCents) ReserveStatus.RESERVED else ReserveStatus.APPLIED
+                    )
+                  )
+                }
+              }
+            }
+          }
           transactionDao.update(
             tx.copy(
               title = effectiveTitle,
@@ -910,5 +1186,6 @@ class BaonPlanRepository(
       if (payload.expenses.isNotEmpty()) expenseDao.insertAll(payload.expenses)
       if (payload.debtReserves.isNotEmpty()) reserveDao.insertAll(payload.debtReserves)
     }
+    prefs.clearOperationalPrefs()
   }
 }

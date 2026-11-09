@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
+import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Payments
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
@@ -28,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.PaymentUrgency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -45,6 +48,8 @@ fun DashboardScreen(
   state: BaonPlanUiState,
   onQuickAddExpense: () -> Unit,
   onQuickRecordRepayment: () -> Unit,
+  onQuickRecordAllowance: () -> Unit,
+  onQuickAddDebt: () -> Unit,
   onOpenDebts: () -> Unit,
   onOpenDebtDetail: (Long) -> Unit,
   onOpenCalendar: () -> Unit,
@@ -54,6 +59,7 @@ fun DashboardScreen(
   val weekly = state.weeklySummary
   val overview = state.paymentOverview
   val progress = state.repaymentProgress
+  val readiness = state.duesReadiness
 
   val nextPayment = overview.overduePayments.firstOrNull()
     ?: overview.dueTodayPayments.firstOrNull()
@@ -218,6 +224,35 @@ fun DashboardScreen(
               }
             }
           }
+          if (readiness.status != DuesCoverageStatus.NO_DUES) {
+            CalmDivider(modifier = Modifier.padding(vertical = 10.dp))
+            val (coverageText, coverageColor) = when (readiness.status) {
+              DuesCoverageStatus.COVERED_BY_RESERVE ->
+                "Covered by reserve" to semantic.positive
+              DuesCoverageStatus.COVERED_WITH_CASH ->
+                "Covered with cash left" to semantic.positive
+              DuesCoverageStatus.SHORTFALL ->
+                "${MoneyFormatter.formatPesoCompact(readiness.unmetShortfallCents)} short" to semantic.warning
+              DuesCoverageStatus.NO_DUES -> "" to MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically
+            ) {
+              Text(
+                text = "Next 7 days due: ${MoneyFormatter.formatPesoCompact(readiness.dueNext7DaysCents)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+              Text(
+                text = coverageText,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = coverageColor
+              )
+            }
+          }
         } else {
           Text(
             text = "No upcoming payments",
@@ -331,19 +366,34 @@ fun DashboardScreen(
           Spacer(modifier = Modifier.width(8.dp))
           Text("Add expense", style = MaterialTheme.typography.labelLarge)
         }
+        val rightActionLabel = when {
+          state.totalActiveDebtCents > 0L -> "Record payment"
+          weekly.recordedAllowanceCents == 0L -> "Record baon"
+          else -> "Add debt"
+        }
+        val rightActionIcon = when {
+          state.totalActiveDebtCents > 0L -> Icons.Outlined.Payments
+          weekly.recordedAllowanceCents == 0L -> Icons.Outlined.AccountBalanceWallet
+          else -> Icons.Outlined.Add
+        }
+        val onRightAction = when {
+          state.totalActiveDebtCents > 0L -> onQuickRecordRepayment
+          weekly.recordedAllowanceCents == 0L -> onQuickRecordAllowance
+          else -> onQuickAddDebt
+        }
         Button(
-          onClick = onQuickRecordRepayment,
+          onClick = onRightAction,
           shape = RoundedCornerShape(14.dp),
           contentPadding = PaddingValues(vertical = 14.dp, horizontal = 12.dp),
           modifier = Modifier.weight(1f)
         ) {
           Icon(
-            imageVector = Icons.Outlined.Payments,
+            imageVector = rightActionIcon,
             contentDescription = null,
             modifier = Modifier.size(18.dp)
           )
           Spacer(modifier = Modifier.width(8.dp))
-          Text("Record payment", style = MaterialTheme.typography.labelLarge)
+          Text(rightActionLabel, style = MaterialTheme.typography.labelLarge)
         }
       }
     }

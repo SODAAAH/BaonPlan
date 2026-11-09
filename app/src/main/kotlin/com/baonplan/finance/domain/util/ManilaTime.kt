@@ -6,6 +6,7 @@ import com.baonplan.finance.domain.model.RepaymentFrequency
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -22,6 +23,16 @@ object ManilaTime {
   private val shortDateFormatter = DateTimeFormatter.ofPattern("MMM d", Locale.US)
   private val dayOfWeekFormatter = DateTimeFormatter.ofPattern("EEE, MMM d, yyyy", Locale.US)
   private val monthYearFormatter = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US)
+  private val dateTimeFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy · h:mm a", Locale.US)
+  private val time12hFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
+
+  fun formatTimestamp(epochMillis: Long): String {
+    if (epochMillis <= 0L) return "Never"
+    return Instant.ofEpochMilli(epochMillis).atZone(ZONE).format(dateTimeFormatter)
+  }
+
+  fun formatTime12h(hour: Int, minute: Int): String =
+    LocalTime.of(hour.coerceIn(0, 23), minute.coerceIn(0, 59)).format(time12hFormatter)
 
   fun today(now: Instant = Instant.now()): LocalDate = now.atZone(ZONE).toLocalDate()
 
