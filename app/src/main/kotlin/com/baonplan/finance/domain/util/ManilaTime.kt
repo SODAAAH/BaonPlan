@@ -133,7 +133,7 @@ object ManilaTime {
         val days = customIntervalDays?.takeIf { it > 0 } ?: return null
         fromDate.plusDays(days.toLong())
       }
-      RepaymentFrequency.ONE_TIME, RepaymentFrequency.UNKNOWN -> null
+      RepaymentFrequency.ONE_TIME, RepaymentFrequency.IRREGULAR, RepaymentFrequency.UNKNOWN -> null
     }
   }
 }

@@ -37,3 +37,10 @@
 }
 -keep class com.baonplan.finance.domain.model.** { *; }
 -keep class com.baonplan.finance.widget.** { *; }
+
+# Keep Google ML Kit on-device text recognition and vision pipeline bindings
+-keep class com.google.mlkit.** { *; }
+-dontwarn com.google.mlkit.**
+-dontwarn com.google.android.gms.**
+-dontwarn com.google.android.datatransport.**
+-keepattributes *Annotation*, Signature, InnerClasses, SourceFile, LineNumberTable

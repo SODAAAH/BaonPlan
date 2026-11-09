@@ -422,7 +422,7 @@ object FinancialCalculator {
     dateStatus: DueDateStatus
   ): List<GeneratedInstallmentSpec> {
     if (count <= 0 || installmentAmountCents <= 0L) return emptyList()
-    if (frequency == RepaymentFrequency.UNKNOWN) return emptyList()
+    if (frequency == RepaymentFrequency.UNKNOWN || frequency == RepaymentFrequency.IRREGULAR) return emptyList()
     if (frequency == RepaymentFrequency.CUSTOM_DAYS && (customIntervalDays == null || customIntervalDays <= 0)) {
       return emptyList()
     }
@@ -532,6 +532,7 @@ object FinancialCalculator {
         }
       } else if (
         debt.frequency != RepaymentFrequency.UNKNOWN &&
+        debt.frequency != RepaymentFrequency.IRREGULAR &&
         (debt.dateStatus == DueDateStatus.CONFIRMED || debt.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
       ) {
         val firstDue = ManilaTime.parseDate(debt.nextDueDate)

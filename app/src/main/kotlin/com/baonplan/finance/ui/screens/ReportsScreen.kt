@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -63,10 +64,21 @@ fun ReportsScreen(
   val progress = state.repaymentProgress
   val weekly = state.weeklySummary
 
-  val unconfirmedOrUnknown = activeDebts.filter {
-    it.frequency == RepaymentFrequency.UNKNOWN ||
-      it.dateStatus == DueDateStatus.UNCONFIRMED ||
-      it.dateStatus == DueDateStatus.UNKNOWN
+  val installmentsByDebt = state.installments.groupBy { it.debtId }
+  val unconfirmedOrUnknown = activeDebts.filter { debt ->
+    val unpaidRows = installmentsByDebt[debt.id].orEmpty()
+      .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+    val allUnpaidRowsDated = unpaidRows.isNotEmpty() && unpaidRows.all {
+      ManilaTime.parseDate(it.dueDate) != null &&
+        (it.dateStatus == DueDateStatus.CONFIRMED || it.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
+    }
+    debt.frequency == RepaymentFrequency.UNKNOWN ||
+      (unpaidRows.isNotEmpty() && !allUnpaidRowsDated) ||
+      (unpaidRows.isEmpty() && (
+        debt.frequency == RepaymentFrequency.IRREGULAR ||
+          debt.dateStatus == DueDateStatus.UNCONFIRMED ||
+          debt.dateStatus == DueDateStatus.UNKNOWN
+        ))
   }
 
   LazyColumn(

@@ -3,11 +3,17 @@ package com.baonplan.finance.data
 import android.app.Application
 import android.content.Context
 import androidx.room.Room
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.SettingsPreferencesDataStore
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.repository.BaonPlanRepository
+import com.baonplan.finance.data.repository.RetainedAttachmentSource
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
@@ -16,6 +22,7 @@ import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
+import java.time.LocalDate
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -382,5 +389,190 @@ class BaonPlanRepositoryPersistenceTest {
     assertFalse(generatedForUnknown)
     assertTrue(db.installmentDao().getByDebtId(unknownLoanId).isEmpty())
     assertNull(db.debtDao().getById(unknownLoanId)!!.nextDueDate)
+  }
+
+  @Test
+  fun saveImportedDebt_irregularScheduleAndAttachment_persistsAndCleansUp() = runTest {
+    val attachmentDir = File(context.cacheDir, "test_attachments_${System.nanoTime()}")
+    val repoWithAttachments = BaonPlanRepository(db, prefs, attachmentDir)
+    repoWithAttachments.ensureInitialized()
+
+    val tempScanFile = File(context.cacheDir, "scan_tmp_${System.nanoTime()}.jpg").apply {
+      writeBytes(byteArrayOf(0x01, 0x02, 0x03, 0x04))
+    }
+
+    try {
+      val importedDebt = DebtEntity(
+        name = "Atome Irregular Plan",
+        lender = "Atome",
+        category = "BNPL",
+        originalPrincipalCents = 150_000L,
+        totalScheduledRepaymentCents = 150_000L,
+        priorPaidCents = 40_000L,
+        isPriorPaidKnown = true,
+        remainingBalanceCents = 110_000L,
+        installmentAmountCents = 35_000L,
+        remainingInstallmentsCount = 3,
+        frequency = RepaymentFrequency.IRREGULAR,
+        nextDueDate = "2026-01-19",
+        dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+      )
+      val rows = listOf(
+        InstallmentEntity(
+          debtId = 0L,
+          installmentNumber = 1,
+          dueDate = "2026-01-05",
+          amountDueCents = 40_000L,
+          paidAmountCents = 40_000L,
+          dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION,
+          status = InstallmentStatus.PAID,
+          paidDate = "2026-01-05"
+        ),
+        InstallmentEntity(
+          debtId = 0L,
+          installmentNumber = 2,
+          dueDate = "2026-01-19",
+          amountDueCents = 35_000L,
+          dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION,
+          status = InstallmentStatus.UPCOMING
+        ),
+        InstallmentEntity(
+          debtId = 0L,
+          installmentNumber = 3,
+          dueDate = "2026-02-02",
+          amountDueCents = 35_000L,
+          dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION,
+          status = InstallmentStatus.UPCOMING
+        ),
+        InstallmentEntity(
+          debtId = 0L,
+          installmentNumber = 4,
+          dueDate = "2026-02-27",
+          amountDueCents = 40_000L,
+          dateStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION,
+          status = InstallmentStatus.UPCOMING
+        )
+      )
+
+      val newDebtId = repoWithAttachments.saveImportedDebtWithSchedule(
+        debt = importedDebt,
+        scheduleRows = rows,
+        attachmentSources = listOf(
+          RetainedAttachmentSource(
+            sourceFile = tempScanFile,
+            displayLabel = "Screenshot #1",
+            screenshotIndex = 0
+          )
+        )
+      )
+
+      val savedDebt = db.debtDao().getById(newDebtId)!!
+      assertEquals(0L, savedDebt.trackedPaidCents)
+      assertEquals(40_000L, savedDebt.priorPaidCents)
+      assertEquals("2026-01-19", savedDebt.nextDueDate)
+
+      val savedRows = db.installmentDao().getByDebtId(newDebtId)
+      assertEquals(4, savedRows.size)
+      assertTrue(savedRows.all { it.linkedTransactionId == null })
+
+      val breakdown = FinancialCalculator.calculateLoanCostBreakdown(savedDebt)
+      assertEquals(40_000L, breakdown.totalKnownPaidCents)
+
+      // Payoff insights MUST include dated irregular loan without fabricating dates
+      val today = LocalDate.of(2026, 1, 10)
+      val overview = FinancialCalculator.buildPaymentOverview(listOf(savedDebt), savedRows, today)
+      val payoff = FinancialCalculator.calculatePayoffInsights(listOf(savedDebt), savedRows, overview, today)
+      assertEquals(1, payoff.includedDebtsCount)
+      assertEquals("2026-02-27", payoff.estimatedDebtFreeDateIso)
+
+      // Confirming next date preserves irregular extracted rows instead of wiping schedule
+      repoWithAttachments.confirmDebtDate(newDebtId, "2026-01-19", generateFullSchedule = true)
+      val afterConfirmRows = db.installmentDao().getByDebtId(newDebtId)
+      assertEquals(listOf("2026-01-05", "2026-01-19", "2026-02-02", "2026-02-27"), afterConfirmRows.map { it.dueDate })
+
+      // Opted-in attachment copied to private dir & cleaned on deleteDebt
+      val storedAttachments = db.debtAttachmentDao().getByDebtId(newDebtId)
+      assertEquals(1, storedAttachments.size)
+      val storedFile = repoWithAttachments.resolveAttachmentFile(storedAttachments.single().fileName)!!
+      assertTrue(storedFile.exists())
+
+      repoWithAttachments.deleteDebt(newDebtId)
+      assertTrue(db.debtAttachmentDao().getByDebtId(newDebtId).isEmpty())
+      assertFalse(storedFile.exists())
+    } finally {
+      tempScanFile.delete()
+      attachmentDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun migration1To2_preservesV1RecordsAndEnablesDebtAttachmentsWithCascadeDelete() = runTest {
+    val v1DbFile = File(context.cacheDir, "migration_v1_${System.nanoTime()}.db")
+    try {
+      val openHelper = FrameworkSQLiteOpenHelperFactory().create(
+        SupportSQLiteOpenHelper.Configuration.builder(context)
+          .name(v1DbFile.absolutePath)
+          .callback(object : SupportSQLiteOpenHelper.Callback(1) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debts` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `lender` TEXT NOT NULL, `category` TEXT NOT NULL, `originalPrincipalCents` INTEGER, `amountReceivedCents` INTEGER, `interestCents` INTEGER, `serviceFeeCents` INTEGER, `processingFeeCents` INTEGER, `totalScheduledRepaymentCents` INTEGER, `priorPaidCents` INTEGER NOT NULL, `isPriorPaidKnown` INTEGER NOT NULL, `trackedPaidCents` INTEGER NOT NULL, `remainingBalanceCents` INTEGER NOT NULL, `installmentAmountCents` INTEGER NOT NULL, `remainingInstallmentsCount` INTEGER NOT NULL, `frequency` TEXT NOT NULL, `customIntervalDays` INTEGER, `lastKnownPaidDate` TEXT, `nextDueDate` TEXT, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `installments` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `installmentNumber` INTEGER NOT NULL, `dueDate` TEXT, `amountDueCents` INTEGER NOT NULL, `paidAmountCents` INTEGER NOT NULL, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `paidDate` TEXT, `linkedTransactionId` INTEGER, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_installments_debtId` ON `installments` (`debtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `transactions` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `type` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `date` TEXT NOT NULL, `debtId` INTEGER, `installmentId` INTEGER, `reserveId` INTEGER, `expenseId` INTEGER, `allowanceId` INTEGER, `fundedFromReserveCents` INTEGER NOT NULL, `category` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `isCorrected` INTEGER NOT NULL, `isVoided` INTEGER NOT NULL, `correctionReason` TEXT, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `transactions` (`date`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_debtId` ON `transactions` (`debtId`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_installmentId` ON `transactions` (`installmentId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `allowance_records` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `receivedDate` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `sourceLabel` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_allowance_records_weekStartDate` ON `allowance_records` (`weekStartDate`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `expenses` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `date` TEXT NOT NULL, `category` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `isSchoolDay` INTEGER NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_expenses_date` ON `expenses` (`date`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debt_reserves` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `targetDebtId` INTEGER, `reserveType` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `appliedAmountCents` INTEGER NOT NULL, `status` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_weekStartDate` ON `debt_reserves` (`weekStartDate`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_targetDebtId` ON `debt_reserves` (`targetDebtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `user_settings` (`id` INTEGER NOT NULL, `minWeeklyAllowanceCents` INTEGER NOT NULL, `maxWeeklyAllowanceCents` INTEGER NOT NULL, `conservativeAllowanceCents` INTEGER NOT NULL, `schoolDaysPerWeek` INTEGER NOT NULL, `foodPerSchoolDayCents` INTEGER NOT NULL, `weeklyFoodBudgetCents` INTEGER NOT NULL, `weeklyOtherExpensesBudgetCents` INTEGER NOT NULL, `weeklyEmergencySavingsTargetCents` INTEGER NOT NULL, `weeklyDebtReserveTargetCents` INTEGER NOT NULL, `remindersEnabled` INTEGER NOT NULL, `allowanceReminderDayOfWeek` INTEGER NOT NULL, `reminderHour` INTEGER NOT NULL, `reminderMinute` INTEGER NOT NULL, `isManuallyEntered` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            }
+
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+          })
+          .build()
+      )
+
+      openHelper.writableDatabase.use { raw ->
+        raw.execSQL(
+          "INSERT INTO `debts` (`id`, `name`, `lender`, `category`, `priorPaidCents`, `isPriorPaidKnown`, `trackedPaidCents`, `remainingBalanceCents`, `installmentAmountCents`, `remainingInstallmentsCount`, `frequency`, `dateStatus`, `status`, `isManuallyEntered`, `notes`, `createdAtEpochMillis`, `updatedAtEpochMillis`) " +
+            "VALUES (7, 'Legacy v1 Loan', 'BillEase', 'BNPL', 0, 0, 0, 120000, 40000, 3, 'MONTHLY', 'CONFIRMED', 'ACTIVE', 1, '', 1000, 1000)"
+        )
+      }
+      openHelper.close()
+
+      val migratedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, v1DbFile.absolutePath)
+        .addMigrations(BaonPlanDatabase.MIGRATION_1_2)
+        .allowMainThreadQueries()
+        .build()
+      try {
+        val migratedDebt = migratedDb.debtDao().getById(7L)!!
+        assertEquals("Legacy v1 Loan", migratedDebt.name)
+        assertEquals(120_000L, migratedDebt.remainingBalanceCents)
+
+        migratedDb.debtAttachmentDao().insertAll(
+          listOf(
+            DebtAttachmentEntity(
+              debtId = 7L,
+              fileName = "debt_7_s0.jpg",
+              displayLabel = "Screenshot #1",
+              screenshotIndex = 0,
+              createdAtEpochMillis = 2000L
+            )
+          )
+        )
+        assertEquals(1, migratedDb.debtAttachmentDao().getByDebtId(7L).size)
+
+        migratedDb.debtDao().deleteById(7L)
+        assertTrue(migratedDb.debtAttachmentDao().getByDebtId(7L).isEmpty())
+      } finally {
+        migratedDb.close()
+      }
+    } finally {
+      v1DbFile.delete()
+    }
   }
 }

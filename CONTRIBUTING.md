@@ -2,18 +2,20 @@
 
 Thank you for your interest in contributing to **BaonPlan**! BaonPlan is an open-source, 100% offline native Android personal finance app designed to stay calm, honest, and dependable for Filipino college students.
 
+By participating in this project, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Core Design & Engineering Principles
 
 Please keep every change aligned with these non-negotiable rules:
 
 1. **100% Offline & Privacy-First**:
-   - Never add `INTERNET` permission, analytics, crash-reporting SDKs, ads, cloud sync, or WebViews.
-   - Keep `android:allowBackup="false"` and ensure all financial data stays local in Room SQLite and DataStore Preferences.
+   - Never add `INTERNET` / `ACCESS_NETWORK_STATE` / `CAMERA` / `READ_MEDIA_IMAGES` permissions, analytics, crash-reporting SDKs, ads, cloud sync, external AI APIs, or WebViews; keep `datatransport` network services stripped via `AndroidManifest.xml`.
+   - Keep `android:allowBackup="false"`, ensure all financial data stays local in Room SQLite, DataStore Preferences, and private `filesDir/debt_attachments/`, and never log OCR text, file URIs, lender names, or peso amounts.
 2. **Exact Integer Centavo Arithmetic**:
    - Store and calculate all money amounts in `Long` centavos (never `Float` or `Double` for currency math).
    - Parse user inputs via `MoneyFormatter.parsePesoToCents` (`BigDecimal`) and format outputs with `MoneyFormatter`.
 3. **Honest Date & Balance Tracking**:
-   - Never invent payment due dates for loans marked `Unknown` or `Unconfirmed`.
+   - Never invent payment due dates for loans marked `Unknown`, `Irregular`, or `Unconfirmed`, and keep `"Balance"` distinct from `"Remaining Installment Total"` in OCR extraction under `domain/ocr/` (keep `domain/ocr/` pure JVM-testable Kotlin).
    - Keep debt reserves isolated from paid-off balances until an actual repayment is recorded.
    - Ensure transaction edits and voids update linked debts, installments, budgets, and reserves atomically inside Room transactions.
 4. **Calm Native UI/UX**:

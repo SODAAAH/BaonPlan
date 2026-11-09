@@ -1,9 +1,12 @@
 package com.baonplan.finance.ui.components
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,13 +14,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -25,6 +35,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,10 +61,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
+import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.ocr.DebtDuplicateDetector
+import com.baonplan.finance.domain.ocr.DebtImportDraft
+import com.baonplan.finance.domain.ocr.DebtImportValidator
+import com.baonplan.finance.domain.ocr.ExtractedField
+import com.baonplan.finance.domain.ocr.ExtractedInstallmentRow
+import com.baonplan.finance.domain.ocr.ExtractedInstallmentStatus
+import com.baonplan.finance.domain.ocr.ExtractionConfidence
+import com.baonplan.finance.domain.ocr.FieldOrigin
+import com.baonplan.finance.domain.ocr.ImportSeverity
+import com.baonplan.finance.ui.theme.LocalBaonColors
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
@@ -962,45 +987,175 @@ fun CreateReserveDialog(
 fun DebtEditorDialog(
   existing: DebtEntity?,
   onSave: (DebtEntity) -> Unit,
-  onDismiss: () -> Unit
+  onDismiss: () -> Unit,
+  prefillDraft: DebtImportDraft? = null,
+  existingDebts: List<DebtEntity> = emptyList(),
+  existingInstallments: List<InstallmentEntity> = emptyList(),
+  partialScanWarnings: List<String> = emptyList(),
+  isSavingImport: Boolean = false,
+  onSaveImported: ((debt: DebtEntity, scheduleRows: List<InstallmentEntity>, attachScreenshots: Boolean) -> Unit)? = null
 ) {
+  val scanDraft = if (existing == null) prefillDraft else null
+  val isScanReview = scanDraft != null
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-  var name by remember { mutableStateOf(existing?.name ?: "") }
-  var lender by remember { mutableStateOf(existing?.lender ?: "") }
-  var category by remember { mutableStateOf(existing?.category ?: "Installment Loan") }
-  var originalPrincipalText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.originalPrincipalCents)) }
-  var amountReceivedText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.amountReceivedCents)) }
-  var interestText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.interestCents)) }
-  var serviceFeeText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.serviceFeeCents)) }
-  var processingFeeText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.processingFeeCents)) }
-  var totalScheduledText by remember { mutableStateOf(MoneyFormatter.formatEditableAmount(existing?.totalScheduledRepaymentCents)) }
-  var priorPaidText by remember {
+  val stateKey: Any = existing?.id ?: scanDraft?.candidateId ?: "manual_new"
+
+  var name by remember(stateKey) {
+    mutableStateOf(existing?.name ?: prefillDraft?.loanName?.value.orEmpty())
+  }
+  var lender by remember(stateKey) {
+    mutableStateOf(existing?.lender ?: prefillDraft?.lender?.value.orEmpty())
+  }
+  var category by remember(stateKey) {
     mutableStateOf(
-      if (existing?.isPriorPaidKnown == true) MoneyFormatter.formatEditableAmount(existing.priorPaidCents) else ""
+      existing?.category
+        ?: prefillDraft?.loanType?.value?.takeIf { it.isNotBlank() }
+        ?: "Installment Loan"
     )
   }
-  var remainingBalanceText by remember {
+  var loanReferenceId by remember(stateKey) {
+    mutableStateOf(prefillDraft?.loanReferenceId?.value.orEmpty())
+  }
+  var originalPrincipalText by remember(stateKey) {
     mutableStateOf(
-      if (existing != null) MoneyFormatter.formatEditableAmount(existing.remainingBalanceCents) else ""
+      MoneyFormatter.formatEditableAmount(
+        existing?.originalPrincipalCents ?: prefillDraft?.originalPrincipalCents?.value
+      )
     )
   }
-  var installmentAmountText by remember {
+  var amountReceivedText by remember(stateKey) {
     mutableStateOf(
-      if (existing != null && existing.installmentAmountCents > 0L) {
-        MoneyFormatter.formatEditableAmount(existing.installmentAmountCents)
-      } else ""
+      MoneyFormatter.formatEditableAmount(
+        existing?.amountReceivedCents ?: prefillDraft?.amountReceivedCents?.value
+      )
     )
   }
-  var remainingCountText by remember {
-    mutableStateOf(existing?.remainingInstallmentsCount?.takeIf { it > 0 }?.toString() ?: "")
+  var interestText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.interestCents ?: prefillDraft?.interestCents?.value
+      )
+    )
   }
-  var frequency by remember { mutableStateOf(existing?.frequency ?: RepaymentFrequency.UNKNOWN) }
-  var customDaysText by remember { mutableStateOf(existing?.customIntervalDays?.toString() ?: "") }
-  var nextDueDate by remember { mutableStateOf(existing?.nextDueDate) }
-  var dateStatus by remember { mutableStateOf(existing?.dateStatus ?: DueDateStatus.UNCONFIRMED) }
-  var notes by remember { mutableStateOf(existing?.notes ?: "") }
-  var errorText by remember { mutableStateOf<String?>(null) }
+  var serviceFeeText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.serviceFeeCents ?: prefillDraft?.serviceFeeCents?.value
+      )
+    )
+  }
+  var processingFeeText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.processingFeeCents ?: prefillDraft?.processingFeeCents?.value
+      )
+    )
+  }
+  var otherFeesText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(prefillDraft?.otherFeesCents?.value)
+    )
+  }
+  var totalScheduledText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.totalScheduledRepaymentCents ?: prefillDraft?.totalRepaymentCents?.value
+      )
+    )
+  }
+  var priorPaidText by remember(stateKey) {
+    mutableStateOf(
+      when {
+        existing?.isPriorPaidKnown == true -> MoneyFormatter.formatEditableAmount(existing.priorPaidCents)
+        prefillDraft?.calculatedPaidScheduleSumCents?.value != null &&
+          prefillDraft.calculatedPaidScheduleSumCents.value > 0L ->
+          MoneyFormatter.formatEditableAmount(prefillDraft.calculatedPaidScheduleSumCents.value)
+        else -> ""
+      }
+    )
+  }
+  var remainingBalanceText by remember(stateKey) {
+    mutableStateOf(
+      when {
+        existing != null -> MoneyFormatter.formatEditableAmount(existing.remainingBalanceCents)
+        prefillDraft?.outstandingBalanceCents?.value != null ->
+          MoneyFormatter.formatEditableAmount(prefillDraft.outstandingBalanceCents.value)
+        prefillDraft?.remainingInstallmentTotalCents?.value != null ->
+          MoneyFormatter.formatEditableAmount(prefillDraft.remainingInstallmentTotalCents.value)
+        else -> ""
+      }
+    )
+  }
+  var installmentAmountText by remember(stateKey) {
+    mutableStateOf(
+      when {
+        existing != null && existing.installmentAmountCents > 0L ->
+          MoneyFormatter.formatEditableAmount(existing.installmentAmountCents)
+        prefillDraft?.installmentAmountCents?.value != null && prefillDraft.installmentAmountCents.value > 0L ->
+          MoneyFormatter.formatEditableAmount(prefillDraft.installmentAmountCents.value)
+        else -> ""
+      }
+    )
+  }
+  var originalCountText by remember(stateKey) {
+    mutableStateOf(prefillDraft?.originalInstallmentCount?.value?.toString().orEmpty())
+  }
+  var paidCountText by remember(stateKey) {
+    mutableStateOf(prefillDraft?.paidInstallmentsCount?.value?.toString().orEmpty())
+  }
+  var remainingCountText by remember(stateKey) {
+    mutableStateOf(
+      existing?.remainingInstallmentsCount?.takeIf { it > 0 }?.toString()
+        ?: prefillDraft?.remainingInstallmentsCount?.value?.toString().orEmpty()
+    )
+  }
+  var frequency by remember(stateKey) {
+    mutableStateOf(
+      existing?.frequency
+        ?: prefillDraft?.frequency?.value
+        ?: RepaymentFrequency.UNKNOWN
+    )
+  }
+  var customDaysText by remember(stateKey) {
+    mutableStateOf(
+      existing?.customIntervalDays?.toString()
+        ?: prefillDraft?.customIntervalDays?.value?.toString().orEmpty()
+    )
+  }
+  var nextDueDate by remember(stateKey) {
+    mutableStateOf(existing?.nextDueDate ?: prefillDraft?.nextDueDateIso?.value)
+  }
+  var finalDueDate by remember(stateKey) {
+    mutableStateOf(prefillDraft?.finalDueDateIso?.value)
+  }
+  var dateStatus by remember(stateKey) {
+    mutableStateOf(
+      existing?.dateStatus
+        ?: prefillDraft?.dueDateStatus
+        ?: DueDateStatus.UNCONFIRMED
+    )
+  }
+  var notes by remember(stateKey) { mutableStateOf(existing?.notes ?: "") }
+  var errorText by remember(stateKey) { mutableStateOf<String?>(null) }
+
+  val editableScheduleRows = remember(stateKey) {
+    mutableStateListOf<EditableScheduleRowState>().apply {
+      prefillDraft?.installmentRows.orEmpty().forEach { row ->
+        add(EditableScheduleRowState.fromExtracted(row))
+      }
+    }
+  }
+  var editingScheduleDateRowId by remember(stateKey) { mutableStateOf<String?>(null) }
+  var allowDuplicateOverride by remember(stateKey) { mutableStateOf(false) }
+  var attachScreenshots by remember(stateKey) { mutableStateOf(false) }
+  val isSaving = isSavingImport
+
   val scrollState = rememberScrollState()
+  val placeholderIfScan: (@Composable () -> Unit)? = if (isScanReview) {
+    { Text("Not detected") }
+  } else {
+    null
+  }
 
   LaunchedEffect(errorText) {
     if (errorText != null) {
@@ -1008,8 +1163,91 @@ fun DebtEditorDialog(
     }
   }
 
+  val parsedRemainingBalance = MoneyFormatter.parsePesoToCents(remainingBalanceText)
+  val parsedInstallmentAmount = MoneyFormatter.parsePesoToCents(installmentAmountText)
+  val parsedOrigPrincipal = MoneyFormatter.parsePesoToCents(originalPrincipalText)
+  val parsedAmountReceived = MoneyFormatter.parsePesoToCents(amountReceivedText)
+  val parsedInterest = MoneyFormatter.parsePesoToCents(interestText)
+  val parsedServiceFee = MoneyFormatter.parsePesoToCents(serviceFeeText)
+  val parsedProcessingFee = MoneyFormatter.parsePesoToCents(processingFeeText)
+  val parsedOtherFees = MoneyFormatter.parsePesoToCents(otherFeesText)
+  val parsedTotalScheduled = MoneyFormatter.parsePesoToCents(totalScheduledText)
+  val parsedOrigCount = originalCountText.toIntOrNull()
+  val parsedPaidCount = paidCountText.toIntOrNull()
+  val parsedRemCount = remainingCountText.toIntOrNull()
+  val parsedCustomDays = if (frequency == RepaymentFrequency.CUSTOM_DAYS) {
+    customDaysText.toIntOrNull()
+  } else {
+    null
+  }
+
+  val currentScheduleAsExtracted = if (isScanReview) {
+    editableScheduleRows.map { it.toExtractedRow() }
+  } else {
+    emptyList()
+  }
+
+  val liveIssues = if (scanDraft != null) {
+    DebtImportValidator.validateValues(
+      debtName = name,
+      remainingBalanceCents = parsedRemainingBalance,
+      explicitBalanceCents = scanDraft.outstandingBalanceCents.value ?: parsedRemainingBalance,
+      explicitRemainingInstallmentTotalCents = scanDraft.remainingInstallmentTotalCents.value,
+      originalPrincipalCents = parsedOrigPrincipal,
+      amountReceivedCents = parsedAmountReceived,
+      interestCents = parsedInterest,
+      serviceFeeCents = parsedServiceFee,
+      processingFeeCents = parsedProcessingFee,
+      otherFeesCents = parsedOtherFees,
+      totalScheduledCents = parsedTotalScheduled,
+      installmentAmountCents = parsedInstallmentAmount,
+      originalInstallmentCount = parsedOrigCount,
+      paidInstallmentsCount = parsedPaidCount,
+      remainingInstallmentsCount = parsedRemCount,
+      frequency = frequency,
+      customIntervalDays = parsedCustomDays,
+      nextDueDateIso = nextDueDate,
+      dueDateStatus = dateStatus,
+      scheduleRows = currentScheduleAsExtracted,
+      requireNonBlankName = true
+    )
+  } else {
+    emptyList()
+  }
+
+  val liveDuplicates = if (scanDraft != null) {
+    DebtDuplicateDetector.findPotentialDuplicates(
+      lender = lender,
+      loanName = name,
+      loanReferenceId = loanReferenceId,
+      remainingBalanceCents = parsedRemainingBalance,
+      originalPrincipalCents = parsedOrigPrincipal,
+      installmentAmountCents = parsedInstallmentAmount,
+      nextDueDateIso = nextDueDate,
+      scheduleDates = currentScheduleAsExtracted.mapNotNull { it.dueDateIso }.toSet(),
+      existingDebts = existingDebts,
+      existingInstallments = existingInstallments
+    )
+  } else {
+    emptyList()
+  }
+
+  val autoExpandDetails = isScanReview && listOf(
+    originalPrincipalText,
+    amountReceivedText,
+    interestText,
+    serviceFeeText,
+    processingFeeText,
+    otherFeesText,
+    totalScheduledText,
+    priorPaidText,
+    originalCountText,
+    paidCountText,
+    loanReferenceId
+  ).any { it.isNotBlank() } || (isScanReview && finalDueDate != null)
+
   ModalBottomSheet(
-    onDismissRequest = onDismiss,
+    onDismissRequest = { if (!isSaving) onDismiss() },
     sheetState = sheetState,
     containerColor = MaterialTheme.colorScheme.surface
   ) {
@@ -1023,57 +1261,165 @@ fun DebtEditorDialog(
         .padding(bottom = 28.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-      Text(
-        text = if (existing == null) "Add debt" else "Edit ${existing.name}",
-        style = MaterialTheme.typography.headlineSmall
-      )
+      if (scanDraft != null) {
+        val pagesLabel = scanDraft.sourceScreenshotIndices.joinToString(", ") { "#${it + 1}" }
+        Text(
+          text = "Review scanned debt",
+          style = MaterialTheme.typography.headlineSmall
+        )
+        Text(
+          text = "Extracted from screenshot(s) $pagesLabel. Every field is editable — nothing is saved until you tap Save debt.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (partialScanWarnings.isNotEmpty()) {
+          InfoCallout(
+            icon = Icons.Outlined.WarningAmber,
+            title = "Partial read notice",
+            body = partialScanWarnings.joinToString("\n"),
+            tone = BadgeTone.WARNING
+          )
+        }
+        if (scanDraft.mergeNotes.isNotEmpty()) {
+          InfoCallout(
+            icon = Icons.Outlined.Info,
+            title = "Multi-screenshot summary",
+            body = scanDraft.mergeNotes.joinToString("\n"),
+            tone = BadgeTone.NEUTRAL
+          )
+        }
+        if (liveDuplicates.isNotEmpty()) {
+          val matchSummary = liveDuplicates.joinToString("\n") { dup ->
+            "• ${dup.debtName} (${dup.lender} · ${MoneyFormatter.formatPeso(dup.remainingBalanceCents)} left): ${dup.reasons.joinToString(", ")}"
+          }
+          InfoCallout(
+            icon = Icons.Outlined.WarningAmber,
+            title = "Possible duplicate debt detected",
+            body = "$matchSummary\n\nCancel if you already added this loan, or confirm below if this is a separate debt.",
+            tone = BadgeTone.WARNING
+          )
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clickable {
+                allowDuplicateOverride = !allowDuplicateOverride
+                errorText = null
+              },
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Checkbox(
+              checked = allowDuplicateOverride,
+              onCheckedChange = {
+                allowDuplicateOverride = it
+                errorText = null
+              }
+            )
+            Text(
+              text = "This is a separate loan — allow saving anyway",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurface
+            )
+          }
+        }
+      } else {
+        Text(
+          text = if (existing == null) "Add debt" else "Edit ${existing.name}",
+          style = MaterialTheme.typography.headlineSmall
+        )
+      }
 
       OutlinedTextField(
         value = name,
         onValueChange = { name = it; errorText = null },
         label = { Text("Debt name *") },
+        placeholder = placeholderIfScan,
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
+      if (scanDraft != null) {
+        ScanFieldCaption(field = scanDraft.loanName, currentText = name)
+      }
+
       OutlinedTextField(
         value = lender,
         onValueChange = { lender = it },
         label = { Text("Lender or app (e.g. BillEase, SPayLater)") },
+        placeholder = placeholderIfScan,
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
+      if (scanDraft != null) {
+        ScanFieldCaption(field = scanDraft.lender, currentText = lender)
+      }
+
       OutlinedTextField(
         value = remainingBalanceText,
         onValueChange = { remainingBalanceText = it; errorText = null },
         label = { Text("Remaining balance *") },
+        placeholder = placeholderIfScan,
         prefix = { Text("₱") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
       )
+      if (scanDraft != null) {
+        val primaryBalField = if (scanDraft.outstandingBalanceCents.value != null) {
+          scanDraft.outstandingBalanceCents
+        } else {
+          scanDraft.remainingInstallmentTotalCents
+        }
+        ScanFieldCaption(field = primaryBalField, currentText = remainingBalanceText)
+
+        BalanceComparisonReviewCard(
+          extractedBalanceCents = scanDraft.outstandingBalanceCents.value,
+          extractedRemainingInstallmentTotalCents = scanDraft.remainingInstallmentTotalCents.value,
+          calculatedUnpaidScheduleSumCents = editableScheduleRows
+            .filter { it.status != ExtractedInstallmentStatus.PAID }
+            .mapNotNull { MoneyFormatter.parsePesoToCents(it.amountText) }
+            .takeIf { it.isNotEmpty() }
+            ?.sum(),
+          onApplyAmount = { cents ->
+            remainingBalanceText = MoneyFormatter.formatEditableAmount(cents)
+            errorText = null
+          }
+        )
+      }
+
       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
-          value = installmentAmountText,
-          onValueChange = { installmentAmountText = it },
-          label = { Text("Per payment") },
-          prefix = { Text("₱") },
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-          singleLine = true,
-          shape = RoundedCornerShape(12.dp),
-          modifier = Modifier.weight(1f)
-        )
-        OutlinedTextField(
-          value = remainingCountText,
-          onValueChange = { remainingCountText = it.filter { ch -> ch.isDigit() } },
-          label = { Text("Payments left") },
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-          singleLine = true,
-          shape = RoundedCornerShape(12.dp),
-          modifier = Modifier.weight(0.9f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+          OutlinedTextField(
+            value = installmentAmountText,
+            onValueChange = { installmentAmountText = it; errorText = null },
+            label = { Text("Per payment") },
+            placeholder = placeholderIfScan,
+            prefix = { Text("₱") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+          )
+          if (scanDraft != null) {
+            ScanFieldCaption(field = scanDraft.installmentAmountCents, currentText = installmentAmountText)
+          }
+        }
+        Column(modifier = Modifier.weight(0.9f)) {
+          OutlinedTextField(
+            value = remainingCountText,
+            onValueChange = { remainingCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
+            label = { Text("Payments left") },
+            placeholder = placeholderIfScan,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+          )
+          if (scanDraft != null) {
+            ScanFieldCaption(field = scanDraft.remainingInstallmentsCount, currentText = remainingCountText)
+          }
+        }
       }
 
       Text(
@@ -1088,15 +1434,21 @@ fun DebtEditorDialog(
         RepaymentFrequency.entries.forEach { freq ->
           FilterChip(
             selected = frequency == freq,
-            onClick = { frequency = freq },
+            onClick = { frequency = freq; errorText = null },
             label = { Text(freq.label) }
           )
         }
       }
+      if (scanDraft != null) {
+        ScanFieldCaption(
+          field = scanDraft.frequency,
+          currentText = if (frequency == RepaymentFrequency.UNKNOWN) "" else frequency.label
+        )
+      }
       if (frequency == RepaymentFrequency.CUSTOM_DAYS) {
         OutlinedTextField(
           value = customDaysText,
-          onValueChange = { customDaysText = it.filter { ch -> ch.isDigit() } },
+          onValueChange = { customDaysText = it.filter { ch -> ch.isDigit() }; errorText = null },
           label = { Text("Every N days") },
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
           singleLine = true,
@@ -1117,6 +1469,9 @@ fun DebtEditorDialog(
         },
         allowClear = true
       )
+      if (scanDraft != null) {
+        ScanFieldCaption(field = scanDraft.nextDueDateIso, currentText = nextDueDate.orEmpty())
+      }
 
       Text(
         text = "Due date confidence",
@@ -1139,24 +1494,129 @@ fun DebtEditorDialog(
         }
       }
 
+      if (isScanReview) {
+        ExpandableSection(
+          title = "Payment schedule (${editableScheduleRows.size})",
+          subtitle = if (editableScheduleRows.isEmpty()) {
+            "No schedule rows detected — tap to add dates manually"
+          } else {
+            "Extracted dates in chronological order · Paid vs Upcoming preserved"
+          },
+          initiallyExpanded = editableScheduleRows.isNotEmpty()
+        ) {
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (editableScheduleRows.isEmpty()) {
+              Text(
+                text = "No schedule rows extracted from the screenshots.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            } else {
+              editableScheduleRows.forEachIndexed { idx, rowState ->
+                ScheduleRowEditorCard(
+                  index = idx,
+                  rowState = rowState,
+                  onPickDate = { editingScheduleDateRowId = rowState.id },
+                  onAmountChange = { newText ->
+                    editableScheduleRows[idx] = rowState.copy(amountText = newText)
+                    errorText = null
+                  },
+                  onStatusChange = { newStatus ->
+                    editableScheduleRows[idx] = rowState.copy(status = newStatus)
+                  },
+                  onRemove = { editableScheduleRows.removeAt(idx) }
+                )
+              }
+            }
+            OutlinedButton(
+              onClick = {
+                editableScheduleRows.add(
+                  EditableScheduleRowState(
+                    id = "manual_${System.nanoTime()}",
+                    installmentNumberHint = editableScheduleRows.size + 1,
+                    dueDateIso = null,
+                    rawDateText = "",
+                    dateStatus = DueDateStatus.UNCONFIRMED,
+                    dateConfidence = ExtractionConfidence.HIGH,
+                    amountText = installmentAmountText,
+                    status = ExtractedInstallmentStatus.UPCOMING,
+                    sourceSnippet = "Added during review",
+                    screenshotIndex = -1,
+                    verificationNote = null
+                  )
+                )
+              },
+              shape = RoundedCornerShape(10.dp),
+              modifier = Modifier.fillMaxWidth()
+            ) {
+              Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(modifier = Modifier.width(6.dp))
+              Text("Add payment row")
+            }
+          }
+        }
+      }
+
       ExpandableSection(
         title = "Loan details (optional)",
-        subtitle = "Original principal, fees, prior paid, category & notes"
+        subtitle = "Original principal, fees, prior paid, category & notes",
+        initiallyExpanded = autoExpandDetails
       ) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
           OutlinedTextField(
             value = category,
             onValueChange = { category = it },
             label = { Text("Category") },
+            placeholder = placeholderIfScan,
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
           )
+          if (isScanReview) {
+            OutlinedTextField(
+              value = loanReferenceId,
+              onValueChange = { loanReferenceId = it },
+              label = { Text("Reference / Order ID") },
+              placeholder = placeholderIfScan,
+              singleLine = true,
+              shape = RoundedCornerShape(12.dp),
+              modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              OutlinedTextField(
+                value = originalCountText,
+                onValueChange = { originalCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
+                label = { Text("Orig. count") },
+                placeholder = placeholderIfScan,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+              )
+              OutlinedTextField(
+                value = paidCountText,
+                onValueChange = { paidCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
+                label = { Text("Already paid #") },
+                placeholder = placeholderIfScan,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+              )
+            }
+            DatePickerField(
+              label = "Final payment date (optional)",
+              dateIso = finalDueDate,
+              onDateChanged = { finalDueDate = it },
+              allowClear = true
+            )
+          }
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
               value = originalPrincipalText,
-              onValueChange = { originalPrincipalText = it },
+              onValueChange = { originalPrincipalText = it; errorText = null },
               label = { Text("Orig. principal") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
@@ -1165,8 +1625,9 @@ fun DebtEditorDialog(
             )
             OutlinedTextField(
               value = amountReceivedText,
-              onValueChange = { amountReceivedText = it },
+              onValueChange = { amountReceivedText = it; errorText = null },
               label = { Text("Received") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
@@ -1177,8 +1638,9 @@ fun DebtEditorDialog(
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
               value = interestText,
-              onValueChange = { interestText = it },
+              onValueChange = { interestText = it; errorText = null },
               label = { Text("Interest") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
@@ -1187,8 +1649,9 @@ fun DebtEditorDialog(
             )
             OutlinedTextField(
               value = serviceFeeText,
-              onValueChange = { serviceFeeText = it },
+              onValueChange = { serviceFeeText = it; errorText = null },
               label = { Text("Service fee") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
@@ -1199,35 +1662,67 @@ fun DebtEditorDialog(
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
               value = processingFeeText,
-              onValueChange = { processingFeeText = it },
+              onValueChange = { processingFeeText = it; errorText = null },
               label = { Text("Processing fee") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
               shape = RoundedCornerShape(12.dp),
               modifier = Modifier.weight(1f)
             )
+            if (isScanReview) {
+              OutlinedTextField(
+                value = otherFeesText,
+                onValueChange = { otherFeesText = it; errorText = null },
+                label = { Text("Other fees") },
+                placeholder = placeholderIfScan,
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+              )
+            } else {
+              OutlinedTextField(
+                value = totalScheduledText,
+                onValueChange = { totalScheduledText = it; errorText = null },
+                label = { Text("Total scheduled") },
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.weight(1f)
+              )
+            }
+          }
+          if (isScanReview) {
             OutlinedTextField(
               value = totalScheduledText,
-              onValueChange = { totalScheduledText = it },
-              label = { Text("Total scheduled") },
+              onValueChange = { totalScheduledText = it; errorText = null },
+              label = { Text("Total scheduled repayment") },
+              placeholder = placeholderIfScan,
               prefix = { Text("₱") },
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
               singleLine = true,
               shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
+              modifier = Modifier.fillMaxWidth()
             )
           }
           OutlinedTextField(
             value = priorPaidText,
-            onValueChange = { priorPaidText = it },
+            onValueChange = { priorPaidText = it; errorText = null },
             label = { Text("Already paid before adding") },
+            placeholder = placeholderIfScan,
             prefix = { Text("₱") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
           )
+          if (scanDraft != null) {
+            ScanFieldCaption(field = scanDraft.calculatedPaidScheduleSumCents, currentText = priorPaidText)
+          }
           OutlinedTextField(
             value = notes,
             onValueChange = { notes = it },
@@ -1238,18 +1733,64 @@ fun DebtEditorDialog(
         }
       }
 
+      if (isScanReview) {
+        val warnings = liveIssues.filter { it.severity == ImportSeverity.WARNING }
+        if (warnings.isNotEmpty()) {
+          InfoCallout(
+            icon = Icons.Outlined.WarningAmber,
+            title = "${warnings.size} consistency check(s)",
+            body = warnings.joinToString("\n") { "• ${it.title}: ${it.message}" },
+            tone = BadgeTone.WARNING
+          )
+        }
+
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceContainerLow,
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .clickable { attachScreenshots = !attachScreenshots }
+              .padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+              Text(
+                text = "Keep screenshots attached to this debt record",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface
+              )
+              Text(
+                text = "Off by default. Temporary scan copies are deleted automatically.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+            Switch(
+              checked = attachScreenshots,
+              onCheckedChange = { attachScreenshots = it }
+            )
+          }
+        }
+      }
+
       if (errorText != null) {
-        Text(
-          text = errorText!!,
-          color = MaterialTheme.colorScheme.error,
-          style = MaterialTheme.typography.bodySmall
+        InfoCallout(
+          icon = Icons.Outlined.ErrorOutline,
+          title = "Check before saving",
+          body = errorText!!,
+          tone = BadgeTone.DANGER
         )
       }
 
       SheetButtonRow(
-        confirmText = "Save debt",
-        onCancel = onDismiss,
+        confirmText = if (isSaving) "Saving…" else "Save debt",
+        onCancel = { if (!isSaving) onDismiss() },
         onConfirm = {
+          if (isSaving) return@SheetButtonRow
           fun parseOptionalPeso(raw: String): Pair<Boolean, Long?> {
             if (raw.isBlank()) return true to null
             val parsed = MoneyFormatter.parsePesoToCents(raw)
@@ -1271,9 +1812,10 @@ fun DebtEditorDialog(
           val (intOk, interestCents) = parseOptionalPeso(interestText)
           val (svcOk, serviceFeeCents) = parseOptionalPeso(serviceFeeText)
           val (procOk, processingFeeCents) = parseOptionalPeso(processingFeeText)
+          val (otherOk, otherFeesCents) = parseOptionalPeso(otherFeesText)
           val (schedOk, totalScheduled) = parseOptionalPeso(totalScheduledText)
           val (priorOk, priorPaidParsed) = parseOptionalPeso(priorPaidText)
-          if (!instOk || !origOk || !recvOk || !intOk || !svcOk || !procOk || !schedOk || !priorOk) {
+          if (!instOk || !origOk || !recvOk || !intOk || !svcOk || !procOk || !otherOk || !schedOk || !priorOk) {
             errorText = "Check peso amounts — enter numbers only or leave optional fields blank"
             return@SheetButtonRow
           }
@@ -1288,6 +1830,28 @@ fun DebtEditorDialog(
             errorText = "Select the confirmed next due date first"
             return@SheetButtonRow
           }
+
+          if (isScanReview) {
+            editableScheduleRows.forEachIndexed { idx, r ->
+              if (r.amountText.isNotBlank()) {
+                val rowAmt = MoneyFormatter.parsePesoToCents(r.amountText)
+                if (rowAmt == null || rowAmt <= 0L) {
+                  errorText = "Schedule row #${idx + 1} needs a positive peso amount or blank"
+                  return@SheetButtonRow
+                }
+              }
+            }
+            val blockingError = liveIssues.firstOrNull { it.severity == ImportSeverity.ERROR }
+            if (blockingError != null) {
+              errorText = "${blockingError.title}: ${blockingError.message}"
+              return@SheetButtonRow
+            }
+            if (liveDuplicates.isNotEmpty() && !allowDuplicateOverride) {
+              errorText = "Confirm \"This is a separate loan\" above duplicate warning, or cancel."
+              return@SheetButtonRow
+            }
+          }
+
           val instAmt = instParsed ?: 0L
           val remCount = if (remainingCountText.isNotBlank()) {
             val parsedCount = remainingCountText.toIntOrNull()
@@ -1297,13 +1861,33 @@ fun DebtEditorDialog(
             }
             parsedCount
           } else {
-            if (remBalance > 0L && instAmt > 0L) 1 else 0
+            val unpaidCountFromRows = editableScheduleRows.count { it.status != ExtractedInstallmentStatus.PAID }
+            when {
+              remBalance == 0L -> 0
+              unpaidCountFromRows > 0 -> unpaidCountFromRows
+              instAmt > 0L -> 1
+              else -> 0
+            }
           }
           val resolvedStatus = when {
             existing?.status == DebtStatus.ARCHIVED -> DebtStatus.ARCHIVED
             remBalance == 0L -> DebtStatus.PAID
             else -> DebtStatus.ACTIVE
           }
+
+          val combinedNotes = if (isScanReview) {
+            buildScannedNotes(
+              userNotes = notes,
+              loanReferenceId = loanReferenceId,
+              otherFeesCents = otherFeesCents,
+              origCount = parsedOrigCount,
+              paidCount = parsedPaidCount,
+              finalDueDateIso = finalDueDate
+            )
+          } else {
+            notes.trim()
+          }
+
           val entity = (existing ?: DebtEntity(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
@@ -1326,18 +1910,400 @@ fun DebtEditorDialog(
             remainingInstallmentsCount = remCount,
             frequency = frequency,
             customIntervalDays = customDays,
+            lastKnownPaidDate = existing?.lastKnownPaidDate
+              ?: scanDraft?.lastPaidDateIso?.value
+              ?: editableScheduleRows
+                .filter { it.status == ExtractedInstallmentStatus.PAID }
+                .mapNotNull { it.dueDateIso }
+                .maxOrNull(),
             nextDueDate = nextDueDate,
             dateStatus = dateStatus,
             status = resolvedStatus,
             isManuallyEntered = true,
-            notes = notes.trim()
+            notes = combinedNotes
           )
-          onSave(entity)
-          onDismiss()
+
+          if (isScanReview && onSaveImported != null) {
+            val scheduleEntities = editableScheduleRows.mapIndexed { idx, rowState ->
+              val isPaidRow = rowState.status == ExtractedInstallmentStatus.PAID
+              val rowAmt = MoneyFormatter.parsePesoToCents(rowState.amountText)?.coerceAtLeast(0L) ?: 0L
+              val rowDateStatus = when {
+                rowState.dueDateIso.isNullOrBlank() -> DueDateStatus.UNKNOWN
+                dateStatus == DueDateStatus.CONFIRMED -> DueDateStatus.CONFIRMED
+                else -> rowState.dateStatus
+              }
+              InstallmentEntity(
+                debtId = 0L,
+                installmentNumber = idx + 1,
+                dueDate = rowState.dueDateIso,
+                amountDueCents = rowAmt,
+                paidAmountCents = if (isPaidRow) rowAmt else 0L,
+                dateStatus = rowDateStatus,
+                status = if (isPaidRow) InstallmentStatus.PAID else InstallmentStatus.UPCOMING,
+                paidDate = if (isPaidRow) rowState.dueDateIso else null,
+                isManuallyEntered = true,
+                notes = if (rowState.status == ExtractedInstallmentStatus.OVERDUE) {
+                  "Imported as overdue"
+                } else if (rowState.screenshotIndex >= 0) {
+                  "Scanned from #${rowState.screenshotIndex + 1}"
+                } else {
+                  "Added during scan review"
+                }
+              )
+            }
+            onSaveImported(entity, scheduleEntities, attachScreenshots)
+          } else {
+            onSave(entity)
+            onDismiss()
+          }
         }
       )
     }
   }
+
+  editingScheduleDateRowId?.let { targetRowId ->
+    val targetIdx = editableScheduleRows.indexOfFirst { it.id == targetRowId }
+    if (targetIdx >= 0) {
+      BaonDatePickerDialog(
+        initialDateIso = editableScheduleRows[targetIdx].dueDateIso,
+        onDateSelected = { pickedIso ->
+          editableScheduleRows[targetIdx] = editableScheduleRows[targetIdx].copy(
+            dueDateIso = pickedIso,
+            dateConfidence = ExtractionConfidence.HIGH,
+            dateStatus = if (dateStatus == DueDateStatus.CONFIRMED) DueDateStatus.CONFIRMED else DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+          )
+          editingScheduleDateRowId = null
+        },
+        onDismiss = { editingScheduleDateRowId = null }
+      )
+    }
+  }
+}
+
+private data class EditableScheduleRowState(
+  val id: String,
+  val installmentNumberHint: Int?,
+  val dueDateIso: String?,
+  val rawDateText: String,
+  val dateStatus: DueDateStatus,
+  val dateConfidence: ExtractionConfidence,
+  val amountText: String,
+  val status: ExtractedInstallmentStatus,
+  val sourceSnippet: String,
+  val screenshotIndex: Int,
+  val verificationNote: String?
+) {
+  fun toExtractedRow(): ExtractedInstallmentRow = ExtractedInstallmentRow(
+    id = id,
+    installmentNumberHint = installmentNumberHint,
+    dueDateIso = dueDateIso,
+    rawDateText = rawDateText,
+    dateStatus = dateStatus,
+    dateConfidence = dateConfidence,
+    amountCents = MoneyFormatter.parsePesoToCents(amountText),
+    status = status,
+    sourceSnippet = sourceSnippet,
+    screenshotIndex = screenshotIndex,
+    verificationNote = verificationNote
+  )
+
+  companion object {
+    fun fromExtracted(row: ExtractedInstallmentRow): EditableScheduleRowState = EditableScheduleRowState(
+      id = row.id,
+      installmentNumberHint = row.installmentNumberHint,
+      dueDateIso = row.dueDateIso,
+      rawDateText = row.rawDateText,
+      dateStatus = row.dateStatus,
+      dateConfidence = row.dateConfidence,
+      amountText = MoneyFormatter.formatEditableAmount(row.amountCents),
+      status = row.status,
+      sourceSnippet = row.sourceSnippet,
+      screenshotIndex = row.screenshotIndex,
+      verificationNote = row.verificationNote
+    )
+  }
+}
+
+@Composable
+private fun <T> ScanFieldCaption(
+  field: ExtractedField<T>,
+  currentText: String
+) {
+  val semantic = LocalBaonColors.current
+  val textAndColor: Pair<String, androidx.compose.ui.graphics.Color>? = when {
+    currentText.isBlank() && field.origin == FieldOrigin.NOT_DETECTED ->
+      "Not detected" to semantic.muted
+    field.origin == FieldOrigin.NOT_DETECTED -> null
+    field.origin == FieldOrigin.APP_CALCULATED ->
+      "Calculated by app${field.verificationReason?.let { " · $it" } ?: ""}" to MaterialTheme.colorScheme.primary
+    else -> {
+      val srcPrefix = field.sourceScreenshotIndex?.let { "From #${it + 1}" } ?: "Extracted"
+      val statusTag = when (field.confidence) {
+        ExtractionConfidence.HIGH -> ""
+        ExtractionConfidence.NEEDS_VERIFICATION -> " · Verify"
+        ExtractionConfidence.CONFLICT -> " · Conflict"
+      }
+      val snippet = field.verificationReason
+        ?: field.sourceSnippet?.take(44)?.let { "\"$it\"" }
+      val color = when (field.confidence) {
+        ExtractionConfidence.HIGH -> semantic.muted
+        ExtractionConfidence.NEEDS_VERIFICATION -> semantic.warning
+        ExtractionConfidence.CONFLICT -> semantic.danger
+      }
+      "$srcPrefix$statusTag${snippet?.let { " · $it" } ?: ""}" to color
+    }
+  }
+  if (textAndColor != null) {
+    Text(
+      text = textAndColor.first,
+      style = MaterialTheme.typography.labelSmall,
+      color = textAndColor.second,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.padding(horizontal = 4.dp)
+    )
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BalanceComparisonReviewCard(
+  extractedBalanceCents: Long?,
+  extractedRemainingInstallmentTotalCents: Long?,
+  calculatedUnpaidScheduleSumCents: Long?,
+  onApplyAmount: (Long) -> Unit
+) {
+  if (extractedBalanceCents == null &&
+    extractedRemainingInstallmentTotalCents == null &&
+    calculatedUnpaidScheduleSumCents == null
+  ) {
+    return
+  }
+  val semantic = LocalBaonColors.current
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider),
+    modifier = Modifier.fillMaxWidth()
+  ) {
+    Column(
+      modifier = Modifier.padding(12.dp),
+      verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+      Text(
+        text = "Extracted vs. calculated totals",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface
+      )
+      MetricRow(
+        label = "Extracted Balance",
+        value = extractedBalanceCents?.let { MoneyFormatter.formatPeso(it) } ?: "Not detected",
+        boldValue = false
+      )
+      if (extractedRemainingInstallmentTotalCents != null) {
+        MetricRow(
+          label = "Extracted Remaining Inst. Total",
+          value = MoneyFormatter.formatPeso(extractedRemainingInstallmentTotalCents),
+          boldValue = false
+        )
+      }
+      if (calculatedUnpaidScheduleSumCents != null) {
+        MetricRow(
+          label = "Calculated by app (unpaid rows)",
+          value = MoneyFormatter.formatPeso(calculatedUnpaidScheduleSumCents),
+          valueColor = MaterialTheme.colorScheme.primary,
+          boldValue = false
+        )
+      }
+      val hasChoices = (extractedBalanceCents != null && extractedRemainingInstallmentTotalCents != null) ||
+        (extractedBalanceCents == null && calculatedUnpaidScheduleSumCents != null)
+      if (hasChoices) {
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+          if (extractedBalanceCents != null) {
+            FilledTonalButton(
+              onClick = { onApplyAmount(extractedBalanceCents) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use balance", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+          if (extractedRemainingInstallmentTotalCents != null) {
+            FilledTonalButton(
+              onClick = { onApplyAmount(extractedRemainingInstallmentTotalCents) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use inst. total", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+          if (calculatedUnpaidScheduleSumCents != null) {
+            OutlinedButton(
+              onClick = { onApplyAmount(calculatedUnpaidScheduleSumCents) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use row sum", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ScheduleRowEditorCard(
+  index: Int,
+  rowState: EditableScheduleRowState,
+  onPickDate: () -> Unit,
+  onAmountChange: (String) -> Unit,
+  onStatusChange: (ExtractedInstallmentStatus) -> Unit,
+  onRemove: () -> Unit
+) {
+  val semantic = LocalBaonColors.current
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider),
+    modifier = Modifier.fillMaxWidth()
+  ) {
+    Column(
+      modifier = Modifier.padding(10.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Text(
+            text = "Payment #${index + 1}",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+          if (rowState.screenshotIndex >= 0) {
+            StatusBadge(text = "From #${rowState.screenshotIndex + 1}", tone = BadgeTone.NEUTRAL)
+          }
+          if (rowState.dueDateIso == null) {
+            StatusBadge(text = "Date missing", tone = BadgeTone.WARNING)
+          } else if (rowState.dateConfidence != ExtractionConfidence.HIGH) {
+            StatusBadge(text = "Verify", tone = BadgeTone.WARNING)
+          }
+        }
+        IconButton(
+          onClick = onRemove,
+          modifier = Modifier.size(28.dp)
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.Close,
+            contentDescription = "Remove payment row #${index + 1}",
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.error
+          )
+        }
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        OutlinedButton(
+          onClick = onPickDate,
+          shape = RoundedCornerShape(10.dp),
+          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+          modifier = Modifier.weight(1f)
+        ) {
+          Icon(Icons.Outlined.CalendarToday, contentDescription = null, modifier = Modifier.size(15.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = rowState.dueDateIso?.let { ManilaTime.formatDisplay(it) } ?: "Set date",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall
+          )
+        }
+        OutlinedTextField(
+          value = rowState.amountText,
+          onValueChange = onAmountChange,
+          label = { Text("Amount") },
+          placeholder = { Text("Missing") },
+          prefix = { Text("₱") },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+          singleLine = true,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.weight(1f)
+        )
+      }
+
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+      ) {
+        listOf(
+          ExtractedInstallmentStatus.PAID to "Paid",
+          ExtractedInstallmentStatus.UPCOMING to "Upcoming",
+          ExtractedInstallmentStatus.OVERDUE to "Overdue"
+        ).forEach { (st, lbl) ->
+          FilterChip(
+            selected = rowState.status == st,
+            onClick = { onStatusChange(st) },
+            label = { Text(lbl, style = MaterialTheme.typography.labelSmall) }
+          )
+        }
+      }
+
+      if (rowState.verificationNote != null) {
+        Text(
+          text = rowState.verificationNote,
+          style = MaterialTheme.typography.labelSmall,
+          color = semantic.warning
+        )
+      }
+    }
+  }
+}
+
+private fun buildScannedNotes(
+  userNotes: String,
+  loanReferenceId: String,
+  otherFeesCents: Long?,
+  origCount: Int?,
+  paidCount: Int?,
+  finalDueDateIso: String?
+): String {
+  val parts = mutableListOf<String>()
+  val cleanUser = userNotes.trim()
+  if (cleanUser.isNotBlank()) parts.add(cleanUser)
+  val cleanRef = loanReferenceId.trim()
+  if (cleanRef.isNotBlank() && !cleanUser.contains(cleanRef, ignoreCase = true)) {
+    parts.add("Ref: #$cleanRef")
+  }
+  if (otherFeesCents != null && otherFeesCents > 0L) {
+    parts.add("Other fees: ${MoneyFormatter.formatPeso(otherFeesCents)}")
+  }
+  if (origCount != null || paidCount != null) {
+    val countLine = when {
+      origCount != null && paidCount != null -> "Term: $paidCount of $origCount installments paid before adding"
+      origCount != null -> "Original installments: $origCount"
+      else -> "Installments paid before adding: $paidCount"
+    }
+    parts.add(countLine)
+  }
+  if (!finalDueDateIso.isNullOrBlank()) {
+    parts.add("Final payment date: ${ManilaTime.formatDisplay(finalDueDateIso)}")
+  }
+  return parts.joinToString("\n")
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -1358,7 +2324,11 @@ fun GenerateScheduleDialog(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var frequency by remember {
     mutableStateOf(
-      if (debt.frequency == RepaymentFrequency.UNKNOWN) RepaymentFrequency.WEEKLY else debt.frequency
+      if (debt.frequency == RepaymentFrequency.UNKNOWN || debt.frequency == RepaymentFrequency.IRREGULAR) {
+        RepaymentFrequency.WEEKLY
+      } else {
+        debt.frequency
+      }
     )
   }
   var customDaysText by remember { mutableStateOf(debt.customIntervalDays?.toString() ?: "14") }
@@ -1393,7 +2363,7 @@ fun GenerateScheduleDialog(
     ) {
       Text("Payment schedule", style = MaterialTheme.typography.headlineSmall)
       Text(
-        text = "Creates upcoming payment rows for ${debt.name} using known schedule intervals only.",
+        text = "Creates upcoming payment rows for ${debt.name} using known regular intervals only.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
       )
@@ -1401,13 +2371,15 @@ fun GenerateScheduleDialog(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
       ) {
-        RepaymentFrequency.entries.filter { it != RepaymentFrequency.UNKNOWN }.forEach { freq ->
-          FilterChip(
-            selected = frequency == freq,
-            onClick = { frequency = freq },
-            label = { Text(freq.label) }
-          )
-        }
+        RepaymentFrequency.entries
+          .filter { it != RepaymentFrequency.UNKNOWN && it != RepaymentFrequency.IRREGULAR }
+          .forEach { freq ->
+            FilterChip(
+              selected = frequency == freq,
+              onClick = { frequency = freq },
+              label = { Text(freq.label) }
+            )
+          }
       }
       if (frequency == RepaymentFrequency.CUSTOM_DAYS) {
         OutlinedTextField(
@@ -1496,8 +2468,11 @@ fun ConfirmDueDateDialog(
   onDismiss: () -> Unit
 ) {
   var dateIso by remember { mutableStateOf(debt.nextDueDate ?: ManilaTime.formatIso(today)) }
+  val canAutoGenerate = debt.frequency != RepaymentFrequency.UNKNOWN &&
+    debt.frequency != RepaymentFrequency.IRREGULAR &&
+    debt.remainingInstallmentsCount > 1
   var generateSchedule by remember {
-    mutableStateOf(debt.frequency != RepaymentFrequency.UNKNOWN && debt.remainingInstallmentsCount > 1)
+    mutableStateOf(canAutoGenerate)
   }
 
   AlertDialog(
@@ -1515,7 +2490,7 @@ fun ConfirmDueDateDialog(
           dateIso = dateIso,
           onDateChanged = { if (it != null) dateIso = it }
         )
-        if (debt.frequency != RepaymentFrequency.UNKNOWN && debt.remainingInstallmentsCount > 1) {
+        if (canAutoGenerate) {
           Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = generateSchedule, onCheckedChange = { generateSchedule = it })
             Text(

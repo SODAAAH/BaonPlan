@@ -1,6 +1,7 @@
 package com.baonplan.finance.data.backup
 
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
@@ -15,7 +16,7 @@ import java.time.Instant
 
 @Serializable
 data class BaonPlanBackupPayload(
-  val schemaVersion: Int = 1,
+  val schemaVersion: Int = 2,
   val appId: String = "com.baonplan.finance",
   val currency: String = "PHP",
   val timezone: String = "Asia/Manila",
@@ -26,7 +27,8 @@ data class BaonPlanBackupPayload(
   val transactions: List<TransactionEntity>,
   val allowanceRecords: List<AllowanceRecordEntity>,
   val expenses: List<ExpenseEntity>,
-  val debtReserves: List<DebtReserveEntity>
+  val debtReserves: List<DebtReserveEntity>,
+  val debtAttachments: List<DebtAttachmentEntity> = emptyList()
 )
 
 object BackupSerializer {

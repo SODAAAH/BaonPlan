@@ -10,13 +10,18 @@ import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.AppPreferencesState
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
+import com.baonplan.finance.data.ocr.DebtScanCoordinator
+import com.baonplan.finance.data.ocr.ImageScanPreprocessor
+import com.baonplan.finance.data.ocr.StagedScanInput
 import com.baonplan.finance.data.repository.BaonPlanRepository
+import com.baonplan.finance.data.repository.RetainedAttachmentSource
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.DuesCoverageStatus
@@ -34,6 +39,8 @@ import com.baonplan.finance.domain.model.ThemeMode
 import com.baonplan.finance.domain.model.WeeklyBudgetSummary
 import com.baonplan.finance.domain.model.WeeklyDuesReadiness
 import com.baonplan.finance.domain.model.WeeklyTrendPoint
+import com.baonplan.finance.domain.ocr.DebtImportDraft
+import com.baonplan.finance.domain.ocr.ScanAnalysisOutcome
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.notifications.NotificationHelper
@@ -48,9 +55,33 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.LocalDate
+
+data class StagedScreenshotUiItem(
+  val id: String,
+  val index: Int,
+  val tempFile: File,
+  val rotationDegrees: Int = 0,
+  val displayLabel: String
+)
+
+data class ScanDebtUiState(
+  val isSheetOpen: Boolean = false,
+  val stagedItems: List<StagedScreenshotUiItem> = emptyList(),
+  val isImportingImages: Boolean = false,
+  val isAnalyzing: Boolean = false,
+  val isSavingDraft: Boolean = false,
+  val errorMessage: String? = null,
+  val partialWarnings: List<String> = emptyList(),
+  val candidateDrafts: List<DebtImportDraft> = emptyList(),
+  val multipleLoansExplanation: String? = null,
+  val activeDraftForReview: DebtImportDraft? = null,
+  val completedCandidateIds: Set<String> = emptySet()
+)
 
 data class BaonPlanUiState(
   val isLoading: Boolean = true,
@@ -59,6 +90,7 @@ data class BaonPlanUiState(
   val preferences: AppPreferencesState = AppPreferencesState(),
   val debts: List<DebtEntity> = emptyList(),
   val installments: List<InstallmentEntity> = emptyList(),
+  val attachments: List<DebtAttachmentEntity> = emptyList(),
   val transactions: List<TransactionEntity> = emptyList(),
   val allowances: List<AllowanceRecordEntity> = emptyList(),
   val expenses: List<ExpenseEntity> = emptyList(),
@@ -128,6 +160,13 @@ private data class CoreLedgerBundle(
   val expenses: List<ExpenseEntity>
 )
 
+private data class SecondaryMetaBundle(
+  val reserves: List<DebtReserveEntity>,
+  val attachments: List<DebtAttachmentEntity>,
+  val settings: UserSettingsEntity,
+  val prefs: AppPreferencesState
+)
+
 class BaonPlanViewModel(
   private val repository: BaonPlanRepository
 ) : ViewModel() {
@@ -137,6 +176,11 @@ class BaonPlanViewModel(
 
   private val _isSessionUnlocked = MutableStateFlow(false)
   val isSessionUnlocked: StateFlow<Boolean> = _isSessionUnlocked.asStateFlow()
+
+  private val _scanState = MutableStateFlow(ScanDebtUiState())
+  val scanState: StateFlow<ScanDebtUiState> = _scanState.asStateFlow()
+
+  private var pendingCameraRawFile: File? = null
 
   fun setSessionUnlocked(unlocked: Boolean) {
     _isSessionUnlocked.value = unlocked
@@ -152,12 +196,22 @@ class BaonPlanViewModel(
     CoreLedgerBundle(debts, installments, transactions, allowances, expenses)
   }
 
-  val uiState: StateFlow<BaonPlanUiState> = combine(
-    ledgerFlow,
+  private val secondaryMetaFlow = combine(
     repository.reservesFlow,
+    repository.attachmentsFlow,
     repository.settingsFlow,
     repository.appPreferencesFlow
-  ) { ledger, reserves, settings, prefs ->
+  ) { reserves, attachments, settings, prefs ->
+    SecondaryMetaBundle(reserves, attachments, settings, prefs)
+  }
+
+  val uiState: StateFlow<BaonPlanUiState> = combine(
+    ledgerFlow,
+    secondaryMetaFlow
+  ) { ledger, meta ->
+    val reserves = meta.reserves
+    val settings = meta.settings
+    val prefs = meta.prefs
     val today = ManilaTime.today()
     val totalActiveDebt = FinancialCalculator.calculateTotalActiveDebt(ledger.debts)
     val progress = FinancialCalculator.calculateRepaymentProgress(ledger.debts)
@@ -240,6 +294,7 @@ class BaonPlanViewModel(
       preferences = prefs,
       debts = ledger.debts,
       installments = ledger.installments,
+      attachments = meta.attachments,
       transactions = ledger.transactions,
       allowances = ledger.allowances,
       expenses = ledger.expenses,
@@ -651,6 +706,342 @@ class BaonPlanViewModel(
       repository.clearAllData()
       emitMessage("All financial records cleared")
     }
+  }
+
+  fun resolveAttachmentFile(fileName: String): File? = repository.resolveAttachmentFile(fileName)
+
+  fun openScanDebtSheet(context: Context) {
+    viewModelScope.launch(Dispatchers.IO) {
+      ImageScanPreprocessor.sweepStaleTempFiles(context.applicationContext)
+    }
+    _scanState.update {
+      it.copy(
+        isSheetOpen = true,
+        errorMessage = null
+      )
+    }
+  }
+
+  fun closeAndClearScanSession(context: Context) {
+    val appCtx = context.applicationContext
+    val items = _scanState.value.stagedItems
+    val pendingCam = pendingCameraRawFile
+    pendingCameraRawFile = null
+    _scanState.value = ScanDebtUiState()
+    viewModelScope.launch(Dispatchers.IO) {
+      items.forEach { ImageScanPreprocessor.deleteTempFile(it.tempFile) }
+      ImageScanPreprocessor.deleteTempFile(pendingCam)
+      ImageScanPreprocessor.clearAllTempFiles(appCtx)
+    }
+  }
+
+  fun addPickedScanUris(context: Context, uris: List<Uri>) {
+    if (uris.isEmpty()) return
+    val appCtx = context.applicationContext
+    viewModelScope.launch {
+      _scanState.update { it.copy(isImportingImages = true, errorMessage = null, partialWarnings = emptyList()) }
+      val currentCount = _scanState.value.stagedItems.size
+      val remainingSlots = (MAX_SCAN_SCREENSHOTS - currentCount).coerceAtLeast(0)
+      val toImport = uris.take(remainingSlots)
+      val newlyStaged = mutableListOf<StagedScreenshotUiItem>()
+      var failedCount = 0
+
+      for ((offset, uri) in toImport.withIndex()) {
+        val res = ImageScanPreprocessor.importUriToPrivateTempFile(appCtx, uri)
+        val file = res.getOrNull()
+        if (file != null) {
+          val index = currentCount + newlyStaged.size
+          newlyStaged.add(
+            StagedScreenshotUiItem(
+              id = "scan_${System.nanoTime()}_$offset",
+              index = index,
+              tempFile = file,
+              rotationDegrees = 0,
+              displayLabel = "Screenshot #${index + 1}"
+            )
+          )
+        } else {
+          failedCount++
+        }
+      }
+
+      _scanState.update { state ->
+        val merged = reindexStaged(state.stagedItems + newlyStaged)
+        val warnMsg = when {
+          failedCount > 0 && newlyStaged.isEmpty() -> "Could not read selected image(s). Try PNG or JPG screenshots."
+          failedCount > 0 -> "$failedCount selected image(s) couldn't be opened."
+          uris.size > remainingSlots -> "Maximum $MAX_SCAN_SCREENSHOTS screenshots per scan. Extra images were skipped."
+          else -> null
+        }
+        state.copy(
+          stagedItems = merged,
+          isImportingImages = false,
+          candidateDrafts = emptyList(),
+          multipleLoansExplanation = null,
+          activeDraftForReview = null,
+          completedCandidateIds = emptySet(),
+          errorMessage = warnMsg
+        )
+      }
+    }
+  }
+
+  fun prepareCameraCaptureUri(context: Context): Uri? {
+    if (_scanState.value.stagedItems.size >= MAX_SCAN_SCREENSHOTS) {
+      emitMessage("Maximum $MAX_SCAN_SCREENSHOTS screenshots per scan.")
+      return null
+    }
+    return runCatching {
+      ImageScanPreprocessor.deleteTempFile(pendingCameraRawFile)
+      val (file, uri) = ImageScanPreprocessor.createCameraTempFileAndUri(context.applicationContext)
+      pendingCameraRawFile = file
+      uri
+    }.onFailure {
+      emitMessage("Camera capture isn't available on this device.")
+    }.getOrNull()
+  }
+
+  fun onCameraCaptureResult(context: Context, captured: Boolean) {
+    val rawFile = pendingCameraRawFile
+    pendingCameraRawFile = null
+    if (!captured || rawFile == null) {
+      ImageScanPreprocessor.deleteTempFile(rawFile)
+      return
+    }
+    val appCtx = context.applicationContext
+    viewModelScope.launch {
+      _scanState.update { it.copy(isImportingImages = true, errorMessage = null) }
+      val normalized = ImageScanPreprocessor.normalizeCapturedFile(appCtx, rawFile).getOrNull()
+      if (normalized != null) {
+        _scanState.update { state ->
+          val nextIndex = state.stagedItems.size
+          val added = StagedScreenshotUiItem(
+            id = "cam_${System.nanoTime()}",
+            index = nextIndex,
+            tempFile = normalized,
+            rotationDegrees = 0,
+            displayLabel = "Photo #${nextIndex + 1}"
+          )
+          state.copy(
+            stagedItems = reindexStaged(state.stagedItems + added),
+            isImportingImages = false,
+            candidateDrafts = emptyList(),
+            multipleLoansExplanation = null,
+            activeDraftForReview = null,
+            completedCandidateIds = emptySet(),
+            errorMessage = null
+          )
+        }
+      } else {
+        _scanState.update {
+          it.copy(
+            isImportingImages = false,
+            errorMessage = "Could not process the captured photo. Try taking another photo or selecting screenshots."
+          )
+        }
+      }
+    }
+  }
+
+  fun rotateStagedScreenshot(itemId: String) {
+    _scanState.update { state ->
+      val updated = state.stagedItems.map { item ->
+        if (item.id == itemId) item.copy(rotationDegrees = (item.rotationDegrees + 90) % 360)
+        else item
+      }
+      state.copy(
+        stagedItems = updated,
+        candidateDrafts = emptyList(),
+        multipleLoansExplanation = null,
+        errorMessage = null
+      )
+    }
+  }
+
+  fun removeStagedScreenshot(itemId: String) {
+    val target = _scanState.value.stagedItems.firstOrNull { it.id == itemId }
+    if (target != null) {
+      viewModelScope.launch(Dispatchers.IO) {
+        ImageScanPreprocessor.deleteTempFile(target.tempFile)
+      }
+    }
+    _scanState.update { state ->
+      val remaining = reindexStaged(state.stagedItems.filterNot { it.id == itemId })
+      state.copy(
+        stagedItems = remaining,
+        candidateDrafts = emptyList(),
+        multipleLoansExplanation = null,
+        errorMessage = null,
+        partialWarnings = emptyList()
+      )
+    }
+  }
+
+  fun analyzeStagedScreenshots() {
+    val current = _scanState.value
+    if (current.stagedItems.isEmpty() || current.isAnalyzing || current.isImportingImages) return
+
+    viewModelScope.launch {
+      _scanState.update {
+        it.copy(
+          isAnalyzing = true,
+          errorMessage = null,
+          partialWarnings = emptyList(),
+          candidateDrafts = emptyList(),
+          multipleLoansExplanation = null,
+          activeDraftForReview = null,
+          completedCandidateIds = emptySet()
+        )
+      }
+      val inputs = current.stagedItems.map { item ->
+        StagedScanInput(
+          screenshotIndex = item.index,
+          tempFile = item.tempFile,
+          rotationDegrees = item.rotationDegrees,
+          displayLabel = item.displayLabel
+        )
+      }
+      val ledgerState = uiState.value
+      val report = DebtScanCoordinator.analyze(
+        inputs = inputs,
+        existingDebts = ledgerState.debts,
+        existingInstallments = ledgerState.installments,
+        referenceDate = ledgerState.today
+      )
+
+      when (val outcome = report.outcome) {
+        is ScanAnalysisOutcome.Failed -> {
+          _scanState.update {
+            it.copy(
+              isAnalyzing = false,
+              errorMessage = outcome.userMessage,
+              partialWarnings = report.partialImageWarnings
+            )
+          }
+        }
+        is ScanAnalysisOutcome.SingleLoan -> {
+          _scanState.update {
+            it.copy(
+              isSheetOpen = false,
+              isAnalyzing = false,
+              partialWarnings = report.partialImageWarnings,
+              candidateDrafts = listOf(outcome.draft),
+              activeDraftForReview = outcome.draft
+            )
+          }
+        }
+        is ScanAnalysisOutcome.MultipleLoans -> {
+          _scanState.update {
+            it.copy(
+              isSheetOpen = true,
+              isAnalyzing = false,
+              partialWarnings = report.partialImageWarnings,
+              candidateDrafts = outcome.drafts,
+              multipleLoansExplanation = outcome.explanation,
+              activeDraftForReview = null
+            )
+          }
+        }
+      }
+    }
+  }
+
+  fun selectCandidateDraftForReview(draft: DebtImportDraft) {
+    _scanState.update {
+      it.copy(
+        isSheetOpen = false,
+        activeDraftForReview = draft
+      )
+    }
+  }
+
+  fun dismissActiveDraftReview(context: Context) {
+    val state = _scanState.value
+    if (state.candidateDrafts.size > 1) {
+      // Return to multi-loan selector inside ScanDebtSheet without throwing away remaining scanned loans
+      _scanState.update {
+        it.copy(
+          isSheetOpen = true,
+          activeDraftForReview = null
+        )
+      }
+    } else {
+      closeAndClearScanSession(context)
+    }
+  }
+
+  fun saveScannedDebt(
+    context: Context,
+    draft: DebtImportDraft,
+    confirmedDebt: DebtEntity,
+    scheduleRows: List<InstallmentEntity>,
+    attachScreenshots: Boolean
+  ) {
+    val stateSnapshot = _scanState.value
+    if (stateSnapshot.isSavingDraft) return
+    _scanState.update { it.copy(isSavingDraft = true) }
+
+    val retainedSources = if (attachScreenshots) {
+      stateSnapshot.stagedItems
+        .filter { it.index in draft.sourceScreenshotIndices }
+        .ifEmpty { stateSnapshot.stagedItems }
+        .map { item ->
+          RetainedAttachmentSource(
+            sourceFile = item.tempFile,
+            displayLabel = item.displayLabel,
+            screenshotIndex = item.index,
+            rotationDegrees = item.rotationDegrees
+          )
+        }
+    } else {
+      emptyList()
+    }
+
+    viewModelScope.launch {
+      runCatching {
+        repository.saveImportedDebtWithSchedule(
+          debt = confirmedDebt,
+          scheduleRows = scheduleRows,
+          attachmentSources = retainedSources
+        )
+      }.onSuccess {
+        val updatedDone = _scanState.value.completedCandidateIds + draft.candidateId
+        val hasMorePending = _scanState.value.candidateDrafts.any { it.candidateId !in updatedDone }
+        if (hasMorePending && _scanState.value.candidateDrafts.size > 1) {
+          _scanState.update {
+            it.copy(
+              isSavingDraft = false,
+              completedCandidateIds = updatedDone,
+              activeDraftForReview = null,
+              isSheetOpen = true
+            )
+          }
+          emitMessage("Saved ${confirmedDebt.name} — select the next loan or tap Done")
+        } else {
+          closeAndClearScanSession(context)
+          emitMessage("Saved ${confirmedDebt.name}")
+        }
+      }.onFailure { err ->
+        _scanState.update { it.copy(isSavingDraft = false) }
+        emitMessage(err.message ?: "Could not save scanned debt")
+      }
+    }
+  }
+
+  override fun onCleared() {
+    super.onCleared()
+    _scanState.value.stagedItems.forEach { ImageScanPreprocessor.deleteTempFile(it.tempFile) }
+    ImageScanPreprocessor.deleteTempFile(pendingCameraRawFile)
+  }
+
+  private fun reindexStaged(items: List<StagedScreenshotUiItem>): List<StagedScreenshotUiItem> =
+    items.mapIndexed { idx, item ->
+      val prefix = if (item.id.startsWith("cam_")) "Photo" else "Screenshot"
+      item.copy(index = idx, displayLabel = "$prefix #${idx + 1}")
+    }
+
+  companion object {
+    const val MAX_SCAN_SCREENSHOTS = 6
   }
 
   class Factory(private val repository: BaonPlanRepository) : ViewModelProvider.Factory {

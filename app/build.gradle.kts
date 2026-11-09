@@ -22,8 +22,8 @@ android {
     applicationId = "com.baonplan.finance"
     minSdk = 26
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.1.1"
+    versionCode = 4
+    versionName = "1.2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -120,6 +120,10 @@ dependencies {
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.kotlinx.serialization.json)
+
+  // On-device OCR & EXIF orientation handling (100% offline bundled model)
+  implementation(libs.mlkit.text.recognition)
+  implementation(libs.androidx.exifinterface)
 
   // Unit Tests
   testImplementation(libs.junit)

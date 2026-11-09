@@ -430,7 +430,9 @@ fun EmptyStateCard(
   subtitle: String,
   modifier: Modifier = Modifier,
   actionLabel: String? = null,
-  onAction: (() -> Unit)? = null
+  onAction: (() -> Unit)? = null,
+  secondaryActionLabel: String? = null,
+  onSecondaryAction: (() -> Unit)? = null
 ) {
   BaonCard(modifier = modifier) {
     Column(
@@ -469,10 +471,22 @@ fun EmptyStateCard(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center
       )
-      if (actionLabel != null && onAction != null) {
+      if ((actionLabel != null && onAction != null) || (secondaryActionLabel != null && onSecondaryAction != null)) {
         Spacer(modifier = Modifier.height(8.dp))
-        TextButton(onClick = onAction) {
-          Text(actionLabel)
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          if (actionLabel != null && onAction != null) {
+            TextButton(onClick = onAction) {
+              Text(actionLabel)
+            }
+          }
+          if (secondaryActionLabel != null && onSecondaryAction != null) {
+            TextButton(onClick = onSecondaryAction) {
+              Text(secondaryActionLabel)
+            }
+          }
         }
       }
     }

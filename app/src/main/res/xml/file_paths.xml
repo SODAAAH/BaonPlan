@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Temporary camera/staged images deleted immediately after OCR processing -->
+    <cache-path
+        name="ocr_scan_tmp"
+        path="ocr_scan_tmp/" />
+    <!-- Opt-in screenshot copies attached explicitly by user to a debt record -->
+    <files-path
+        name="debt_attachments"
+        path="debt_attachments/" />
+</paths>

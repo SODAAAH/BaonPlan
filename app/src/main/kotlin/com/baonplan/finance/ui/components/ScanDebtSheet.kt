@@ -1,0 +1,507 @@
+package com.baonplan.finance.ui.components
+
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.RotateRight
+import androidx.compose.material.icons.outlined.AccountBalance
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.baonplan.finance.data.ocr.ImageScanPreprocessor
+import com.baonplan.finance.domain.ocr.DebtImportDraft
+import com.baonplan.finance.domain.util.MoneyFormatter
+import com.baonplan.finance.ui.BaonPlanViewModel
+import com.baonplan.finance.ui.ScanDebtUiState
+import com.baonplan.finance.ui.StagedScreenshotUiItem
+import com.baonplan.finance.ui.theme.LocalBaonColors
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ScanDebtSheet(
+  scanState: ScanDebtUiState,
+  onSuppressNextRelock: () -> Unit,
+  onAddPickedUris: (List<Uri>) -> Unit,
+  onPrepareCameraUri: () -> Uri?,
+  onCameraCaptureResult: (Boolean) -> Unit,
+  onRotateItem: (String) -> Unit,
+  onRemoveItem: (String) -> Unit,
+  onAnalyze: () -> Unit,
+  onSelectCandidateDraft: (DebtImportDraft) -> Unit,
+  onEnterManually: () -> Unit,
+  onDismiss: () -> Unit
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  val semantic = LocalBaonColors.current
+
+  val photoPickerLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.PickMultipleVisualMedia(BaonPlanViewModel.MAX_SCAN_SCREENSHOTS)
+  ) { uris ->
+    if (uris.isNotEmpty()) {
+      onAddPickedUris(uris)
+    }
+  }
+
+  val cameraLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.TakePicture()
+  ) { success ->
+    onCameraCaptureResult(success)
+  }
+
+  val canAddMore = scanState.stagedItems.size < BaonPlanViewModel.MAX_SCAN_SCREENSHOTS &&
+    !scanState.isAnalyzing &&
+    !scanState.isImportingImages
+
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.surface
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .verticalScroll(rememberScrollState())
+        .navigationBarsPadding()
+        .imePadding()
+        .padding(horizontal = 20.dp)
+        .padding(bottom = 24.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+          text = "Scan debt",
+          style = MaterialTheme.typography.headlineSmall,
+          color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+          text = "Select loan details or schedule screenshots to prefill a review form.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+      }
+
+      InfoCallout(
+        icon = Icons.Outlined.Lock,
+        title = "On-device only · Offline",
+        body = "Read locally on your phone with zero internet uploads. Temporary scan copies are removed unless you choose to attach them.",
+        tone = BadgeTone.NEUTRAL
+      )
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+      ) {
+        FilledTonalButton(
+          onClick = {
+            onSuppressNextRelock()
+            runCatching {
+              photoPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+              )
+            }
+          },
+          enabled = canAddMore,
+          shape = RoundedCornerShape(12.dp),
+          modifier = Modifier.weight(1f),
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.PhotoLibrary,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp)
+          )
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = if (scanState.stagedItems.isEmpty()) "Pick screenshots" else "Add more",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+          )
+        }
+
+        OutlinedButton(
+          onClick = {
+            val uri = onPrepareCameraUri() ?: return@OutlinedButton
+            onSuppressNextRelock()
+            runCatching {
+              cameraLauncher.launch(uri)
+            }
+          },
+          enabled = canAddMore,
+          shape = RoundedCornerShape(12.dp),
+          modifier = Modifier.weight(1f),
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.PhotoCamera,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp)
+          )
+          Spacer(modifier = Modifier.width(6.dp))
+          Text(
+            text = "Take photo",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+          )
+        }
+      }
+
+      if (scanState.isImportingImages) {
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp
+          )
+          Text(
+            text = "Preparing selected images…",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+      }
+
+      if (scanState.stagedItems.isNotEmpty()) {
+        CalmSectionLabel(
+          text = "Selected (${scanState.stagedItems.size}/${BaonPlanViewModel.MAX_SCAN_SCREENSHOTS})",
+          modifier = Modifier.padding(top = 2.dp)
+        )
+        LazyRow(
+          horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+          items(
+            items = scanState.stagedItems,
+            key = { it.id }
+          ) { item ->
+            StagedScreenshotTile(
+              item = item,
+              enabled = !scanState.isAnalyzing && !scanState.isImportingImages,
+              onRotate = { onRotateItem(item.id) },
+              onRemove = { onRemoveItem(item.id) }
+            )
+          }
+        }
+      }
+
+      if (scanState.partialWarnings.isNotEmpty()) {
+        InfoCallout(
+          icon = Icons.Outlined.WarningAmber,
+          title = "Some images had unreadable text",
+          body = scanState.partialWarnings.joinToString("\n"),
+          tone = BadgeTone.WARNING
+        )
+      }
+
+      if (scanState.errorMessage != null) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          InfoCallout(
+            icon = Icons.Outlined.ErrorOutline,
+            title = "Couldn't read text clearly",
+            body = scanState.errorMessage,
+            tone = BadgeTone.DANGER
+          )
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+          ) {
+            TextButton(onClick = onEnterManually) {
+              Text("Enter details manually")
+            }
+          }
+        }
+      }
+
+      if (scanState.candidateDrafts.size > 1) {
+        InfoCallout(
+          icon = Icons.Outlined.AccountBalance,
+          title = "${scanState.candidateDrafts.size} separate loans detected",
+          body = scanState.multipleLoansExplanation
+            ?: "Review each loan separately so balances and schedules never mix.",
+          tone = BadgeTone.PRIMARY
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          scanState.candidateDrafts.forEachIndexed { idx, draft ->
+            val isSaved = draft.candidateId in scanState.completedCandidateIds
+            val title = draft.loanName.value?.takeIf { it.isNotBlank() }
+              ?: draft.lender.value?.takeIf { it.isNotBlank() }
+              ?: "Detected loan #${idx + 1}"
+            val balCents = draft.outstandingBalanceCents.value
+              ?: draft.remainingInstallmentTotalCents.value
+              ?: draft.calculatedUnpaidScheduleSumCents.value
+            val balanceText = balCents?.let { MoneyFormatter.formatPeso(it) } ?: "Balance not detected"
+            val pagesText = draft.sourceScreenshotIndices.joinToString(", ") { "#${it + 1}" }
+
+            BaonCard(contentPadding = 14.dp) {
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                  Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                  )
+                  Spacer(modifier = Modifier.height(2.dp))
+                  Text(
+                    text = "$balanceText · From $pagesText",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                  )
+                }
+                if (isSaved) {
+                  StatusBadge(text = "Saved", tone = BadgeTone.POSITIVE)
+                } else {
+                  FilledTonalButton(
+                    onClick = { onSelectCandidateDraft(draft) },
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                  ) {
+                    Text("Review & save")
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (scanState.candidateDrafts.size > 1) {
+        val anySaved = scanState.completedCandidateIds.isNotEmpty()
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+          horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+          OutlinedButton(
+            onClick = onEnterManually,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f)
+          ) {
+            Text("Enter manually")
+          }
+          Button(
+            onClick = onDismiss,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f)
+          ) {
+            Text(if (anySaved) "Done" else "Close")
+          }
+        }
+      } else {
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+          horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+          OutlinedButton(
+            onClick = onDismiss,
+            enabled = !scanState.isAnalyzing,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f)
+          ) {
+            Text("Cancel")
+          }
+          Button(
+            onClick = onAnalyze,
+            enabled = scanState.stagedItems.isNotEmpty() && !scanState.isAnalyzing && !scanState.isImportingImages,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1.3f)
+          ) {
+            if (scanState.isAnalyzing) {
+              CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary
+              )
+              Spacer(modifier = Modifier.width(8.dp))
+              Text("Reading…")
+            } else {
+              Text("Analyze")
+            }
+          }
+        }
+
+        if (scanState.errorMessage == null) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+          ) {
+            TextButton(
+              onClick = onEnterManually,
+              enabled = !scanState.isAnalyzing
+            ) {
+              Text(
+                text = "Enter debt manually instead",
+                color = semantic.muted
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun StagedScreenshotTile(
+  item: StagedScreenshotUiItem,
+  enabled: Boolean,
+  onRotate: () -> Unit,
+  onRemove: () -> Unit
+) {
+  val semantic = LocalBaonColors.current
+  val previewBitmap by produceState<ImageBitmap?>(
+    initialValue = null,
+    key1 = item.tempFile.absolutePath,
+    key2 = item.rotationDegrees
+  ) {
+    val decoded = ImageScanPreprocessor.decodeThumbnail(
+      file = item.tempFile,
+      rotationDegrees = item.rotationDegrees
+    )
+    value = decoded?.asImageBitmap()
+  }
+
+  Surface(
+    modifier = Modifier.width(118.dp),
+    shape = RoundedCornerShape(14.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider)
+  ) {
+    Column {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(140.dp)
+          .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
+          .background(MaterialTheme.colorScheme.surfaceContainer),
+        contentAlignment = Alignment.Center
+      ) {
+        val img = previewBitmap
+        if (img != null) {
+          Image(
+            bitmap = img,
+            contentDescription = item.displayLabel,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+          )
+        } else {
+          CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            strokeWidth = 2.dp
+          )
+        }
+
+        Surface(
+          modifier = Modifier
+            .align(Alignment.TopStart)
+            .padding(6.dp),
+          shape = RoundedCornerShape(6.dp),
+          color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+        ) {
+          Text(
+            text = "#${item.index + 1}",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+          )
+        }
+      }
+
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .padding(horizontal = 4.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        IconButton(
+          onClick = onRotate,
+          enabled = enabled,
+          modifier = Modifier.size(34.dp)
+        ) {
+          Icon(
+            imageVector = Icons.AutoMirrored.Outlined.RotateRight,
+            contentDescription = "Rotate #${item.index + 1} right",
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+        IconButton(
+          onClick = onRemove,
+          enabled = enabled,
+          modifier = Modifier.size(34.dp)
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.Close,
+            contentDescription = "Remove #${item.index + 1}",
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.error
+          )
+        }
+      }
+    }
+  }
+}

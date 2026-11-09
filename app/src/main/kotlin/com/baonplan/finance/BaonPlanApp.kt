@@ -12,13 +12,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.io.File
 
 class BaonPlanApp : Application() {
   private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   val database: BaonPlanDatabase by lazy { BaonPlanDatabase.getInstance(this) }
   val preferencesDataStore: SettingsPreferencesDataStore by lazy { SettingsPreferencesDataStore(this) }
-  val repository: BaonPlanRepository by lazy { BaonPlanRepository(database, preferencesDataStore) }
+  val attachmentStorageDir: File by lazy { File(filesDir, "debt_attachments") }
+  val repository: BaonPlanRepository by lazy {
+    BaonPlanRepository(
+      db = database,
+      prefs = preferencesDataStore,
+      attachmentStorageDir = attachmentStorageDir
+    )
+  }
 
   override fun onCreate() {
     super.onCreate()

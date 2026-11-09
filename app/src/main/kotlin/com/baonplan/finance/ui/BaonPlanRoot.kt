@@ -84,6 +84,7 @@ import com.baonplan.finance.ui.components.DebtEditorDialog
 import com.baonplan.finance.ui.components.GenerateScheduleDialog
 import com.baonplan.finance.ui.components.RecordAllowanceDialog
 import com.baonplan.finance.ui.components.RecordRepaymentDialog
+import com.baonplan.finance.ui.components.ScanDebtSheet
 import com.baonplan.finance.ui.components.UseEmergencySavingsDialog
 import com.baonplan.finance.widget.BaonWidgetProvider
 import com.baonplan.finance.ui.navigation.AboutKey
@@ -151,6 +152,7 @@ fun BaonPlanRoot(
   onToggleAppLock: (Boolean) -> Unit = {}
 ) {
   val state by viewModel.uiState.collectAsStateWithLifecycle()
+  val scanState by viewModel.scanState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
   val snackbarHostState = remember { SnackbarHostState() }
@@ -488,6 +490,9 @@ fun BaonPlanRoot(
                 onAddDebt = {
                   debtEditorTarget = null
                   showDebtEditor = true
+                },
+                onScanDebt = {
+                  viewModel.openScanDebtSheet(context)
                 }
               )
             }
@@ -601,10 +606,13 @@ fun BaonPlanRoot(
               val debt = state.debts.firstOrNull { it.id == key.debtId }
               val debtInstallments = state.installments.filter { it.debtId == key.debtId }
               val debtTransactions = state.transactions.filter { it.debtId == key.debtId }
+              val debtAttachments = state.attachments.filter { it.debtId == key.debtId }
               DebtDetailScreen(
                 debt = debt,
                 installments = debtInstallments,
                 transactions = debtTransactions,
+                attachments = debtAttachments,
+                resolveAttachmentFile = viewModel::resolveAttachmentFile,
                 onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
                 onEditDebt = {
                   debtEditorTarget = it
@@ -695,6 +703,48 @@ fun BaonPlanRoot(
       existing = debtEditorTarget,
       onSave = { viewModel.saveDebt(it) },
       onDismiss = { showDebtEditor = false }
+    )
+  }
+
+  if (scanState.isSheetOpen) {
+    ScanDebtSheet(
+      scanState = scanState,
+      onSuppressNextRelock = onSuppressNextRelock,
+      onAddPickedUris = { uris -> viewModel.addPickedScanUris(context, uris) },
+      onPrepareCameraUri = { viewModel.prepareCameraCaptureUri(context) },
+      onCameraCaptureResult = { captured -> viewModel.onCameraCaptureResult(context, captured) },
+      onRotateItem = { id -> viewModel.rotateStagedScreenshot(id) },
+      onRemoveItem = { id -> viewModel.removeStagedScreenshot(id) },
+      onAnalyze = { viewModel.analyzeStagedScreenshots() },
+      onSelectCandidateDraft = { draft -> viewModel.selectCandidateDraftForReview(draft) },
+      onEnterManually = {
+        viewModel.closeAndClearScanSession(context)
+        debtEditorTarget = null
+        showDebtEditor = true
+      },
+      onDismiss = { viewModel.closeAndClearScanSession(context) }
+    )
+  }
+
+  scanState.activeDraftForReview?.let { draft ->
+    DebtEditorDialog(
+      existing = null,
+      prefillDraft = draft,
+      existingDebts = state.debts,
+      existingInstallments = state.installments,
+      partialScanWarnings = scanState.partialWarnings,
+      isSavingImport = scanState.isSavingDraft,
+      onSave = {},
+      onSaveImported = { confirmedDebt, scheduleRows, attach ->
+        viewModel.saveScannedDebt(
+          context = context,
+          draft = draft,
+          confirmedDebt = confirmedDebt,
+          scheduleRows = scheduleRows,
+          attachScreenshots = attach
+        )
+      },
+      onDismiss = { viewModel.dismissActiveDraftReview(context) }
     )
   }
 

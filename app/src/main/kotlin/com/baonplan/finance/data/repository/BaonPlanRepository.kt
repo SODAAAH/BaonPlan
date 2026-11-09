@@ -2,11 +2,13 @@ package com.baonplan.finance.data.repository
 
 import androidx.room.withTransaction
 import com.baonplan.finance.data.backup.BaonPlanBackupPayload
+import com.baonplan.finance.data.ocr.ImageScanPreprocessor
 import com.baonplan.finance.data.local.AppPreferencesState
 import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.data.local.SettingsPreferencesDataStore
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
@@ -26,14 +28,25 @@ import com.baonplan.finance.domain.model.ThemeMode
 import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.time.LocalDate
 import kotlin.math.ceil
 
+data class RetainedAttachmentSource(
+  val sourceFile: File,
+  val displayLabel: String,
+  val screenshotIndex: Int,
+  val rotationDegrees: Int = 0
+)
+
 class BaonPlanRepository(
   private val db: BaonPlanDatabase,
-  private val prefs: SettingsPreferencesDataStore
+  private val prefs: SettingsPreferencesDataStore,
+  private val attachmentStorageDir: File? = null
 ) {
   private val debtDao = db.debtDao()
   private val installmentDao = db.installmentDao()
@@ -42,9 +55,11 @@ class BaonPlanRepository(
   private val expenseDao = db.expenseDao()
   private val reserveDao = db.debtReserveDao()
   private val settingsDao = db.userSettingsDao()
+  private val attachmentDao = db.debtAttachmentDao()
 
   val debtsFlow: Flow<List<DebtEntity>> = debtDao.observeAll()
   val installmentsFlow: Flow<List<InstallmentEntity>> = installmentDao.observeAll()
+  val attachmentsFlow: Flow<List<DebtAttachmentEntity>> = attachmentDao.observeAll()
   val transactionsFlow: Flow<List<TransactionEntity>> = transactionDao.observeAll()
   val allowancesFlow: Flow<List<AllowanceRecordEntity>> = allowanceDao.observeAll()
   val expensesFlow: Flow<List<ExpenseEntity>> = expenseDao.observeAll()
@@ -57,8 +72,17 @@ class BaonPlanRepository(
   fun observeDebt(debtId: Long): Flow<DebtEntity?> = debtDao.observeById(debtId)
   fun observeDebtInstallments(debtId: Long): Flow<List<InstallmentEntity>> =
     installmentDao.observeByDebtId(debtId)
+  fun observeDebtAttachments(debtId: Long): Flow<List<DebtAttachmentEntity>> =
+    attachmentDao.observeByDebtId(debtId)
   fun observeDebtTransactions(debtId: Long): Flow<List<TransactionEntity>> =
     transactionDao.observeByDebtId(debtId)
+
+  fun resolveAttachmentFile(fileName: String): File? {
+    val dir = attachmentStorageDir ?: return null
+    val safeName = File(fileName).name
+    if (safeName.isBlank()) return null
+    return File(dir, safeName)
+  }
 
   suspend fun ensureInitialized() {
     if (settingsDao.getSettings() == null) {
@@ -68,6 +92,7 @@ class BaonPlanRepository(
 
   suspend fun clearAllData() {
     db.withTransaction {
+      attachmentDao.deleteAll()
       installmentDao.deleteAll()
       transactionDao.deleteAll()
       allowanceDao.deleteAll()
@@ -76,6 +101,7 @@ class BaonPlanRepository(
       debtDao.deleteAll()
       settingsDao.upsert(DefaultSettingsProvider.defaultSettings())
     }
+    deleteAllStoredAttachments()
     prefs.clearOperationalPrefs()
   }
 
@@ -473,8 +499,104 @@ class BaonPlanRepository(
     }
   }
 
+  /**
+   * Atomically saves a user-confirmed scanned debt together with its extracted/edited
+   * schedule rows (including irregular due dates and prior-paid history) and any
+   * explicitly opted-in private screenshot attachments.
+   */
+  suspend fun saveImportedDebtWithSchedule(
+    debt: DebtEntity,
+    scheduleRows: List<InstallmentEntity>,
+    attachmentSources: List<RetainedAttachmentSource> = emptyList()
+  ): Long {
+    val now = ManilaTime.nowMillis()
+    val firstUnpaidDated = scheduleRows
+      .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+      .firstOrNull { !it.dueDate.isNullOrBlank() }
+
+    val resolvedNextDue = debt.nextDueDate ?: firstUnpaidDated?.dueDate
+    val resolvedStatus = when {
+      debt.status == DebtStatus.ARCHIVED -> DebtStatus.ARCHIVED
+      debt.remainingBalanceCents <= 0L -> DebtStatus.PAID
+      else -> DebtStatus.ACTIVE
+    }
+    val normalizedDebt = debt.copy(
+      id = 0L,
+      nextDueDate = resolvedNextDue,
+      status = resolvedStatus,
+      isManuallyEntered = true,
+      createdAtEpochMillis = now,
+      updatedAtEpochMillis = now
+    )
+
+    val copiedFiles = mutableListOf<Pair<File, RetainedAttachmentSource>>()
+    return try {
+      val insertedId = db.withTransaction {
+        val debtId = debtDao.insert(normalizedDebt)
+        if (scheduleRows.isNotEmpty()) {
+          val normalizedRows = scheduleRows.mapIndexed { idx, row ->
+            row.copy(
+              id = 0L,
+              debtId = debtId,
+              installmentNumber = idx + 1,
+              linkedTransactionId = null,
+              isManuallyEntered = true
+            )
+          }
+          installmentDao.insertAll(normalizedRows)
+        }
+        val dir = attachmentStorageDir
+        if (attachmentSources.isNotEmpty() && dir != null) {
+          val entities = withContext(Dispatchers.IO) {
+            if (!dir.exists()) dir.mkdirs()
+            val validSources = attachmentSources.filter { it.sourceFile.exists() && it.sourceFile.isFile }
+            validSources.mapIndexed { idx, src ->
+              val normalizedRotation = ((src.rotationDegrees % 360) + 360) % 360
+              val origExt = src.sourceFile.extension.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
+              val ext = if (normalizedRotation != 0) "jpg" else origExt
+              val destName = "debt_${debtId}_s${src.screenshotIndex}_${now}_$idx.$ext"
+              val destFile = File(dir, destName)
+              val savedRotated = if (normalizedRotation != 0) {
+                ImageScanPreprocessor.writeRotatedAttachmentJpeg(
+                  sourceFile = src.sourceFile,
+                  destFile = destFile,
+                  extraRotationDegrees = normalizedRotation
+                )
+              } else {
+                false
+              }
+              if (!savedRotated) {
+                src.sourceFile.copyTo(destFile, overwrite = true)
+              }
+              copiedFiles.add(destFile to src)
+              DebtAttachmentEntity(
+                debtId = debtId,
+                fileName = destName,
+                displayLabel = src.displayLabel,
+                screenshotIndex = src.screenshotIndex,
+                createdAtEpochMillis = now
+              )
+            }
+          }
+          if (entities.isNotEmpty()) {
+            attachmentDao.insertAll(entities)
+          }
+        }
+        debtId
+      }
+      insertedId
+    } catch (t: Throwable) {
+      withContext(Dispatchers.IO) {
+        copiedFiles.forEach { (f, _) -> runCatching { f.delete() } }
+      }
+      throw t
+    }
+  }
+
   suspend fun deleteDebt(debtId: Long) {
+    var attachmentNames: List<String> = emptyList()
     db.withTransaction {
+      attachmentNames = attachmentDao.getByDebtId(debtId).map { it.fileName }
       // Unlink any reserves pointing to this debt
       reserveDao.getAll()
         .filter { it.targetDebtId == debtId }
@@ -500,6 +622,29 @@ class BaonPlanRepository(
       }
 
       debtDao.deleteById(debtId)
+    }
+    deleteStoredAttachmentsByName(attachmentNames)
+  }
+
+  private suspend fun deleteStoredAttachmentsByName(fileNames: List<String>) {
+    if (fileNames.isEmpty() || attachmentStorageDir == null) return
+    withContext(Dispatchers.IO) {
+      fileNames.forEach { name ->
+        resolveAttachmentFile(name)?.let { file ->
+          runCatching { if (file.exists()) file.delete() }
+        }
+      }
+    }
+  }
+
+  private suspend fun deleteAllStoredAttachments() {
+    val dir = attachmentStorageDir ?: return
+    withContext(Dispatchers.IO) {
+      runCatching {
+        if (dir.exists() && dir.isDirectory) {
+          dir.listFiles()?.forEach { it.delete() }
+        }
+      }
     }
   }
 
@@ -551,7 +696,7 @@ class BaonPlanRepository(
 
       val existing = installmentDao.getByDebtId(debtId)
       val unpaid = existing.filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
-      if (generateFullSchedule && updatedDebt.frequency != RepaymentFrequency.UNKNOWN) {
+      if (generateFullSchedule && updatedDebt.frequency != RepaymentFrequency.UNKNOWN && updatedDebt.frequency != RepaymentFrequency.IRREGULAR) {
         val count = updatedDebt.remainingInstallmentsCount.takeIf { it > 0 }
           ?: if (updatedDebt.installmentAmountCents > 0L) {
             ceil(updatedDebt.remainingBalanceCents.toDouble() / updatedDebt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
@@ -619,7 +764,7 @@ class BaonPlanRepository(
     dateStatus: DueDateStatus
   ): Boolean {
     val startDate = ManilaTime.parseDate(startDateIso) ?: return false
-    if (frequency == RepaymentFrequency.UNKNOWN) return false
+    if (frequency == RepaymentFrequency.UNKNOWN || frequency == RepaymentFrequency.IRREGULAR) return false
     return db.withTransaction {
       val debt = debtDao.getById(debtId) ?: return@withTransaction false
       val specs = FinancialCalculator.generateInstallmentSchedule(
@@ -835,7 +980,7 @@ class BaonPlanRepository(
     } else if (nextUnpaid != null) {
       newNextDueDate = nextUnpaid.dueDate
       newDateStatus = nextUnpaid.dateStatus
-    } else if (debt.nextDueDate != null && debt.frequency != RepaymentFrequency.UNKNOWN) {
+    } else if (debt.nextDueDate != null && debt.frequency != RepaymentFrequency.UNKNOWN && debt.frequency != RepaymentFrequency.IRREGULAR) {
       val parsedCurrent = ManilaTime.parseDate(debt.nextDueDate)
       val advanced = if (parsedCurrent != null && (completedInstCount > 0 || appliedPayment >= debt.installmentAmountCents)) {
         ManilaTime.advanceDate(parsedCurrent, debt.frequency, debt.customIntervalDays)
@@ -1326,7 +1471,8 @@ class BaonPlanRepository(
       transactions = transactionDao.getAll(),
       allowanceRecords = allowanceDao.getAll(),
       expenses = expenseDao.getAll(),
-      debtReserves = reserveDao.getAll()
+      debtReserves = reserveDao.getAll(),
+      debtAttachments = attachmentDao.getAll()
     )
   }
 
@@ -1336,6 +1482,7 @@ class BaonPlanRepository(
 
   suspend fun restoreFromBackup(payload: BaonPlanBackupPayload) {
     db.withTransaction {
+      attachmentDao.deleteAll()
       installmentDao.deleteAll()
       transactionDao.deleteAll()
       allowanceDao.deleteAll()
@@ -1351,7 +1498,11 @@ class BaonPlanRepository(
       if (payload.allowanceRecords.isNotEmpty()) allowanceDao.insertAll(payload.allowanceRecords)
       if (payload.expenses.isNotEmpty()) expenseDao.insertAll(payload.expenses)
       if (payload.debtReserves.isNotEmpty()) reserveDao.insertAll(payload.debtReserves)
+      val debtIds = payload.debts.mapTo(HashSet()) { it.id }
+      val validAttachments = payload.debtAttachments.filter { it.debtId in debtIds }
+      if (validAttachments.isNotEmpty()) attachmentDao.insertAll(validAttachments)
     }
+    deleteAllStoredAttachments()
     prefs.clearOperationalPrefs()
   }
 }

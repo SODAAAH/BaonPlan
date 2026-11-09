@@ -3,6 +3,7 @@ package com.baonplan.finance.data
 import com.baonplan.finance.data.backup.BackupSerializer
 import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.DefaultSettingsProvider
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
@@ -103,5 +104,70 @@ class BackupSerializerTest {
     assertTrue(csv.contains("id,date,type,title,amount_php,amount_centavos"))
     assertTrue(csv.contains("\"Wallet Loan, Weekly\",26.15,2615"))
     assertTrue(csv.contains("\"Confirmed \"\"installment\"\"\""))
+  }
+
+  @Test
+  fun legacySchemaVersion1BackupJsonDecodesCleanlyAndV2PreservesAttachments() {
+    val legacyV1Json = """
+      {
+        "schemaVersion": 1,
+        "appId": "com.baonplan.finance",
+        "currency": "PHP",
+        "timezone": "Asia/Manila",
+        "exportedAtIso": "2026-11-01T00:00:00Z",
+        "settings": {
+          "id": 1,
+          "minWeeklyAllowanceCents": 40000,
+          "maxWeeklyAllowanceCents": 50000,
+          "conservativeAllowanceCents": 40000,
+          "schoolDaysPerWeek": 2,
+          "foodPerSchoolDayCents": 5000,
+          "weeklyFoodBudgetCents": 10000,
+          "weeklyOtherExpensesBudgetCents": 5000,
+          "weeklyEmergencySavingsTargetCents": 5000,
+          "weeklyDebtReserveTargetCents": 15000,
+          "remindersEnabled": true,
+          "allowanceReminderDayOfWeek": 1,
+          "reminderHour": 19,
+          "reminderMinute": 0,
+          "isManuallyEntered": true
+        },
+        "debts": [],
+        "installments": [],
+        "transactions": [],
+        "allowanceRecords": [],
+        "expenses": [],
+        "debtReserves": []
+      }
+    """.trimIndent()
+
+    val decodedV1 = BackupSerializer.decodeBackupJson(legacyV1Json).getOrThrow()
+    assertEquals(1, decodedV1.schemaVersion)
+    assertTrue(decodedV1.debtAttachments.isEmpty())
+
+    val payloadV2 = BaonPlanBackupPayload(
+      settings = DefaultSettingsProvider.defaultSettings(),
+      debts = emptyList(),
+      installments = emptyList(),
+      transactions = emptyList(),
+      allowanceRecords = emptyList(),
+      expenses = emptyList(),
+      debtReserves = emptyList(),
+      debtAttachments = listOf(
+        DebtAttachmentEntity(
+          id = 1L,
+          debtId = 99L,
+          fileName = "debt_99_s0.jpg",
+          displayLabel = "Screenshot #1",
+          screenshotIndex = 0,
+          createdAtEpochMillis = 123456L
+        )
+      )
+    )
+    val encodedV2 = BackupSerializer.encodeBackupJson(payloadV2)
+    val decodedV2 = BackupSerializer.decodeBackupJson(encodedV2).getOrThrow()
+    assertEquals(2, decodedV2.schemaVersion)
+    assertEquals(1, decodedV2.debtAttachments.size)
+    assertEquals("debt_99_s0.jpg", decodedV2.debtAttachments.single().fileName)
   }
 }

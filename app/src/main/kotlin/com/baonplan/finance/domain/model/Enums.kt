@@ -9,6 +9,7 @@ enum class RepaymentFrequency(val label: String) {
   MONTHLY("Monthly"),
   ONE_TIME("One-time"),
   CUSTOM_DAYS("Custom interval"),
+  IRREGULAR("Irregular"),
   UNKNOWN("Unknown")
 }
 

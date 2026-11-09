@@ -18,9 +18,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AccountBalance
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -53,6 +55,7 @@ fun DebtsScreen(
   state: BaonPlanUiState,
   onOpenDebtDetail: (Long) -> Unit,
   onAddDebt: () -> Unit,
+  onScanDebt: () -> Unit = {},
   modifier: Modifier = Modifier
 ) {
   var selectedFilter by remember { mutableStateOf(DebtStatus.ACTIVE) }
@@ -87,24 +90,40 @@ fun DebtsScreen(
   ) {
     // Header
     item {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-      ) {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
           text = "Your debts",
           style = MaterialTheme.typography.headlineMedium,
           color = MaterialTheme.colorScheme.onBackground
         )
-        FilledTonalButton(
-          onClick = onAddDebt,
-          shape = RoundedCornerShape(12.dp),
-          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-          Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(modifier = Modifier.width(4.dp))
-          Text("Add debt")
+          OutlinedButton(
+            onClick = onScanDebt,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.DocumentScanner,
+              contentDescription = null,
+              modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Scan debt", maxLines = 1, overflow = TextOverflow.Ellipsis)
+          }
+          FilledTonalButton(
+            onClick = onAddDebt,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+          ) {
+            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Add debt", maxLines = 1, overflow = TextOverflow.Ellipsis)
+          }
         }
       }
     }
@@ -153,7 +172,9 @@ fun DebtsScreen(
             "Debts appear here once paid off or archived."
           },
           actionLabel = if (selectedFilter == DebtStatus.ACTIVE) "Add debt" else null,
-          onAction = if (selectedFilter == DebtStatus.ACTIVE) onAddDebt else null
+          onAction = if (selectedFilter == DebtStatus.ACTIVE) onAddDebt else null,
+          secondaryActionLabel = if (selectedFilter == DebtStatus.ACTIVE) "Scan debt" else null,
+          onSecondaryAction = if (selectedFilter == DebtStatus.ACTIVE) onScanDebt else null
         )
       }
     } else {

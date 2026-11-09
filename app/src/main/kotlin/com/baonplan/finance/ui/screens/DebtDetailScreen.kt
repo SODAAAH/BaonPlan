@@ -1,7 +1,11 @@
 package com.baonplan.finance.ui.screens
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -13,18 +17,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -32,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -39,20 +49,30 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
+import com.baonplan.finance.data.ocr.ImageScanPreprocessor
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.components.BadgeTone
@@ -65,6 +85,7 @@ import com.baonplan.finance.ui.components.MetricRow
 import com.baonplan.finance.ui.components.SectionHeader
 import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -80,10 +101,18 @@ fun DebtDetailScreen(
   onMarkInstallmentPaid: (InstallmentEntity) -> Unit,
   onArchiveToggle: (DebtEntity) -> Unit,
   onDeleteDebt: (DebtEntity) -> Unit,
-  onCorrectTransaction: (TransactionEntity) -> Unit
+  onCorrectTransaction: (TransactionEntity) -> Unit,
+  attachments: List<DebtAttachmentEntity> = emptyList(),
+  resolveAttachmentFile: (String) -> File? = { null }
 ) {
   val semantic = LocalBaonColors.current
   var showDeleteConfirm by remember { mutableStateOf(false) }
+  var previewAttachment by remember { mutableStateOf<Pair<DebtAttachmentEntity, File>?>(null) }
+  val resolvedAttachments = remember(attachments) {
+    attachments.mapNotNull { att ->
+      resolveAttachmentFile(att.fileName)?.let { file -> att to file }
+    }
+  }
 
   Scaffold(
     containerColor = MaterialTheme.colorScheme.background,
@@ -327,6 +356,25 @@ fun DebtDetailScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
               )
             }
+            if (resolvedAttachments.isNotEmpty()) {
+              CalmDivider()
+              CalmSectionLabel(
+                text = "Attached screenshots (${resolvedAttachments.size})",
+                modifier = Modifier.padding(0.dp)
+              )
+              LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(
+                  items = resolvedAttachments,
+                  key = { (att, _) -> att.id }
+                ) { (att, file) ->
+                  AttachmentThumbTile(
+                    attachment = att,
+                    file = file,
+                    onClick = { previewAttachment = att to file }
+                  )
+                }
+              }
+            }
           }
         }
       }
@@ -334,6 +382,7 @@ fun DebtDetailScreen(
       // 4. Payment Schedule
       item {
         val canManageSchedule = debt.status == DebtStatus.ACTIVE && debt.remainingBalanceCents > 0L
+        val isIrregular = debt.frequency == RepaymentFrequency.IRREGULAR
         SectionHeader(
           title = "Payment schedule (${installments.size})",
           actionLabel = if (canManageSchedule) "Update" else null,
@@ -342,10 +391,22 @@ fun DebtDetailScreen(
           } else null
         )
         Spacer(modifier = Modifier.height(6.dp))
+        if (isIrregular && installments.isNotEmpty()) {
+          Text(
+            text = "Irregular payment dates preserved as imported.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 6.dp)
+          )
+        }
         if (installments.isEmpty()) {
           BaonCard {
             Text(
-              text = "No schedule created yet. BaonPlan never guesses missing dates — tap Update once you know the due date and frequency.",
+              text = if (isIrregular) {
+                "No irregular schedule rows saved yet. Tap Update if you switch to a regular payment interval."
+              } else {
+                "No schedule created yet. BaonPlan never guesses missing dates — tap Update once you know the due date and frequency."
+              },
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -535,5 +596,139 @@ fun DebtDetailScreen(
         TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
       }
     )
+  }
+
+  previewAttachment?.let { (att, file) ->
+    AttachmentPreviewDialog(
+      attachment = att,
+      file = file,
+      onDismiss = { previewAttachment = null }
+    )
+  }
+}
+
+@Composable
+private fun AttachmentThumbTile(
+  attachment: DebtAttachmentEntity,
+  file: File,
+  onClick: () -> Unit
+) {
+  val semantic = LocalBaonColors.current
+  val thumb by produceState<ImageBitmap?>(
+    initialValue = null,
+    key1 = file.absolutePath
+  ) {
+    value = ImageScanPreprocessor.decodeThumbnail(file)?.asImageBitmap()
+  }
+
+  Surface(
+    modifier = Modifier
+      .width(86.dp)
+      .clip(RoundedCornerShape(10.dp))
+      .clickable(onClick = onClick),
+    shape = RoundedCornerShape(10.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider)
+  ) {
+    Column {
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .height(96.dp)
+          .background(MaterialTheme.colorScheme.surfaceContainer),
+        contentAlignment = Alignment.Center
+      ) {
+        val img = thumb
+        if (img != null) {
+          Image(
+            bitmap = img,
+            contentDescription = attachment.displayLabel,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+          )
+        } else {
+          CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp
+          )
+        }
+      }
+      Text(
+        text = attachment.displayLabel,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+      )
+    }
+  }
+}
+
+@Composable
+private fun AttachmentPreviewDialog(
+  attachment: DebtAttachmentEntity,
+  file: File,
+  onDismiss: () -> Unit
+) {
+  val fullBitmap by produceState<ImageBitmap?>(
+    initialValue = null,
+    key1 = file.absolutePath
+  ) {
+    value = ImageScanPreprocessor.decodeAttachmentPreview(file)?.asImageBitmap()
+  }
+
+  Dialog(
+    onDismissRequest = onDismiss,
+    properties = DialogProperties(usePlatformDefaultWidth = false)
+  ) {
+    Surface(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(16.dp),
+      shape = RoundedCornerShape(16.dp),
+      color = MaterialTheme.colorScheme.surface
+    ) {
+      Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Text(
+            text = attachment.displayLabel,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+          )
+          IconButton(onClick = onDismiss) {
+            Icon(Icons.Outlined.Close, contentDescription = "Close preview")
+          }
+        }
+        CalmDivider()
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)
+            .padding(12.dp),
+          contentAlignment = Alignment.Center
+        ) {
+          val img = fullBitmap
+          if (img != null) {
+            Image(
+              bitmap = img,
+              contentDescription = attachment.displayLabel,
+              contentScale = ContentScale.Fit,
+              modifier = Modifier.fillMaxSize()
+            )
+          } else {
+            CircularProgressIndicator()
+          }
+        }
+      }
+    }
   }
 }
