@@ -68,6 +68,8 @@ import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
+import com.baonplan.finance.domain.budget.PaymentDueGroup
+import com.baonplan.finance.domain.budget.ResolvedIncomeOccurrence
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ReserveType
@@ -75,16 +77,21 @@ import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.notifications.NotificationHelper
 import com.baonplan.finance.ui.components.AddExpenseDialog
 import com.baonplan.finance.ui.components.AdjustBudgetSheet
+import com.baonplan.finance.ui.components.BudgetSettingsAndAllocationsSheet
 import com.baonplan.finance.ui.components.CalmDivider
 import com.baonplan.finance.ui.components.ConfirmDueDateDialog
+import com.baonplan.finance.ui.components.ConfirmIncomeOccurrenceDialog
 import com.baonplan.finance.ui.components.ConfirmMarkInstallmentDialog
 import com.baonplan.finance.ui.components.CorrectTransactionDialog
 import com.baonplan.finance.ui.components.CreateReserveDialog
 import com.baonplan.finance.ui.components.DebtEditorDialog
 import com.baonplan.finance.ui.components.GenerateScheduleDialog
+import com.baonplan.finance.ui.components.IncomeSourcesManagerSheet
+import com.baonplan.finance.ui.components.PaymentGroupBreakdownSheet
 import com.baonplan.finance.ui.components.RecordAllowanceDialog
 import com.baonplan.finance.ui.components.RecordRepaymentDialog
 import com.baonplan.finance.ui.components.ScanDebtSheet
+import com.baonplan.finance.ui.components.SetupBudgetSheet
 import com.baonplan.finance.ui.components.UseEmergencySavingsDialog
 import com.baonplan.finance.widget.BaonWidgetProvider
 import com.baonplan.finance.ui.navigation.AboutKey
@@ -231,6 +238,12 @@ fun BaonPlanRoot(
   var correctionTargetTx by remember { mutableStateOf<TransactionEntity?>(null) }
   var showUseEmergencyDialog by remember { mutableStateOf(false) }
   var markInstallmentTarget by remember { mutableStateOf<Pair<DebtEntity, InstallmentEntity>?>(null) }
+  var showSetupBudgetSheet by remember { mutableStateOf(false) }
+  var showIncomeSourcesSheet by remember { mutableStateOf(false) }
+  var confirmOccurrenceTarget by remember { mutableStateOf<ResolvedIncomeOccurrence?>(null) }
+  var showBudgetSettingsSheet by remember { mutableStateOf(false) }
+  var paymentBreakdownFocusedGroup by remember { mutableStateOf<PaymentDueGroup?>(null) }
+  var showPaymentBreakdownSheet by remember { mutableStateOf(false) }
 
   LaunchedEffect(Unit) {
     viewModel.messages.collect { msg ->
@@ -241,8 +254,11 @@ fun BaonPlanRoot(
   LaunchedEffect(
     state.isLoading,
     state.weeklySummary.availableSpendingMoneyCents,
+    state.budgetOverview.projectedRemainingCents,
+    state.budgetOverview.actualRemainingCents,
     state.totalActiveDebtCents,
-    state.paymentOverview
+    state.paymentOverview,
+    state.paymentGrouping
   ) {
     if (!state.isLoading) {
       BaonWidgetProvider.requestUpdate(context)
@@ -420,7 +436,25 @@ fun BaonPlanRoot(
                 },
                 onOpenDebts = { navigateToTopLevel(DebtsKey) },
                 onOpenDebtDetail = { id -> pushScreen(DebtDetailKey(id)) },
-                onOpenCalendar = { pushScreen(CalendarKey) }
+                onStepBudgetPeriod = { delta -> viewModel.stepBudgetPeriod(delta) },
+                onResetBudgetPeriodToCurrent = { viewModel.selectBudgetPeriodOffset(0) },
+                onOpenSetupBudget = { showSetupBudgetSheet = true },
+                onOpenIncomeSources = { showIncomeSourcesSheet = true },
+                onOpenConfirmOccurrence = { occ -> confirmOccurrenceTarget = occ },
+                onOpenBudgetSettings = { showBudgetSettingsSheet = true },
+                onOpenPaymentBreakdown = { grp ->
+                  paymentBreakdownFocusedGroup = grp
+                  showPaymentBreakdownSheet = true
+                },
+                onQuickReserveAmount = { debtId, debtName, amountCents ->
+                  viewModel.createReserve(
+                    reserveType = ReserveType.DEBT_REPAYMENT_RESERVE,
+                    amountCents = amountCents,
+                    dateIso = ManilaTime.formatIso(state.today),
+                    targetDebtId = debtId,
+                    notes = "Reserved for $debtName"
+                  )
+                }
               )
             }
 
@@ -556,9 +590,7 @@ fun BaonPlanRoot(
                 onSaveSettings = { updated -> viewModel.updateSettings(context, updated) },
                 onSaveLeadDays = { days -> viewModel.setReminderLeadDays(days) },
                 onRequestNotificationPermission = requestNotifPermission,
-                onOpenSystemNotificationSettings = openNotificationSettings,
-                onSendTestNotification = { viewModel.sendTestNotification(context) },
-                onRunReminderCheckNow = { viewModel.runReminderWorkerNow(context) }
+                onOpenSystemNotificationSettings = openNotificationSettings
               )
             }
 
@@ -581,7 +613,11 @@ fun BaonPlanRoot(
                   state.transactions.isNotEmpty() ||
                   state.allowances.isNotEmpty() ||
                   state.expenses.isNotEmpty() ||
-                  state.reserves.isNotEmpty(),
+                  state.reserves.isNotEmpty() ||
+                  state.incomeSources.isNotEmpty() ||
+                  state.incomeOccurrences.isNotEmpty() ||
+                  state.budgetAllocations.isNotEmpty() ||
+                  state.budgetProfile.isConfigured,
                 onExportBackupJson = {
                   onSuppressNextRelock()
                   exportJsonLauncher.launch("baonplan-backup-${ManilaTime.formatIso(state.today)}.json")
@@ -852,6 +888,92 @@ fun BaonPlanRoot(
     )
   }
 
+  if (showSetupBudgetSheet) {
+    SetupBudgetSheet(
+      today = state.today,
+      existingProfile = state.budgetProfile,
+      onCompleteSetup = { source, profile, markFirst ->
+        viewModel.setupBudgetWithPrimaryIncome(source, profile, markFirst)
+      },
+      onDismiss = { showSetupBudgetSheet = false }
+    )
+  }
+
+  if (showIncomeSourcesSheet) {
+    IncomeSourcesManagerSheet(
+      today = state.today,
+      budgetOverview = state.budgetOverview,
+      incomeSources = state.incomeSources,
+      frequencyNormalization = state.frequencyNormalization,
+      onSaveSource = { src, effectiveIso ->
+        viewModel.saveIncomeSource(src, effectiveIso)
+      },
+      onTogglePauseSource = { id, paused, effectiveIso ->
+        viewModel.setIncomeSourcePaused(id, paused, effectiveIso)
+      },
+      onEndSource = { id, endIso ->
+        viewModel.endIncomeSource(id, endIso)
+      },
+      onOpenConfirmOccurrence = { occ ->
+        confirmOccurrenceTarget = occ
+      },
+      onDismiss = { showIncomeSourcesSheet = false }
+    )
+  }
+
+  confirmOccurrenceTarget?.let { occ ->
+    ConfirmIncomeOccurrenceDialog(
+      occurrence = occ,
+      today = state.today,
+      onConfirm = { status, actualAmt, actualDateIso, notes ->
+        viewModel.confirmOrUpdateIncomeOccurrence(
+          occurrenceId = occ.occurrenceId,
+          sourceId = occ.sourceId,
+          expectedDateIso = ManilaTime.formatIso(occ.expectedDate),
+          expectedAmountCents = occ.expectedAmountCents,
+          status = status,
+          actualAmountCents = actualAmt,
+          actualDateIso = actualDateIso,
+          notes = notes
+        )
+      },
+      onDismiss = { confirmOccurrenceTarget = null }
+    )
+  }
+
+  if (showBudgetSettingsSheet) {
+    BudgetSettingsAndAllocationsSheet(
+      profile = state.budgetProfile,
+      allocations = state.budgetAllocations,
+      onSaveProfile = { updated -> viewModel.saveBudgetProfile(updated) },
+      onUpsertAllocation = { key, amt, enabled ->
+        viewModel.upsertBudgetAllocation(key, amt, enabled)
+      },
+      onDeleteAllocation = { key -> viewModel.deleteBudgetAllocation(key) },
+      onDismiss = { showBudgetSettingsSheet = false }
+    )
+  }
+
+  if (showPaymentBreakdownSheet) {
+    PaymentGroupBreakdownSheet(
+      grouping = state.paymentGrouping,
+      focusedGroup = paymentBreakdownFocusedGroup,
+      onOpenDebtDetail = { debtId ->
+        showPaymentBreakdownSheet = false
+        pushScreen(DebtDetailKey(debtId))
+      },
+      onRecordPaymentForDebt = { debtId ->
+        showPaymentBreakdownSheet = false
+        repaymentTargetDebtId = debtId
+        showRepaymentDialog = true
+      },
+      onDismiss = {
+        showPaymentBreakdownSheet = false
+        paymentBreakdownFocusedGroup = null
+      }
+    )
+  }
+
   pendingBackupPayload?.let { payload ->
     AlertDialog(
       onDismissRequest = { pendingBackupPayload = null },
@@ -863,6 +985,7 @@ fun BaonPlanRoot(
             "• Installments: ${payload.installments.size}\n" +
             "• Transactions: ${payload.transactions.size}\n" +
             "• Allowances: ${payload.allowanceRecords.size}\n" +
+            "• Income sources: ${payload.incomeSources.size}\n" +
             "• Expenses: ${payload.expenses.size}\n" +
             "• Exported: ${payload.exportedAtIso}"
         )

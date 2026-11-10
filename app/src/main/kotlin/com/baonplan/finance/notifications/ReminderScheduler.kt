@@ -2,8 +2,6 @@ package com.baonplan.finance.notifications
 
 import android.content.Context
 import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.baonplan.finance.domain.util.ManilaTime
@@ -14,7 +12,6 @@ import java.util.concurrent.TimeUnit
 
 object ReminderScheduler {
   const val PERIODIC_WORK_NAME = "baonplan_daily_reminder_check"
-  const val ONE_TIME_WORK_NAME = "baonplan_immediate_reminder_check"
 
   fun schedulePeriodicReminders(
     context: Context,
@@ -36,15 +33,6 @@ object ReminderScheduler {
     workManager.enqueueUniquePeriodicWork(
       PERIODIC_WORK_NAME,
       ExistingPeriodicWorkPolicy.UPDATE,
-      request
-    )
-  }
-
-  fun runImmediateCheck(context: Context) {
-    val request = OneTimeWorkRequestBuilder<ReminderWorker>().build()
-    WorkManager.getInstance(context).enqueueUniqueWork(
-      ONE_TIME_WORK_NAME,
-      ExistingWorkPolicy.REPLACE,
       request
     )
   }

@@ -90,6 +90,7 @@ enum class ExpenseCategory(val label: String) {
   SCHOOL_FOOD("School Food"),
   TRANSPORT("Transport"),
   SCHOOL_SUPPLIES("School Supplies"),
+  BILLS("Bills"),
   PERSONAL("Personal"),
   EMERGENCY("Emergency"),
   OTHER("Other")
@@ -185,4 +186,81 @@ enum class PrepaymentRuleType(val label: String) {
   PREPAYMENT_PENALTY("Prepayment fee applies"),
   EARLY_TERMINATION_FEE("Early termination fee applies"),
   UNKNOWN("Not specified in contract")
+}
+
+@Serializable
+enum class IncomeFrequency(val label: String, val shortLabel: String) {
+  DAILY("Daily", "Daily"),
+  WEEKLY("Weekly", "Weekly"),
+  EVERY_14_DAYS("Every 14 days", "Biweekly"),
+  EVERY_21_DAYS("Every 21 days", "Every 21d"),
+  TWICE_MONTHLY("Twice monthly", "Twice/mo"),
+  MONTHLY("Monthly", "Monthly"),
+  CUSTOM_DAYS("Every N days", "Custom days"),
+  CUSTOM_MONTHS("Every N months", "Custom months"),
+  CUSTOM_DATES("Custom dates", "Custom dates"),
+  ONE_TIME("One-time", "One-time")
+}
+
+@Serializable
+enum class WeeklyCycleMode(val label: String) {
+  ANCHOR_ALIGNED("From allowance date"),
+  MONDAY_TO_SUNDAY("Calendar week (Mon–Sun)")
+}
+
+@Serializable
+enum class MonthlyCycleMode(val label: String) {
+  CALENDAR_MONTH("Calendar month (1st–end)"),
+  PAYDAY_CYCLE("Payday to next payday")
+}
+
+@Serializable
+enum class TwiceMonthlyPattern(val label: String) {
+  FIRST_AND_FIFTEENTH("1st and 15th"),
+  FIFTEENTH_AND_END_OF_MONTH("15th and last day"),
+  CUSTOM_TWO_DAYS("Custom two dates")
+}
+
+@Serializable
+enum class BudgetPeriodStyle(val label: String) {
+  AUTO_FROM_PRIMARY("Match primary allowance"),
+  DAILY("Daily"),
+  WEEKLY("Weekly"),
+  EVERY_14_DAYS("Every 14 days"),
+  TWICE_MONTHLY("Twice monthly"),
+  MONTHLY("Monthly"),
+  CUSTOM_DAYS("Every N days")
+}
+
+@Serializable
+enum class IncomeOccurrenceStatus(val label: String) {
+  EXPECTED("Expected"),
+  RECEIVED("Received"),
+  PARTIALLY_RECEIVED("Partially received"),
+  MISSED("Missed"),
+  CANCELLED("Cancelled");
+
+  val isSettledCashIn: Boolean
+    get() = this == RECEIVED || this == PARTIALLY_RECEIVED
+}
+
+@Serializable
+enum class DebtDeductionMode(val label: String) {
+  UNPAID_ONLY("Unpaid balance due"),
+  FULL_DUE("Full payment due")
+}
+
+@Serializable
+enum class BudgetCategoryKey(
+  val label: String,
+  val mappedExpenseCategory: ExpenseCategory?,
+  val isSavingsAllocation: Boolean = false
+) {
+  FOOD("Food", ExpenseCategory.SCHOOL_FOOD),
+  TRANSPORTATION("Transportation", ExpenseCategory.TRANSPORT),
+  SCHOOL("School", ExpenseCategory.SCHOOL_SUPPLIES),
+  BILLS("Bills", ExpenseCategory.BILLS),
+  PERSONAL("Personal", ExpenseCategory.PERSONAL),
+  SAVINGS("Savings", null, isSavingsAllocation = true),
+  OTHER("Other", ExpenseCategory.OTHER)
 }

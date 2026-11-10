@@ -7,7 +7,10 @@ import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.data.local.SettingsPreferencesDataStore
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.budget.BudgetPeriodWindow
+import com.baonplan.finance.domain.budget.BudgetRecurrenceEngine
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.widget.BaonWidgetProvider
@@ -34,20 +37,24 @@ class ReminderWorker(
     val debts = db.debtDao().getAll()
     val installments = db.installmentDao().getAll()
     val allowances = db.allowanceRecordDao().getAll()
+    val budgetProfile = db.budgetProfileDao().getProfile()
+    val incomeSources = db.incomeSourceDao().getAll()
+    val incomeOccurrences = db.incomeOccurrenceDao().getAll()
 
     val overview = FinancialCalculator.buildPaymentOverview(debts, installments, today)
 
     if (overview.overduePayments.isNotEmpty()) {
-      val totalOverdue = overview.overduePayments.sumOf { it.amountCents }
+      val knownOverdue = overview.overduePayments.filter { it.amountCents > 0L }.sumOf { it.amountCents }
       val first = overview.overduePayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated date)" else ""
       val extra = if (overview.overduePayments.size > 1) " (+${overview.overduePayments.size - 1} more)" else ""
+      val amtText = if (knownOverdue > 0L) "${MoneyFormatter.formatPeso(knownOverdue)} overdue" else "Amount unavailable"
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_OVERDUE,
         title = "Overdue Payment Alert (${overview.overduePayments.size})",
-        body = "${first.debtName}$tag$extra · ${MoneyFormatter.formatPeso(totalOverdue)} overdue. Open Calendar to review or confirm.",
+        body = "${first.debtName}$tag$extra · $amtText. Open Calendar to review or confirm.",
         highPriority = true
       )
     }
@@ -56,12 +63,13 @@ class ReminderWorker(
       val first = overview.dueTodayPayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated)" else ""
       val extra = if (overview.dueTodayPayments.size > 1) " (+${overview.dueTodayPayments.size - 1} more)" else ""
+      val amtLabel = if (first.amountCents > 0L) MoneyFormatter.formatPeso(first.amountCents) else "Amount unavailable"
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_DUE_TODAY,
         title = "Payment Due Today",
-        body = "${first.debtName}$tag$extra: ${MoneyFormatter.formatPeso(first.amountCents)} due today (${ManilaTime.formatDisplay(today)}).",
+        body = "${first.debtName}$tag$extra: $amtLabel due today (${ManilaTime.formatDisplay(today)}).",
         highPriority = true
       )
     }
@@ -70,12 +78,13 @@ class ReminderWorker(
       val first = overview.dueTomorrowPayments.first()
       val tag = if (first.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) " (Estimated)" else ""
       val extra = if (overview.dueTomorrowPayments.size > 1) " (+${overview.dueTomorrowPayments.size - 1} more)" else ""
+      val amtLabel = if (first.amountCents > 0L) MoneyFormatter.formatPeso(first.amountCents) else "Amount unavailable"
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_DUE_TOMORROW,
         title = "Payment Due Tomorrow",
-        body = "${first.debtName}$tag$extra: ${MoneyFormatter.formatPeso(first.amountCents)} due tomorrow.",
+        body = "${first.debtName}$tag$extra: $amtLabel due tomorrow.",
         highPriority = false
       )
     }
@@ -92,31 +101,62 @@ class ReminderWorker(
     if (upcomingSoon.isNotEmpty()) {
       val (first, deltaDays) = upcomingSoon.first()
       val extra = if (upcomingSoon.size > 1) " (+${upcomingSoon.size - 1} more)" else ""
+      val amtLabel = if (first.amountCents > 0L) MoneyFormatter.formatPeso(first.amountCents) else "Amount unavailable"
       NotificationHelper.showNotification(
         context = applicationContext,
         channelId = NotificationHelper.CHANNEL_PAYMENTS,
         notificationId = NotificationHelper.NOTIFICATION_ID_UPCOMING,
         title = "Upcoming Payment in $deltaDays Days",
-        body = "${first.debtName}$extra: ${MoneyFormatter.formatPeso(first.amountCents)} on ${ManilaTime.formatDisplay(first.dueDateIso)}.",
+        body = "${first.debtName}$extra: $amtLabel on ${ManilaTime.formatDisplay(first.dueDateIso)}.",
         highPriority = false
       )
     }
 
-    // Weekly allowance reminder if today matches configured day and no allowance recorded this week
-    val weekStart = ManilaTime.weekStart(today)
-    val hasAllowanceThisWeek = allowances.any { ManilaTime.isInWeek(it.receivedDate, weekStart) }
-    if (!hasAllowanceThisWeek && today.dayOfWeek.value == settings.allowanceReminderDayOfWeek) {
-      val minStr = MoneyFormatter.formatPesoCompact(settings.minWeeklyAllowanceCents)
-      val maxStr = MoneyFormatter.formatPesoCompact(settings.maxWeeklyAllowanceCents)
-      val rangeLabel = if (minStr == maxStr) minStr else "$minStr–$maxStr"
-      NotificationHelper.showNotification(
-        context = applicationContext,
-        channelId = NotificationHelper.CHANNEL_ALLOWANCE,
-        notificationId = NotificationHelper.NOTIFICATION_ID_ALLOWANCE,
-        title = "Weekly Baon Check-In",
-        body = "Record this week's allowance ($rangeLabel) to calculate your school food budget and safe debt reserve.",
-        highPriority = false
+    val hasConfiguredSchedule = budgetProfile?.isConfigured == true || incomeSources.isNotEmpty()
+    if (hasConfiguredSchedule) {
+      val todayWindow = BudgetPeriodWindow(
+        periodOffset = 0,
+        startDate = today,
+        endDateExclusive = today.plusDays(1),
+        label = "",
+        frequencyLabel = ""
       )
+      val expectedToday = BudgetRecurrenceEngine.resolveOccurrencesForWindow(
+        sources = incomeSources,
+        persistedOccurrences = incomeOccurrences,
+        window = todayWindow,
+        primarySourceId = budgetProfile?.primarySourceId
+      ).filter { it.expectedDate == today && it.status == IncomeOccurrenceStatus.EXPECTED }
+
+      if (expectedToday.isNotEmpty()) {
+        val first = expectedToday.first()
+        val extra = if (expectedToday.size > 1) " (+${expectedToday.size - 1} more)" else ""
+        NotificationHelper.showNotification(
+          context = applicationContext,
+          channelId = NotificationHelper.CHANNEL_ALLOWANCE,
+          notificationId = NotificationHelper.NOTIFICATION_ID_ALLOWANCE,
+          title = "Allowance Check-In",
+          body = "${first.sourceName}$extra (${MoneyFormatter.formatPesoCompact(first.expectedAmountCents)}) is expected today. Open Home to confirm when received.",
+          highPriority = false
+        )
+      }
+    } else {
+      // Legacy weekly allowance reminder before new budget schedule is set up
+      val weekStart = ManilaTime.weekStart(today)
+      val hasAllowanceThisWeek = allowances.any { ManilaTime.isInWeek(it.receivedDate, weekStart) }
+      if (!hasAllowanceThisWeek && today.dayOfWeek.value == settings.allowanceReminderDayOfWeek) {
+        val minStr = MoneyFormatter.formatPesoCompact(settings.minWeeklyAllowanceCents)
+        val maxStr = MoneyFormatter.formatPesoCompact(settings.maxWeeklyAllowanceCents)
+        val rangeLabel = if (minStr == maxStr) minStr else "$minStr–$maxStr"
+        NotificationHelper.showNotification(
+          context = applicationContext,
+          channelId = NotificationHelper.CHANNEL_ALLOWANCE,
+          notificationId = NotificationHelper.NOTIFICATION_ID_ALLOWANCE,
+          title = "Weekly Baon Check-In",
+          body = "Record this week's allowance ($rangeLabel) to update your spending budget.",
+          highPriority = false
+        )
+      }
     }
 
     prefs.setLastReminderEpochMillis(ManilaTime.nowMillis())

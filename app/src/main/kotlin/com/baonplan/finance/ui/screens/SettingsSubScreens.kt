@@ -161,8 +161,6 @@ fun NotificationsScreen(
   onSaveLeadDays: (Int) -> Unit,
   onRequestNotificationPermission: () -> Unit,
   onOpenSystemNotificationSettings: () -> Unit,
-  onSendTestNotification: () -> Unit,
-  onRunReminderCheckNow: () -> Unit,
   modifier: Modifier = Modifier
 ) {
   val settings = state.settings
@@ -248,7 +246,7 @@ fun NotificationsScreen(
       InfoCallout(
         icon = Icons.Outlined.NotificationsActive,
         title = if (hasNotificationPermission) "Notification permission granted" else "Permission needed on Android 13+",
-        body = "Last background check: $lastCheck. Checks use WorkManager and may be delayed by Android Doze mode or battery optimization.",
+        body = "Last reminder check: $lastCheck. Delivery timing follows your device battery preferences.",
         tone = if (hasNotificationPermission) BadgeTone.POSITIVE else BadgeTone.WARNING
       )
     }
@@ -271,20 +269,6 @@ fun NotificationsScreen(
             modifier = Modifier.fillMaxWidth()
           ) {
             Text("Open Android notification settings")
-          }
-          OutlinedButton(
-            onClick = onSendTestNotification,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-          ) {
-            Text("Send test alert")
-          }
-          OutlinedButton(
-            onClick = onRunReminderCheckNow,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-          ) {
-            Text("Check due dates now")
           }
         }
       }

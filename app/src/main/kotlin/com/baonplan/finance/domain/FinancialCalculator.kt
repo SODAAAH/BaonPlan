@@ -14,6 +14,7 @@ import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.GeneratedInstallmentSpec
 import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.LoanCostBreakdown
+import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.NextPaymentItem
 import com.baonplan.finance.domain.model.PayoffDebtCandidate
 import com.baonplan.finance.domain.model.PayoffProjectionSummary
@@ -42,6 +43,24 @@ object FinancialCalculator {
    */
   fun countsTowardTotalDebt(debt: DebtEntity): Boolean =
     debt.obligationRole.countsInTotalDebt || debt.parentDebtId == null
+
+  /**
+   * Returns only the installments belonging to [debt]'s active [DebtEntity.scheduleVersion],
+   * preventing superseded schedule versions from leaking into cash-flow or payment grouping.
+   */
+  fun effectiveInstallmentsForDebt(
+    debt: DebtEntity,
+    allInstallments: List<InstallmentEntity>
+  ): List<InstallmentEntity> {
+    val forDebt = allInstallments.filter { it.debtId == debt.id }
+    val matchingVersion = forDebt.filter { it.scheduleVersion == debt.scheduleVersion }
+    if (matchingVersion.isNotEmpty()) return matchingVersion
+    return if (debt.scheduleVersion == 1) {
+      forDebt.filter { it.scheduleVersion <= 1 }
+    } else {
+      emptyList()
+    }
+  }
 
   fun calculateTotalActiveDebt(debts: List<DebtEntity>): Long =
     MoneyFormatter.sumCentsExact(
@@ -348,10 +367,10 @@ object FinancialCalculator {
     val unconfirmedOrUnknown = mutableListOf<NextPaymentItem>()
 
     for (debt in activeDebts) {
-      val unpaidInstallments = (installmentsByDebt[debt.id] ?: emptyList())
-        .filter { it.status.isPayableInstallment }
+      val effectiveInsts = effectiveInstallmentsForDebt(debt, installments)
+      val unpaidInstallments = effectiveInsts.filter { it.status.isPayableInstallment }
 
-      if (unpaidInstallments.isNotEmpty()) {
+      if (effectiveInsts.isNotEmpty()) {
         for (inst in unpaidInstallments) {
           val remainingInstAmount = (inst.amountDueCents - inst.paidAmountCents).coerceAtLeast(0L)
           if (remainingInstAmount <= 0L) continue
@@ -378,7 +397,14 @@ object FinancialCalculator {
         }
       } else {
         // No scheduled installment rows: derive strictly from debt fields without inventing dates.
-        val amount = debt.installmentAmountCents.takeIf { it > 0L } ?: debt.remainingBalanceCents
+        val amount = if (debt.productClassification == LoanProductClassification.REVOLVING_CREDIT) {
+          debt.minimumDueCents?.takeIf { it > 0L }
+            ?: debt.amountCurrentlyDueCents?.takeIf { it > 0L }
+            ?: debt.installmentAmountCents.takeIf { it > 0L }
+            ?: debt.remainingBalanceCents
+        } else {
+          debt.installmentAmountCents.takeIf { it > 0L } ?: debt.remainingBalanceCents
+        }
         val urgency = ManilaTime.classifyUrgency(today, debt.nextDueDate, debt.dateStatus)
         val item = NextPaymentItem(
           debtId = debt.id,
@@ -534,7 +560,7 @@ object FinancialCalculator {
     var latestCompletionDate: LocalDate? = null
 
     for (debt in activeDebts) {
-      val unpaidInst = (installmentsByDebt[debt.id] ?: emptyList())
+      val unpaidInst = effectiveInstallmentsForDebt(debt, installments)
         .filter { it.status.isPayableInstallment }
 
       var debtCompletionDate: LocalDate? = null

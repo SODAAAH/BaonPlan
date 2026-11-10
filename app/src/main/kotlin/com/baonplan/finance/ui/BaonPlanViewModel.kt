@@ -10,10 +10,14 @@ import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.AppPreferencesState
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
+import com.baonplan.finance.data.local.entity.IncomeOccurrenceEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
@@ -24,10 +28,18 @@ import com.baonplan.finance.data.ocr.StagedScanInput
 import com.baonplan.finance.data.repository.BaonPlanRepository
 import com.baonplan.finance.data.repository.RetainedAttachmentSource
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.budget.BudgetOverviewSummary
+import com.baonplan.finance.domain.budget.BudgetRecurrenceEngine
+import com.baonplan.finance.domain.budget.CashFlowBudgetEngine
+import com.baonplan.finance.domain.budget.FrequencyNormalizationSummary
+import com.baonplan.finance.domain.budget.PaymentGroupingEngine
+import com.baonplan.finance.domain.budget.PaymentGroupingOverview
+import com.baonplan.finance.domain.model.BudgetCategoryKey
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ExpensePreset
+import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.model.PayoffProjectionSummary
 import com.baonplan.finance.domain.model.PaymentOverview
 import com.baonplan.finance.domain.model.PriorWeekCarryOverCandidate
@@ -46,7 +58,6 @@ import com.baonplan.finance.domain.ocr.ScannerCorrectionLearner
 import com.baonplan.finance.domain.ocr.SingleScreenshotExtraction
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
-import com.baonplan.finance.notifications.NotificationHelper
 import com.baonplan.finance.notifications.ReminderScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -157,7 +168,32 @@ data class BaonPlanUiState(
     soonestDueDebt = null
   ),
   val weeklyTrends: List<WeeklyTrendPoint> = emptyList(),
-  val priorWeekCarryOver: PriorWeekCarryOverCandidate? = null
+  val priorWeekCarryOver: PriorWeekCarryOverCandidate? = null,
+  val budgetProfile: BudgetProfileEntity = BudgetProfileEntity(),
+  val incomeSources: List<IncomeSourceEntity> = emptyList(),
+  val incomeOccurrences: List<IncomeOccurrenceEntity> = emptyList(),
+  val budgetAllocations: List<BudgetAllocationEntity> = emptyList(),
+  val selectedBudgetPeriodOffset: Int = 0,
+  val budgetOverview: BudgetOverviewSummary = CashFlowBudgetEngine.calculateOverview(
+    today = ManilaTime.today(),
+    profile = BudgetProfileEntity(),
+    sources = emptyList(),
+    occurrences = emptyList(),
+    allocations = emptyList(),
+    allowances = emptyList(),
+    expenses = emptyList(),
+    reserves = emptyList(),
+    transactions = emptyList(),
+    debts = emptyList(),
+    installments = emptyList(),
+    periodOffset = 0
+  ),
+  val frequencyNormalization: FrequencyNormalizationSummary = BudgetRecurrenceEngine.calculateFrequencyNormalization(emptyList()),
+  val paymentGrouping: PaymentGroupingOverview = PaymentGroupingEngine.buildGroupedPayments(
+    debts = emptyList(),
+    installments = emptyList(),
+    today = ManilaTime.today()
+  )
 )
 
 private data class CoreLedgerBundle(
@@ -175,6 +211,14 @@ private data class SecondaryMetaBundle(
   val prefs: AppPreferencesState
 )
 
+private data class BudgetMetaBundle(
+  val profile: BudgetProfileEntity,
+  val sources: List<IncomeSourceEntity>,
+  val occurrences: List<IncomeOccurrenceEntity>,
+  val allocations: List<BudgetAllocationEntity>,
+  val periodOffset: Int
+)
+
 class BaonPlanViewModel(
   private val repository: BaonPlanRepository
 ) : ViewModel() {
@@ -187,6 +231,8 @@ class BaonPlanViewModel(
 
   private val _scanState = MutableStateFlow(ScanDebtUiState())
   val scanState: StateFlow<ScanDebtUiState> = _scanState.asStateFlow()
+
+  private val _selectedBudgetPeriodOffset = MutableStateFlow(0)
 
   private var pendingCameraRawFile: File? = null
 
@@ -213,10 +259,21 @@ class BaonPlanViewModel(
     SecondaryMetaBundle(reserves, attachments, settings, prefs)
   }
 
+  private val budgetMetaFlow = combine(
+    repository.budgetProfileFlow,
+    repository.incomeSourcesFlow,
+    repository.incomeOccurrencesFlow,
+    repository.budgetAllocationsFlow,
+    _selectedBudgetPeriodOffset
+  ) { profile, sources, occurrences, allocations, periodOffset ->
+    BudgetMetaBundle(profile, sources, occurrences, allocations, periodOffset)
+  }
+
   val uiState: StateFlow<BaonPlanUiState> = combine(
     ledgerFlow,
-    secondaryMetaFlow
-  ) { ledger, meta ->
+    secondaryMetaFlow,
+    budgetMetaFlow
+  ) { ledger, meta, budgetMeta ->
     val reserves = meta.reserves
     val settings = meta.settings
     val prefs = meta.prefs
@@ -294,6 +351,29 @@ class BaonPlanViewModel(
       transactions = ledger.transactions,
       resolvedWeekIso = prefs.lastResolvedCarryOverWeekIso
     )
+    val budgetOverview = CashFlowBudgetEngine.calculateOverview(
+      today = today,
+      profile = budgetMeta.profile,
+      sources = budgetMeta.sources,
+      occurrences = budgetMeta.occurrences,
+      allocations = budgetMeta.allocations,
+      allowances = ledger.allowances,
+      expenses = ledger.expenses,
+      reserves = reserves,
+      transactions = ledger.transactions,
+      debts = ledger.debts,
+      installments = ledger.installments,
+      periodOffset = budgetMeta.periodOffset
+    )
+    val frequencyNormalization = BudgetRecurrenceEngine.calculateFrequencyNormalization(
+      sources = budgetMeta.sources,
+      referenceYear = today.year
+    )
+    val paymentGrouping = PaymentGroupingEngine.buildGroupedPayments(
+      debts = ledger.debts,
+      installments = ledger.installments,
+      today = today
+    )
 
     BaonPlanUiState(
       isLoading = false,
@@ -318,7 +398,15 @@ class BaonPlanViewModel(
       duesReadiness = duesReadiness,
       payoffInsights = payoffInsights,
       weeklyTrends = weeklyTrends,
-      priorWeekCarryOver = priorWeekCarryOver
+      priorWeekCarryOver = priorWeekCarryOver,
+      budgetProfile = budgetMeta.profile,
+      incomeSources = budgetMeta.sources,
+      incomeOccurrences = budgetMeta.occurrences,
+      budgetAllocations = budgetMeta.allocations,
+      selectedBudgetPeriodOffset = budgetMeta.periodOffset,
+      budgetOverview = budgetOverview,
+      frequencyNormalization = frequencyNormalization,
+      paymentGrouping = paymentGrouping
     )
   }.stateIn(
     scope = viewModelScope,
@@ -631,24 +719,125 @@ class BaonPlanViewModel(
     }
   }
 
-  fun sendTestNotification(context: Context) {
-    val shown = NotificationHelper.showNotification(
-      context = context,
-      channelId = NotificationHelper.CHANNEL_PAYMENTS,
-      notificationId = NotificationHelper.NOTIFICATION_ID_TEST,
-      title = "BaonPlan Reminder Check",
-      body = "Payment & weekly baon reminders are active on this device.",
-      highPriority = true
-    )
-    emitMessage(
-      if (shown) "Test notification sent"
-      else "Notification blocked — check Android notification permission or system settings"
-    )
+  fun selectBudgetPeriodOffset(offset: Int) {
+    _selectedBudgetPeriodOffset.value = offset
   }
 
-  fun runReminderWorkerNow(context: Context) {
-    ReminderScheduler.runImmediateCheck(context)
-    emitMessage("Scheduled immediate payment & allowance check")
+  fun stepBudgetPeriod(delta: Int) {
+    _selectedBudgetPeriodOffset.update { it + delta }
+  }
+
+  fun setupBudgetWithPrimaryIncome(
+    source: IncomeSourceEntity,
+    profile: BudgetProfileEntity,
+    markFirstOccurrenceReceivedToday: Boolean
+  ) {
+    viewModelScope.launch {
+      runCatching {
+        repository.setupBudgetWithPrimaryIncome(
+          source = source,
+          profile = profile,
+          markFirstOccurrenceReceivedToday = markFirstOccurrenceReceivedToday
+        )
+      }.onSuccess {
+        _selectedBudgetPeriodOffset.value = 0
+        emitMessage("Budget overview set up for ${source.name}")
+      }.onFailure {
+        emitMessage(it.message ?: "Could not set up budget")
+      }
+    }
+  }
+
+  fun saveBudgetProfile(profile: BudgetProfileEntity) {
+    viewModelScope.launch {
+      repository.saveBudgetProfile(profile)
+      emitMessage("Budget settings updated")
+    }
+  }
+
+  fun saveIncomeSource(
+    source: IncomeSourceEntity,
+    effectiveFromDateIso: String? = null
+  ) {
+    viewModelScope.launch {
+      runCatching {
+        repository.saveIncomeSource(source, effectiveFromDateIso)
+      }.onSuccess {
+        emitMessage("Saved income source: ${source.name}")
+      }.onFailure {
+        emitMessage(it.message ?: "Could not save income source")
+      }
+    }
+  }
+
+  fun setIncomeSourcePaused(sourceId: Long, paused: Boolean, effectiveDateIso: String) {
+    viewModelScope.launch {
+      repository.setIncomeSourcePaused(sourceId, paused, effectiveDateIso)
+      emitMessage(if (paused) "Income source paused" else "Income source resumed")
+    }
+  }
+
+  fun endIncomeSource(sourceId: Long, endDateIso: String) {
+    viewModelScope.launch {
+      repository.endIncomeSource(sourceId, endDateIso)
+      emitMessage("Income source ended cleanly (past records preserved)")
+    }
+  }
+
+  fun confirmOrUpdateIncomeOccurrence(
+    occurrenceId: Long?,
+    sourceId: Long?,
+    expectedDateIso: String,
+    expectedAmountCents: Long,
+    status: IncomeOccurrenceStatus,
+    actualAmountCents: Long,
+    actualDateIso: String?,
+    notes: String = ""
+  ) {
+    viewModelScope.launch {
+      runCatching {
+        repository.confirmOrUpdateIncomeOccurrence(
+          occurrenceId = occurrenceId,
+          sourceId = sourceId,
+          expectedDateIso = expectedDateIso,
+          expectedAmountCents = expectedAmountCents,
+          status = status,
+          actualAmountCents = actualAmountCents,
+          actualDateIso = actualDateIso,
+          notes = notes
+        )
+      }.onSuccess {
+        val msg = when (status) {
+          IncomeOccurrenceStatus.RECEIVED -> "Confirmed received ${MoneyFormatter.formatPeso(actualAmountCents)}"
+          IncomeOccurrenceStatus.PARTIALLY_RECEIVED -> "Recorded partial receipt ${MoneyFormatter.formatPeso(actualAmountCents)}"
+          IncomeOccurrenceStatus.MISSED -> "Marked occurrence as missed"
+          IncomeOccurrenceStatus.CANCELLED -> "Marked occurrence as cancelled"
+          IncomeOccurrenceStatus.EXPECTED -> "Reset to expected"
+        }
+        emitMessage(msg)
+      }.onFailure {
+        emitMessage(it.message ?: "Could not update allowance status")
+      }
+    }
+  }
+
+  fun upsertBudgetAllocation(categoryKey: BudgetCategoryKey, amountCents: Long, enabled: Boolean) {
+    viewModelScope.launch {
+      runCatching {
+        repository.upsertBudgetAllocation(categoryKey, amountCents, enabled)
+      }.onSuccess {
+        emitMessage("${categoryKey.label} allocation saved")
+      }.onFailure {
+        emitMessage(it.message ?: "Could not save category allocation")
+      }
+    }
+  }
+
+  fun deleteBudgetAllocation(categoryKey: BudgetCategoryKey) {
+    viewModelScope.launch {
+      repository.deleteBudgetAllocation(categoryKey)
+      emitMessage("Removed ${categoryKey.label} allocation")
+    }
   }
 
   fun exportBackupJson(context: Context, uri: Uri) {

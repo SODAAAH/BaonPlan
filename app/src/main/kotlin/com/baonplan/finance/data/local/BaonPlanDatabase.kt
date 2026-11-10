@@ -8,18 +8,26 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.baonplan.finance.data.local.dao.AllowanceRecordDao
+import com.baonplan.finance.data.local.dao.BudgetAllocationDao
+import com.baonplan.finance.data.local.dao.BudgetProfileDao
 import com.baonplan.finance.data.local.dao.DebtAttachmentDao
 import com.baonplan.finance.data.local.dao.DebtDao
 import com.baonplan.finance.data.local.dao.DebtReserveDao
 import com.baonplan.finance.data.local.dao.ExpenseDao
+import com.baonplan.finance.data.local.dao.IncomeOccurrenceDao
+import com.baonplan.finance.data.local.dao.IncomeSourceDao
 import com.baonplan.finance.data.local.dao.InstallmentDao
 import com.baonplan.finance.data.local.dao.TransactionDao
 import com.baonplan.finance.data.local.dao.UserSettingsDao
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
+import com.baonplan.finance.data.local.entity.IncomeOccurrenceEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
@@ -33,9 +41,13 @@ import com.baonplan.finance.data.local.entity.UserSettingsEntity
     ExpenseEntity::class,
     DebtReserveEntity::class,
     UserSettingsEntity::class,
-    DebtAttachmentEntity::class
+    DebtAttachmentEntity::class,
+    BudgetProfileEntity::class,
+    IncomeSourceEntity::class,
+    IncomeOccurrenceEntity::class,
+    BudgetAllocationEntity::class
   ],
-  version = 4,
+  version = 5,
   exportSchema = true
 )
 @TypeConverters(RoomConverters::class)
@@ -48,6 +60,10 @@ abstract class BaonPlanDatabase : RoomDatabase() {
   abstract fun debtReserveDao(): DebtReserveDao
   abstract fun userSettingsDao(): UserSettingsDao
   abstract fun debtAttachmentDao(): DebtAttachmentDao
+  abstract fun budgetProfileDao(): BudgetProfileDao
+  abstract fun incomeSourceDao(): IncomeSourceDao
+  abstract fun incomeOccurrenceDao(): IncomeOccurrenceDao
+  abstract fun budgetAllocationDao(): BudgetAllocationDao
 
   companion object {
     const val DATABASE_NAME = "baonplan.db"
@@ -115,6 +131,40 @@ abstract class BaonPlanDatabase : RoomDatabase() {
       }
     }
 
+    val MIGRATION_4_5 = object : Migration(4, 5) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `allowance_records` ADD COLUMN `incomeOccurrenceId` INTEGER")
+
+        db.execSQL(
+          "CREATE TABLE IF NOT EXISTS `budget_profiles` (`id` INTEGER NOT NULL, `isConfigured` INTEGER NOT NULL, `periodStyle` TEXT NOT NULL, `customPeriodDays` INTEGER, `weeklyCycleMode` TEXT NOT NULL, `monthlyCycleMode` TEXT NOT NULL, `rolloverEnabled` INTEGER NOT NULL, `reserveAheadEnabled` INTEGER NOT NULL, `includeExpectedIncomeInProjection` INTEGER NOT NULL, `includeOverdueInBudget` INTEGER NOT NULL, `debtDeductionMode` TEXT NOT NULL, `primarySourceId` INTEGER, `updatedAtEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+        )
+
+        db.execSQL(
+          "CREATE TABLE IF NOT EXISTS `income_sources` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `frequency` TEXT NOT NULL, `expectedAmountCents` INTEGER NOT NULL, `isVariableAmount` INTEGER NOT NULL, `startDateIso` TEXT NOT NULL, `endDateIso` TEXT, `customIntervalDays` INTEGER, `customIntervalMonths` INTEGER, `twiceMonthlyPattern` TEXT NOT NULL, `twiceMonthlyDay1` INTEGER, `twiceMonthlyDay2` INTEGER, `customDatesCsv` TEXT NOT NULL, `anchorDayOfMonth` INTEGER, `isActive` INTEGER NOT NULL, `isPaused` INTEGER NOT NULL, `pausedFromDateIso` TEXT, `effectiveFromDateIso` TEXT, `isPrimary` INTEGER NOT NULL, `notes` TEXT NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL)"
+        )
+
+        db.execSQL(
+          "CREATE TABLE IF NOT EXISTS `income_occurrences` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sourceId` INTEGER, `sourceNameSnapshot` TEXT NOT NULL, `expectedDateIso` TEXT NOT NULL, `expectedAmountCents` INTEGER NOT NULL, `actualReceivedAmountCents` INTEGER NOT NULL, `actualReceivedDateIso` TEXT, `status` TEXT NOT NULL, `linkedAllowanceRecordId` INTEGER, `isFrozenScheduleHistory` INTEGER NOT NULL, `notes` TEXT NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL, FOREIGN KEY(`sourceId`) REFERENCES `income_sources`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL )"
+        )
+        db.execSQL(
+          "CREATE INDEX IF NOT EXISTS `index_income_occurrences_sourceId` ON `income_occurrences` (`sourceId`)"
+        )
+        db.execSQL(
+          "CREATE INDEX IF NOT EXISTS `index_income_occurrences_expectedDateIso` ON `income_occurrences` (`expectedDateIso`)"
+        )
+        db.execSQL(
+          "CREATE INDEX IF NOT EXISTS `index_income_occurrences_actualReceivedDateIso` ON `income_occurrences` (`actualReceivedDateIso`)"
+        )
+
+        db.execSQL(
+          "CREATE TABLE IF NOT EXISTS `budget_allocations` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `categoryKey` TEXT NOT NULL, `allocatedAmountCents` INTEGER NOT NULL, `isEnabled` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL)"
+        )
+        db.execSQL(
+          "CREATE UNIQUE INDEX IF NOT EXISTS `index_budget_allocations_categoryKey` ON `budget_allocations` (`categoryKey`)"
+        )
+      }
+    }
+
     @Volatile
     private var INSTANCE: BaonPlanDatabase? = null
 
@@ -125,7 +175,7 @@ abstract class BaonPlanDatabase : RoomDatabase() {
           BaonPlanDatabase::class.java,
           DATABASE_NAME
         )
-          .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+          .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
           .build()
           .also { INSTANCE = it }
       }

@@ -23,7 +23,6 @@ object NotificationHelper {
   const val NOTIFICATION_ID_DUE_TOMORROW = 1003
   const val NOTIFICATION_ID_UPCOMING = 1004
   const val NOTIFICATION_ID_ALLOWANCE = 1005
-  const val NOTIFICATION_ID_TEST = 1099
 
   fun createChannels(context: Context) {
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

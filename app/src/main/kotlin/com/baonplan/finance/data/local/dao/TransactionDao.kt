@@ -22,6 +22,9 @@ interface TransactionDao {
   @Query("SELECT * FROM transactions WHERE id = :id")
   suspend fun getById(id: Long): TransactionEntity?
 
+  @Query("SELECT * FROM transactions WHERE allowanceId = :allowanceId AND isVoided = 0 ORDER BY id DESC LIMIT 1")
+  suspend fun findActiveByAllowanceId(allowanceId: Long): TransactionEntity?
+
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insert(transaction: TransactionEntity): Long
 

@@ -19,5 +19,6 @@ data class AllowanceRecordEntity(
   val sourceLabel: String = "Weekly Allowance",
   val notes: String = "",
   val isManuallyEntered: Boolean = true,
+  val incomeOccurrenceId: Long? = null,
   val createdAtEpochMillis: Long = System.currentTimeMillis()
 )

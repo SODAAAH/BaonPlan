@@ -3,15 +3,24 @@ package com.baonplan.finance.data
 import com.baonplan.finance.data.backup.BackupSerializer
 import com.baonplan.finance.data.backup.BaonPlanBackupPayload
 import com.baonplan.finance.data.local.DefaultSettingsProvider
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.IncomeOccurrenceEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
+import com.baonplan.finance.domain.model.BudgetCategoryKey
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.IncomeFrequency
+import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.MonthlyCycleMode
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.TransactionType
+import com.baonplan.finance.domain.model.WeeklyCycleMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -195,12 +204,85 @@ class BackupSerializerTest {
       debtReserves = emptyList()
     )
     val decodedV3 = BackupSerializer.decodeBackupJson(BackupSerializer.encodeBackupJson(payloadV3)).getOrThrow()
-    assertEquals(4, decodedV3.schemaVersion)
+    assertEquals(5, decodedV3.schemaVersion)
     assertEquals(
       com.baonplan.finance.domain.model.LoanProductClassification.REVOLVING_CREDIT,
       decodedV3.debts.single().productClassification
     )
     assertEquals(2_000_000L, decodedV3.debts.single().creditLimitCents)
     assertEquals(500_000L, decodedV3.debts.single().statementBalanceCents)
+  }
+
+  @Test
+  fun schemaVersion5_budgetProfileIncomeAndAllocationsRoundTripCleanly() {
+    val payload = BaonPlanBackupPayload(
+      schemaVersion = 5,
+      settings = DefaultSettingsProvider.defaultSettings(),
+      debts = emptyList(),
+      installments = emptyList(),
+      transactions = emptyList(),
+      allowanceRecords = emptyList(),
+      expenses = emptyList(),
+      debtReserves = emptyList(),
+      budgetProfile = BudgetProfileEntity(
+        id = 1,
+        isConfigured = true,
+        weeklyCycleMode = WeeklyCycleMode.MONDAY_TO_SUNDAY,
+        monthlyCycleMode = MonthlyCycleMode.PAYDAY_CYCLE,
+        rolloverEnabled = true,
+        reserveAheadEnabled = true,
+        primarySourceId = 7L
+      ),
+      incomeSources = listOf(
+        IncomeSourceEntity(
+          id = 7L,
+          name = "Scholarship & Baon",
+          frequency = IncomeFrequency.TWICE_MONTHLY,
+          expectedAmountCents = 400_000L,
+          startDateIso = "2026-11-01",
+          isPrimary = true
+        )
+      ),
+      incomeOccurrences = listOf(
+        IncomeOccurrenceEntity(
+          id = 11L,
+          sourceId = 7L,
+          sourceNameSnapshot = "Scholarship & Baon",
+          expectedDateIso = "2026-11-15",
+          expectedAmountCents = 400_000L,
+          actualReceivedAmountCents = 350_000L,
+          actualReceivedDateIso = "2026-11-15",
+          status = IncomeOccurrenceStatus.PARTIALLY_RECEIVED
+        )
+      ),
+      budgetAllocations = listOf(
+        BudgetAllocationEntity(
+          id = 1L,
+          categoryKey = BudgetCategoryKey.FOOD,
+          allocatedAmountCents = 150_000L,
+          isEnabled = true
+        ),
+        BudgetAllocationEntity(
+          id = 2L,
+          categoryKey = BudgetCategoryKey.SAVINGS,
+          allocatedAmountCents = 50_000L,
+          isEnabled = true
+        )
+      )
+    )
+
+    val json = BackupSerializer.encodeBackupJson(payload)
+    val decoded = BackupSerializer.decodeBackupJson(json).getOrThrow()
+
+    assertEquals(5, decoded.schemaVersion)
+    val profile = decoded.budgetProfile!!
+    assertTrue(profile.isConfigured)
+    assertTrue(profile.reserveAheadEnabled)
+    assertEquals(1, decoded.incomeSources.size)
+    assertEquals(IncomeFrequency.TWICE_MONTHLY, decoded.incomeSources.single().frequency)
+    assertEquals(1, decoded.incomeOccurrences.size)
+    assertEquals(350_000L, decoded.incomeOccurrences.single().actualReceivedAmountCents)
+    assertEquals(2, decoded.budgetAllocations.size)
+    assertEquals(BudgetCategoryKey.SAVINGS, decoded.budgetAllocations[1].categoryKey)
   }
 }

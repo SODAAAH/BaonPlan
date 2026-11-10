@@ -7,21 +7,34 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.baonplan.finance.data.backup.BackupSerializer
 import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.SettingsPreferencesDataStore
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.repository.BaonPlanRepository
 import com.baonplan.finance.data.repository.RetainedAttachmentSource
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.budget.BudgetRecurrenceEngine
+import com.baonplan.finance.domain.budget.CashFlowBudgetEngine
+import com.baonplan.finance.domain.budget.PaymentGroupingEngine
+import com.baonplan.finance.domain.model.BudgetCategoryKey
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
+import com.baonplan.finance.domain.model.IncomeFrequency
+import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.MonthlyCycleMode
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
+import com.baonplan.finance.domain.model.TransactionType
 import java.time.LocalDate
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -549,7 +562,8 @@ class BaonPlanRepositoryPersistenceTest {
         .addMigrations(
           BaonPlanDatabase.MIGRATION_1_2,
           BaonPlanDatabase.MIGRATION_2_3,
-          BaonPlanDatabase.MIGRATION_3_4
+          BaonPlanDatabase.MIGRATION_3_4,
+          BaonPlanDatabase.MIGRATION_4_5
         )
         .allowMainThreadQueries()
         .build()
@@ -639,7 +653,8 @@ class BaonPlanRepositoryPersistenceTest {
         .addMigrations(
           BaonPlanDatabase.MIGRATION_1_2,
           BaonPlanDatabase.MIGRATION_2_3,
-          BaonPlanDatabase.MIGRATION_3_4
+          BaonPlanDatabase.MIGRATION_3_4,
+          BaonPlanDatabase.MIGRATION_4_5
         )
         .setJournalMode(androidx.room.RoomDatabase.JournalMode.TRUNCATE)
         .allowMainThreadQueries()
@@ -729,7 +744,8 @@ class BaonPlanRepositoryPersistenceTest {
         .addMigrations(
           BaonPlanDatabase.MIGRATION_1_2,
           BaonPlanDatabase.MIGRATION_2_3,
-          BaonPlanDatabase.MIGRATION_3_4
+          BaonPlanDatabase.MIGRATION_3_4,
+          BaonPlanDatabase.MIGRATION_4_5
         )
         .setJournalMode(androidx.room.RoomDatabase.JournalMode.TRUNCATE)
         .allowMainThreadQueries()
@@ -794,5 +810,345 @@ class BaonPlanRepositoryPersistenceTest {
     } finally {
       v3DbFile.delete()
     }
+  }
+
+  @Test
+  fun migration4To5_preservesV4RecordsAndEnablesBudgetTablesAndLegacyCompatibility() = runTest {
+    val v4DbFile = File(context.cacheDir, "migration_v4_${System.nanoTime()}.db")
+    try {
+      val openHelper = FrameworkSQLiteOpenHelperFactory().create(
+        SupportSQLiteOpenHelper.Configuration.builder(context)
+          .name(v4DbFile.absolutePath)
+          .callback(object : SupportSQLiteOpenHelper.Callback(4) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debts` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `lender` TEXT NOT NULL, `category` TEXT NOT NULL, `originalPrincipalCents` INTEGER, `amountReceivedCents` INTEGER, `interestCents` INTEGER, `serviceFeeCents` INTEGER, `processingFeeCents` INTEGER, `totalScheduledRepaymentCents` INTEGER, `priorPaidCents` INTEGER NOT NULL, `isPriorPaidKnown` INTEGER NOT NULL, `trackedPaidCents` INTEGER NOT NULL, `remainingBalanceCents` INTEGER NOT NULL, `installmentAmountCents` INTEGER NOT NULL, `remainingInstallmentsCount` INTEGER NOT NULL, `frequency` TEXT NOT NULL, `customIntervalDays` INTEGER, `lastKnownPaidDate` TEXT, `nextDueDate` TEXT, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL, `productClassification` TEXT NOT NULL DEFAULT 'UNKNOWN', `applicationProvider` TEXT, `actualCreditor` TEXT, `productName` TEXT, `loanReferenceId` TEXT, `loanBookingDateIso` TEXT, `disbursedAmountCents` INTEGER, `otherChargesCents` INTEGER, `outstandingPrincipalCents` INTEGER, `remainingInstallmentTotalCents` INTEGER, `amountCurrentlyDueCents` INTEGER, `pastDueAmountCents` INTEGER, `unpaidChargesCents` INTEGER, `creditLimitCents` INTEGER, `availableCreditCents` INTEGER, `usedCreditCents` INTEGER, `statementBalanceCents` INTEGER, `minimumDueCents` INTEGER, `statementDateIso` TEXT, `statementPeriod` TEXT, `originalInstallmentsCount` INTEGER, `paidInstallmentsCount` INTEGER, `parentDebtId` INTEGER, `obligationRole` TEXT NOT NULL DEFAULT 'STANDALONE', `scheduleVersion` INTEGER NOT NULL DEFAULT 1, `scheduleEffectiveDateIso` TEXT, `lendingCompany` TEXT, `contractualMaturityDateIso` TEXT, `projectedPayoffDateIso` TEXT, `actualFullyPaidDateIso` TEXT, `scheduleCompletenessStatus` TEXT NOT NULL DEFAULT 'NEEDS_USER_REVIEW', `projectionReliability` TEXT NOT NULL DEFAULT 'INSUFFICIENT_DATA', `loanAnalysisJson` TEXT)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `installments` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `installmentNumber` INTEGER NOT NULL, `dueDate` TEXT, `amountDueCents` INTEGER NOT NULL, `paidAmountCents` INTEGER NOT NULL, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `paidDate` TEXT, `linkedTransactionId` INTEGER, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, `scheduleVersion` INTEGER NOT NULL DEFAULT 1, `rawStatusLabel` TEXT, `principalComponentCents` INTEGER, `interestComponentCents` INTEGER, `serviceFeeComponentCents` INTEGER, `remainingPrincipalAfterCents` INTEGER, `evidenceSourceLabel` TEXT, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_installments_debtId` ON `installments` (`debtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debt_attachments` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `fileName` TEXT NOT NULL, `displayLabel` TEXT NOT NULL, `screenshotIndex` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_attachments_debtId` ON `debt_attachments` (`debtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `transactions` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `type` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `date` TEXT NOT NULL, `debtId` INTEGER, `installmentId` INTEGER, `reserveId` INTEGER, `expenseId` INTEGER, `allowanceId` INTEGER, `fundedFromReserveCents` INTEGER NOT NULL, `category` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `isCorrected` INTEGER NOT NULL, `isVoided` INTEGER NOT NULL, `correctionReason` TEXT, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `transactions` (`date`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_debtId` ON `transactions` (`debtId`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_installmentId` ON `transactions` (`installmentId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `allowance_records` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `receivedDate` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `sourceLabel` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_allowance_records_weekStartDate` ON `allowance_records` (`weekStartDate`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `expenses` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `date` TEXT NOT NULL, `category` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `isSchoolDay` INTEGER NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_expenses_date` ON `expenses` (`date`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debt_reserves` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `targetDebtId` INTEGER, `reserveType` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `appliedAmountCents` INTEGER NOT NULL, `status` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_weekStartDate` ON `debt_reserves` (`weekStartDate`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_targetDebtId` ON `debt_reserves` (`targetDebtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `user_settings` (`id` INTEGER NOT NULL, `minWeeklyAllowanceCents` INTEGER NOT NULL, `maxWeeklyAllowanceCents` INTEGER NOT NULL, `conservativeAllowanceCents` INTEGER NOT NULL, `schoolDaysPerWeek` INTEGER NOT NULL, `foodPerSchoolDayCents` INTEGER NOT NULL, `weeklyFoodBudgetCents` INTEGER NOT NULL, `weeklyOtherExpensesBudgetCents` INTEGER NOT NULL, `weeklyEmergencySavingsTargetCents` INTEGER NOT NULL, `weeklyDebtReserveTargetCents` INTEGER NOT NULL, `remindersEnabled` INTEGER NOT NULL, `allowanceReminderDayOfWeek` INTEGER NOT NULL, `reminderHour` INTEGER NOT NULL, `reminderMinute` INTEGER NOT NULL, `isManuallyEntered` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            }
+
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+          })
+          .build()
+      )
+      openHelper.setWriteAheadLoggingEnabled(false)
+
+      openHelper.writableDatabase.use { raw ->
+        raw.execSQL(
+          "INSERT INTO `debts` (`id`, `name`, `lender`, `category`, `priorPaidCents`, `isPriorPaidKnown`, `trackedPaidCents`, `remainingBalanceCents`, `installmentAmountCents`, `remainingInstallmentsCount`, `frequency`, `nextDueDate`, `dateStatus`, `status`, `isManuallyEntered`, `notes`, `createdAtEpochMillis`, `updatedAtEpochMillis`) " +
+            "VALUES (31, 'Legacy v4 Loan', 'BillEase', 'Cash Loan', 0, 0, 0, 100000, 50000, 2, 'MONTHLY', '2026-11-16', 'CONFIRMED', 'ACTIVE', 1, '', 1000, 1000)"
+        )
+        raw.execSQL(
+          "INSERT INTO `allowance_records` (`id`, `weekStartDate`, `receivedDate`, `amountCents`, `sourceLabel`, `notes`, `isManuallyEntered`, `createdAtEpochMillis`) " +
+            "VALUES (41, '2026-11-09', '2026-11-10', 200000, 'Weekly Baon', 'v4 cash', 1, 1000)"
+        )
+        raw.execSQL(
+          "INSERT INTO `expenses` (`id`, `date`, `category`, `title`, `amountCents`, `isSchoolDay`, `notes`, `isManuallyEntered`, `createdAtEpochMillis`) " +
+            "VALUES (51, '2026-11-11', 'FOOD', 'Lunch', 15000, 1, '', 1, 1000)"
+        )
+      }
+      openHelper.close()
+
+      val migratedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, v4DbFile.absolutePath)
+        .addMigrations(
+          BaonPlanDatabase.MIGRATION_1_2,
+          BaonPlanDatabase.MIGRATION_2_3,
+          BaonPlanDatabase.MIGRATION_3_4,
+          BaonPlanDatabase.MIGRATION_4_5
+        )
+        .setJournalMode(androidx.room.RoomDatabase.JournalMode.TRUNCATE)
+        .allowMainThreadQueries()
+        .build()
+      try {
+        val allowances = migratedDb.allowanceRecordDao().getAll()
+        assertEquals(1, allowances.size)
+        assertEquals(200_000L, allowances.single().amountCents)
+        assertNull(allowances.single().incomeOccurrenceId)
+        assertEquals(1, migratedDb.debtDao().getAll().size)
+        assertEquals(1, migratedDb.expenseDao().getAll().size)
+
+        val migratedRepo = BaonPlanRepository(migratedDb, prefs)
+        val sourceId = migratedRepo.saveIncomeSource(
+          IncomeSourceEntity(
+            name = "Weekly Baon",
+            frequency = IncomeFrequency.WEEKLY,
+            expectedAmountCents = 200_000L,
+            startDateIso = "2026-11-16",
+            isPrimary = true
+          )
+        )
+        assertTrue(sourceId > 0L)
+        migratedRepo.upsertBudgetAllocation(BudgetCategoryKey.FOOD, 150_000L, enabled = true)
+
+        val profile = migratedDb.budgetProfileDao().getProfile()
+        assertNotNull(profile)
+        assertTrue(profile!!.isConfigured)
+        assertEquals(1, migratedDb.budgetAllocationDao().getAll().size)
+      } finally {
+        migratedDb.close()
+      }
+    } finally {
+      v4DbFile.delete()
+    }
+  }
+
+  @Test
+  fun setupBudgetAndOccurrenceLifecycle_maintainsOneToOneLedgerSyncAndAllowsEditOrMissed() = runTest {
+    repo.ensureInitialized()
+
+    val sourceId = repo.setupBudgetWithPrimaryIncome(
+      source = IncomeSourceEntity(
+        name = "Main Allowance",
+        frequency = IncomeFrequency.WEEKLY,
+        expectedAmountCents = 200_000L,
+        startDateIso = "2026-11-10",
+        isPrimary = true
+      ),
+      profile = BudgetProfileEntity(
+        isConfigured = true,
+        rolloverEnabled = true
+      ),
+      markFirstOccurrenceReceivedToday = true
+    )
+
+    val occAfterSetup = repo.dbOccurrencesSnapshot()
+    assertEquals(1, occAfterSetup.size)
+    val occId = occAfterSetup.single().id
+    assertEquals(IncomeOccurrenceStatus.RECEIVED, occAfterSetup.single().status)
+    assertEquals(200_000L, occAfterSetup.single().actualReceivedAmountCents)
+    assertEquals(1, db.allowanceRecordDao().getAll().size)
+    assertEquals(1, db.transactionDao().getAll().count { !it.isVoided && it.type == TransactionType.ALLOWANCE })
+
+    // Partial update: must update the SAME occurrence, AllowanceRecord, and Transaction (zero duplicates!)
+    repo.confirmOrUpdateIncomeOccurrence(
+      occurrenceId = occId,
+      sourceId = sourceId,
+      expectedDateIso = "2026-11-10",
+      expectedAmountCents = 200_000L,
+      status = IncomeOccurrenceStatus.PARTIALLY_RECEIVED,
+      actualAmountCents = 120_000L,
+      actualDateIso = "2026-11-10",
+      notes = "Received partial"
+    )
+    val occAfterPartial = db.incomeOccurrenceDao().getById(occId)!!
+    assertEquals(IncomeOccurrenceStatus.PARTIALLY_RECEIVED, occAfterPartial.status)
+    assertEquals(120_000L, occAfterPartial.actualReceivedAmountCents)
+    assertEquals(1, db.allowanceRecordDao().getAll().size)
+    assertEquals(120_000L, db.allowanceRecordDao().getAll().single().amountCents)
+    val activeAllowanceTxs = db.transactionDao().getAll().filter { !it.isVoided && it.type == TransactionType.ALLOWANCE }
+    assertEquals(1, activeAllowanceTxs.size)
+    assertEquals(120_000L, activeAllowanceTxs.single().amountCents)
+
+    // Marking missed removes AllowanceRecord and voids linked Transaction cleanly
+    repo.confirmOrUpdateIncomeOccurrence(
+      occurrenceId = occId,
+      sourceId = sourceId,
+      expectedDateIso = "2026-11-10",
+      expectedAmountCents = 200_000L,
+      status = IncomeOccurrenceStatus.MISSED,
+      actualAmountCents = 0L,
+      actualDateIso = null,
+      notes = "Delayed"
+    )
+    assertEquals(IncomeOccurrenceStatus.MISSED, db.incomeOccurrenceDao().getById(occId)!!.status)
+    assertTrue(db.allowanceRecordDao().getAll().isEmpty())
+    assertTrue(db.transactionDao().getAll().none { !it.isVoided && it.type == TransactionType.ALLOWANCE })
+
+    // Re-confirm receipt then delete via deleteAllowance -> occurrence resets cleanly to EXPECTED
+    repo.confirmOrUpdateIncomeOccurrence(
+      occurrenceId = occId,
+      sourceId = sourceId,
+      expectedDateIso = "2026-11-10",
+      expectedAmountCents = 200_000L,
+      status = IncomeOccurrenceStatus.RECEIVED,
+      actualAmountCents = 200_000L,
+      actualDateIso = "2026-11-10"
+    )
+    val linkedAllowanceId = db.allowanceRecordDao().getAll().single().id
+    repo.deleteAllowance(linkedAllowanceId)
+    val resetOcc = db.incomeOccurrenceDao().getById(occId)!!
+    assertEquals(IncomeOccurrenceStatus.EXPECTED, resetOcc.status)
+    assertNull(resetOcc.linkedAllowanceRecordId)
+    assertEquals(0L, resetOcc.actualReceivedAmountCents)
+  }
+
+  private suspend fun BaonPlanRepository.dbOccurrencesSnapshot() = db.incomeOccurrenceDao().getAll()
+
+  @Test
+  fun editIncomeSourceWithEffectiveDate_freezesPriorHistoryAndRecomputesFutureOnly() = runTest {
+    repo.ensureInitialized()
+
+    val sourceId = repo.saveIncomeSource(
+      IncomeSourceEntity(
+        name = "Weekly Baon",
+        frequency = IncomeFrequency.WEEKLY,
+        expectedAmountCents = 200_000L,
+        startDateIso = "2026-11-02",
+        isPrimary = true
+      )
+    )
+    val initialSource = db.incomeSourceDao().getById(sourceId)!!
+
+    repo.saveIncomeSource(
+      source = initialSource.copy(expectedAmountCents = 250_000L),
+      effectiveFromDateIso = "2026-11-16"
+    )
+
+    val sources = db.incomeSourceDao().getAll()
+    val occurrences = db.incomeOccurrenceDao().getAll()
+    val period1Window = BudgetRecurrenceEngine.resolvePeriodWindow(
+      today = LocalDate.of(2026, 11, 2),
+      profile = db.budgetProfileDao().getProfile(),
+      sources = sources,
+      periodOffset = 0
+    )
+    val period1Resolved = BudgetRecurrenceEngine.resolveOccurrencesForWindow(sources, occurrences, period1Window, sourceId)
+    assertEquals(1, period1Resolved.size)
+    assertEquals(200_000L, period1Resolved.single().expectedAmountCents)
+
+    val period3Window = BudgetRecurrenceEngine.resolvePeriodWindow(
+      today = LocalDate.of(2026, 11, 16),
+      profile = db.budgetProfileDao().getProfile(),
+      sources = sources,
+      periodOffset = 0
+    )
+    val period3Resolved = BudgetRecurrenceEngine.resolveOccurrencesForWindow(sources, occurrences, period3Window, sourceId)
+    assertEquals(1, period3Resolved.size)
+    assertEquals(250_000L, period3Resolved.single().expectedAmountCents)
+  }
+
+  @Test
+  fun scheduleVersionIsolationAndBackupV5RoundTrip_preservesRestructuredScheduleAndBudget() = runTest {
+    repo.ensureInitialized()
+
+    val sourceId = repo.saveIncomeSource(
+      IncomeSourceEntity(
+        name = "Monthly Scholarship",
+        frequency = IncomeFrequency.MONTHLY,
+        expectedAmountCents = 800_000L,
+        startDateIso = "2026-11-01",
+        isPrimary = true
+      )
+    )
+    repo.saveBudgetProfile(
+      BudgetProfileEntity(
+        isConfigured = true,
+        monthlyCycleMode = MonthlyCycleMode.CALENDAR_MONTH,
+        rolloverEnabled = true,
+        reserveAheadEnabled = true,
+        primarySourceId = sourceId
+      )
+    )
+    repo.upsertBudgetAllocation(BudgetCategoryKey.FOOD, 200_000L, enabled = true)
+
+    val debtId = repo.saveImportedDebtWithSchedule(
+      debt = DebtEntity(
+        name = "GLoan Original",
+        lender = "GCash",
+        category = "Cash Loan",
+        productClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+        remainingBalanceCents = 99_900L,
+        installmentAmountCents = 99_900L,
+        remainingInstallmentsCount = 1,
+        frequency = RepaymentFrequency.MONTHLY,
+        nextDueDate = "2026-11-12",
+        scheduleVersion = 1
+      ),
+      scheduleRows = listOf(
+        InstallmentEntity(
+          debtId = 0L,
+          installmentNumber = 1,
+          dueDate = "2026-11-12",
+          amountDueCents = 99_900L,
+          dateStatus = DueDateStatus.CONFIRMED,
+          status = InstallmentStatus.UPCOMING,
+          scheduleVersion = 1
+        )
+      )
+    )
+    val savedV1 = db.debtDao().getById(debtId)!!
+    repo.updateExistingDebtWithImportedSchedule(
+      existingDebtId = debtId,
+      updatedDebt = savedV1.copy(
+        name = "GLoan Restructured",
+        remainingBalanceCents = 90_000L,
+        installmentAmountCents = 45_000L,
+        remainingInstallmentsCount = 2,
+        nextDueDate = "2026-11-16",
+        scheduleVersion = 2
+      ),
+      newScheduleRows = listOf(
+        InstallmentEntity(
+          debtId = debtId,
+          installmentNumber = 1,
+          dueDate = "2026-11-16",
+          amountDueCents = 45_000L,
+          dateStatus = DueDateStatus.CONFIRMED,
+          status = InstallmentStatus.UPCOMING,
+          scheduleVersion = 2
+        ),
+        InstallmentEntity(
+          debtId = debtId,
+          installmentNumber = 2,
+          dueDate = "2026-12-16",
+          amountDueCents = 45_000L,
+          dateStatus = DueDateStatus.CONFIRMED,
+          status = InstallmentStatus.UPCOMING,
+          scheduleVersion = 2
+        )
+      )
+    )
+
+    val debts = db.debtDao().getAll()
+    val installments = db.installmentDao().getAll()
+    val overview = CashFlowBudgetEngine.calculateOverview(
+      today = LocalDate.of(2026, 11, 10),
+      profile = db.budgetProfileDao().getProfile(),
+      sources = db.incomeSourceDao().getAll(),
+      occurrences = db.incomeOccurrenceDao().getAll(),
+      allocations = db.budgetAllocationDao().getAll(),
+      allowances = db.allowanceRecordDao().getAll(),
+      expenses = db.expenseDao().getAll(),
+      reserves = db.debtReserveDao().getAll(),
+      transactions = db.transactionDao().getAll(),
+      debts = debts,
+      installments = installments
+    )
+    assertEquals(45_000L, overview.periodDebtTotalCents)
+    assertEquals(1, overview.periodDebtItems.size)
+
+    val grouping = PaymentGroupingEngine.buildGroupedPayments(
+      debts = debts,
+      installments = installments,
+      today = LocalDate.of(2026, 11, 10)
+    )
+    assertEquals(45_000L, grouping.nextGroup!!.knownTotalCents)
+    assertNull(grouping.overdueGroup)
+
+    // Full v5 backup export -> wipe -> restore round trip
+    val json = BackupSerializer.encodeBackupJson(repo.createBackupPayload())
+    repo.clearAllData()
+    assertTrue(db.incomeSourceDao().getAll().isEmpty())
+
+    repo.restoreFromBackup(BackupSerializer.decodeBackupJson(json).getOrThrow())
+    assertEquals(1, db.incomeSourceDao().getAll().size)
+    assertEquals("Monthly Scholarship", db.incomeSourceDao().getAll().single().name)
+    assertTrue(db.budgetProfileDao().getProfile()!!.isConfigured)
+    assertTrue(db.budgetProfileDao().getProfile()!!.reserveAheadEnabled)
+    assertEquals(1, db.budgetAllocationDao().getAll().size)
+    assertEquals(200_000L, db.budgetAllocationDao().getAll().single().allocatedAmountCents)
   }
 }

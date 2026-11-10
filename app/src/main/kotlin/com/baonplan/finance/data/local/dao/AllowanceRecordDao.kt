@@ -19,6 +19,9 @@ interface AllowanceRecordDao {
   @Query("SELECT * FROM allowance_records WHERE id = :id")
   suspend fun getById(id: Long): AllowanceRecordEntity?
 
+  @Query("SELECT * FROM allowance_records WHERE incomeOccurrenceId = :occurrenceId LIMIT 1")
+  suspend fun findByIncomeOccurrenceId(occurrenceId: Long): AllowanceRecordEntity?
+
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insert(record: AllowanceRecordEntity): Long
 

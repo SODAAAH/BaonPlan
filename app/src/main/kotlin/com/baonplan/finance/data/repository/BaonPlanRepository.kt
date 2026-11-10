@@ -8,18 +8,26 @@ import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.data.local.SettingsPreferencesDataStore
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
+import com.baonplan.finance.data.local.entity.IncomeOccurrenceEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.FinancialCalculator
+import com.baonplan.finance.domain.budget.BudgetRecurrenceEngine
+import com.baonplan.finance.domain.model.BudgetCategoryKey
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ExpensePreset
+import com.baonplan.finance.domain.model.IncomeFrequency
+import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
@@ -57,6 +65,10 @@ class BaonPlanRepository(
   private val reserveDao = db.debtReserveDao()
   private val settingsDao = db.userSettingsDao()
   private val attachmentDao = db.debtAttachmentDao()
+  private val budgetProfileDao = db.budgetProfileDao()
+  private val incomeSourceDao = db.incomeSourceDao()
+  private val incomeOccurrenceDao = db.incomeOccurrenceDao()
+  private val budgetAllocationDao = db.budgetAllocationDao()
 
   val debtsFlow: Flow<List<DebtEntity>> = debtDao.observeAll()
   val installmentsFlow: Flow<List<InstallmentEntity>> = installmentDao.observeAll()
@@ -68,6 +80,12 @@ class BaonPlanRepository(
   val settingsFlow: Flow<UserSettingsEntity> = settingsDao.observeSettings().map {
     it ?: DefaultSettingsProvider.defaultSettings()
   }
+  val budgetProfileFlow: Flow<BudgetProfileEntity> = budgetProfileDao.observeProfile().map {
+    it ?: BudgetProfileEntity()
+  }
+  val incomeSourcesFlow: Flow<List<IncomeSourceEntity>> = incomeSourceDao.observeAll()
+  val incomeOccurrencesFlow: Flow<List<IncomeOccurrenceEntity>> = incomeOccurrenceDao.observeAll()
+  val budgetAllocationsFlow: Flow<List<BudgetAllocationEntity>> = budgetAllocationDao.observeAll()
   val appPreferencesFlow: Flow<AppPreferencesState> = prefs.preferencesFlow
 
   fun observeDebt(debtId: Long): Flow<DebtEntity?> = debtDao.observeById(debtId)
@@ -99,6 +117,10 @@ class BaonPlanRepository(
       allowanceDao.deleteAll()
       expenseDao.deleteAll()
       reserveDao.deleteAll()
+      incomeOccurrenceDao.deleteAll()
+      incomeSourceDao.deleteAll()
+      budgetAllocationDao.deleteAll()
+      budgetProfileDao.deleteAll()
       debtDao.deleteAll()
       settingsDao.upsert(DefaultSettingsProvider.defaultSettings())
     }
@@ -244,6 +266,7 @@ class BaonPlanRepository(
 
   suspend fun deleteAllowance(allowanceId: Long) {
     db.withTransaction {
+      val existingRecord = allowanceDao.getById(allowanceId)
       allowanceDao.deleteById(allowanceId)
       val linkedTx = transactionDao.getAll().firstOrNull { it.allowanceId == allowanceId && !it.isVoided }
       if (linkedTx != null) {
@@ -251,7 +274,555 @@ class BaonPlanRepository(
           linkedTx.copy(isVoided = true, isCorrected = true, correctionReason = "Allowance record removed")
         )
       }
+      val linkedOcc = existingRecord?.incomeOccurrenceId?.let { incomeOccurrenceDao.getById(it) }
+        ?: incomeOccurrenceDao.findByLinkedAllowanceId(allowanceId)
+      if (linkedOcc != null) {
+        incomeOccurrenceDao.update(
+          linkedOcc.copy(
+            status = IncomeOccurrenceStatus.EXPECTED,
+            actualReceivedAmountCents = 0L,
+            actualReceivedDateIso = null,
+            linkedAllowanceRecordId = null,
+            updatedAtEpochMillis = ManilaTime.nowMillis()
+          )
+        )
+      }
     }
+  }
+
+  /**
+   * Initializes or updates the adaptive Budget Overview in a single atomic transaction.
+   * Never creates fake AllowanceRecord/Transaction cash entries for unreceived future income.
+   */
+  suspend fun setupBudgetWithPrimaryIncome(
+    source: IncomeSourceEntity,
+    profile: BudgetProfileEntity,
+    markFirstOccurrenceReceivedToday: Boolean = false
+  ): Long {
+    require(source.expectedAmountCents > 0L) { "Allowance amount must be positive." }
+    val startDate = ManilaTime.parseDate(source.startDateIso)
+      ?: throw IllegalArgumentException("Valid allowance start date is required.")
+    val cleanName = source.name.trim().ifBlank { "Main Allowance" }
+    val cleanAnchorDay = source.anchorDayOfMonth ?: startDate.dayOfMonth
+    val now = ManilaTime.nowMillis()
+
+    return db.withTransaction {
+      val existingSources = incomeSourceDao.getAll()
+      for (other in existingSources) {
+        if (other.isPrimary) {
+          incomeSourceDao.update(other.copy(isPrimary = false, updatedAtEpochMillis = now))
+        }
+      }
+      val newSourceId = incomeSourceDao.insert(
+        source.copy(
+          id = 0L,
+          name = cleanName,
+          anchorDayOfMonth = cleanAnchorDay,
+          isActive = true,
+          isPaused = false,
+          pausedFromDateIso = null,
+          isPrimary = true,
+          createdAtEpochMillis = now,
+          updatedAtEpochMillis = now
+        )
+      )
+      val existingProfile = budgetProfileDao.getProfile() ?: BudgetProfileEntity()
+      budgetProfileDao.upsert(
+        profile.copy(
+          id = 1,
+          isConfigured = true,
+          primarySourceId = newSourceId,
+          updatedAtEpochMillis = now
+        )
+      )
+      if (markFirstOccurrenceReceivedToday) {
+        confirmOrUpdateIncomeOccurrenceInternal(
+          occurrenceId = null,
+          sourceId = newSourceId,
+          expectedDateIso = ManilaTime.formatIso(startDate),
+          expectedAmountCents = source.expectedAmountCents,
+          status = IncomeOccurrenceStatus.RECEIVED,
+          actualAmountCents = source.expectedAmountCents,
+          actualDateIso = ManilaTime.formatIso(startDate),
+          notes = "Initial allowance receipt"
+        )
+      } else if (existingProfile.id == 1 && !existingProfile.isConfigured) {
+        budgetProfileDao.upsert(
+          profile.copy(
+            id = 1,
+            isConfigured = true,
+            primarySourceId = newSourceId,
+            updatedAtEpochMillis = now
+          )
+        )
+      }
+      newSourceId
+    }
+  }
+
+  suspend fun saveBudgetProfile(profile: BudgetProfileEntity) {
+    budgetProfileDao.upsert(
+      profile.copy(
+        id = 1,
+        updatedAtEpochMillis = ManilaTime.nowMillis()
+      )
+    )
+  }
+
+  /**
+   * Creates or edits an [IncomeSourceEntity] cleanly.
+   * When editing an existing source from [effectiveFromDateIso], freezes prior unconfirmed expected
+   * occurrences (`< effectiveFromDateIso`) in `income_occurrences` so historical amounts and dates
+   * never silently shift or rewrite past periods.
+   */
+  suspend fun saveIncomeSource(
+    source: IncomeSourceEntity,
+    effectiveFromDateIso: String? = null
+  ): Long {
+    require(source.expectedAmountCents > 0L) { "Income amount must be positive." }
+    val parsedStart = ManilaTime.parseDate(source.startDateIso)
+      ?: throw IllegalArgumentException("Valid start date is required.")
+    val cleanName = source.name.trim().ifBlank { "Income Source" }
+    val cleanAnchorDay = source.anchorDayOfMonth ?: parsedStart.dayOfMonth
+    val now = ManilaTime.nowMillis()
+
+    return db.withTransaction {
+      if (source.isPrimary) {
+        for (other in incomeSourceDao.getAll()) {
+          if (other.id != source.id && other.isPrimary) {
+            incomeSourceDao.update(other.copy(isPrimary = false, updatedAtEpochMillis = now))
+          }
+        }
+      }
+
+      val finalId = if (source.id == 0L) {
+        val insertedId = incomeSourceDao.insert(
+          source.copy(
+            name = cleanName,
+            anchorDayOfMonth = cleanAnchorDay,
+            createdAtEpochMillis = now,
+            updatedAtEpochMillis = now
+          )
+        )
+        val profile = budgetProfileDao.getProfile() ?: BudgetProfileEntity()
+        if (!profile.isConfigured || source.isPrimary || profile.primarySourceId == null) {
+          budgetProfileDao.upsert(
+            profile.copy(
+              id = 1,
+              isConfigured = true,
+              primarySourceId = if (source.isPrimary || profile.primarySourceId == null) insertedId else profile.primarySourceId,
+              updatedAtEpochMillis = now
+            )
+          )
+        }
+        insertedId
+      } else {
+        val existing = incomeSourceDao.getById(source.id)
+        val cutoffDate = effectiveFromDateIso?.let { ManilaTime.parseDate(it) }
+          ?: ManilaTime.today()
+        val cutoffIso = ManilaTime.formatIso(cutoffDate)
+
+        if (existing != null && existing.startDateIso < cutoffIso) {
+          val oldStart = ManilaTime.parseDate(existing.effectiveFromDateIso ?: existing.startDateIso)
+            ?: ManilaTime.parseDate(existing.startDateIso)
+          if (oldStart != null && oldStart.isBefore(cutoffDate)) {
+            val historicalDates = BudgetRecurrenceEngine.generateScheduledDates(
+              source = existing,
+              windowStart = oldStart,
+              windowEndExclusive = cutoffDate,
+              ignorePausedState = true
+            )
+            for (histDate in historicalDates) {
+              val histIso = ManilaTime.formatIso(histDate)
+              val alreadySaved = incomeOccurrenceDao.findBySourceAndExpectedDate(existing.id, histIso)
+              if (alreadySaved == null) {
+                incomeOccurrenceDao.insert(
+                  IncomeOccurrenceEntity(
+                    sourceId = existing.id,
+                    sourceNameSnapshot = existing.name,
+                    expectedDateIso = histIso,
+                    expectedAmountCents = existing.expectedAmountCents,
+                    status = IncomeOccurrenceStatus.EXPECTED,
+                    isFrozenScheduleHistory = true,
+                    notes = "Preserved prior schedule",
+                    updatedAtEpochMillis = now
+                  )
+                )
+              } else if (!alreadySaved.isFrozenScheduleHistory && alreadySaved.status == IncomeOccurrenceStatus.EXPECTED) {
+                incomeOccurrenceDao.update(
+                  alreadySaved.copy(
+                    isFrozenScheduleHistory = true,
+                    updatedAtEpochMillis = now
+                  )
+                )
+              }
+            }
+          }
+          // Replace only unconfirmed future occurrences >= cutoffIso
+          incomeOccurrenceDao.deleteFutureExpectedBySource(existing.id, cutoffIso)
+        }
+
+        val effectiveCutoffToPersist = if (existing != null &&
+          (existing.expectedAmountCents != source.expectedAmountCents ||
+            existing.frequency != source.frequency ||
+            existing.startDateIso != source.startDateIso ||
+            existing.customIntervalDays != source.customIntervalDays ||
+            existing.customIntervalMonths != source.customIntervalMonths ||
+            existing.twiceMonthlyPattern != source.twiceMonthlyPattern ||
+            existing.twiceMonthlyDay1 != source.twiceMonthlyDay1 ||
+            existing.twiceMonthlyDay2 != source.twiceMonthlyDay2 ||
+            existing.customDatesCsv != source.customDatesCsv)
+        ) {
+          cutoffIso
+        } else {
+          source.effectiveFromDateIso
+        }
+
+        incomeSourceDao.update(
+          source.copy(
+            name = cleanName,
+            anchorDayOfMonth = cleanAnchorDay,
+            effectiveFromDateIso = effectiveCutoffToPersist,
+            updatedAtEpochMillis = now
+          )
+        )
+        if (source.isPrimary) {
+          val profile = budgetProfileDao.getProfile() ?: BudgetProfileEntity()
+          budgetProfileDao.upsert(
+            profile.copy(
+              id = 1,
+              isConfigured = true,
+              primarySourceId = source.id,
+              updatedAtEpochMillis = now
+            )
+          )
+        }
+        source.id
+      }
+      finalId
+    }
+  }
+
+  suspend fun setIncomeSourcePaused(sourceId: Long, paused: Boolean, effectiveDateIso: String) {
+    db.withTransaction {
+      val src = incomeSourceDao.getById(sourceId) ?: return@withTransaction
+      val now = ManilaTime.nowMillis()
+      if (paused) {
+        val cutoff = ManilaTime.parseDate(effectiveDateIso) ?: ManilaTime.today()
+        val oldStart = ManilaTime.parseDate(src.effectiveFromDateIso ?: src.startDateIso)
+        if (oldStart != null && oldStart.isBefore(cutoff)) {
+          val priorDates = BudgetRecurrenceEngine.generateScheduledDates(src, oldStart, cutoff)
+          for (d in priorDates) {
+            val dIso = ManilaTime.formatIso(d)
+            if (incomeOccurrenceDao.findBySourceAndExpectedDate(src.id, dIso) == null) {
+              incomeOccurrenceDao.insert(
+                IncomeOccurrenceEntity(
+                  sourceId = src.id,
+                  sourceNameSnapshot = src.name,
+                  expectedDateIso = dIso,
+                  expectedAmountCents = src.expectedAmountCents,
+                  status = IncomeOccurrenceStatus.EXPECTED,
+                  isFrozenScheduleHistory = true,
+                  notes = "Preserved prior schedule",
+                  updatedAtEpochMillis = now
+                )
+              )
+            }
+          }
+        }
+        incomeOccurrenceDao.deleteFutureExpectedBySource(src.id, ManilaTime.formatIso(cutoff))
+        incomeSourceDao.update(
+          src.copy(
+            isPaused = true,
+            pausedFromDateIso = ManilaTime.formatIso(cutoff),
+            updatedAtEpochMillis = now
+          )
+        )
+      } else {
+        incomeSourceDao.update(
+          src.copy(
+            isPaused = false,
+            pausedFromDateIso = null,
+            effectiveFromDateIso = effectiveDateIso,
+            updatedAtEpochMillis = now
+          )
+        )
+      }
+    }
+  }
+
+  suspend fun endIncomeSource(sourceId: Long, endDateIso: String) {
+    db.withTransaction {
+      val src = incomeSourceDao.getById(sourceId) ?: return@withTransaction
+      val endDate = ManilaTime.parseDate(endDateIso) ?: ManilaTime.today()
+      val now = ManilaTime.nowMillis()
+      val nextDayIso = ManilaTime.formatIso(endDate.plusDays(1))
+      // Freeze dates up to and including endDate so past expectations stay accurate
+      val start = ManilaTime.parseDate(src.effectiveFromDateIso ?: src.startDateIso)
+      if (start != null && !start.isAfter(endDate)) {
+        val validDates = BudgetRecurrenceEngine.generateScheduledDates(
+          source = src,
+          windowStart = start,
+          windowEndExclusive = endDate.plusDays(1)
+        )
+        for (d in validDates) {
+          val iso = ManilaTime.formatIso(d)
+          if (incomeOccurrenceDao.findBySourceAndExpectedDate(src.id, iso) == null) {
+            incomeOccurrenceDao.insert(
+              IncomeOccurrenceEntity(
+                sourceId = src.id,
+                sourceNameSnapshot = src.name,
+                expectedDateIso = iso,
+                expectedAmountCents = src.expectedAmountCents,
+                status = IncomeOccurrenceStatus.EXPECTED,
+                isFrozenScheduleHistory = true,
+                notes = "Preserved prior schedule",
+                updatedAtEpochMillis = now
+              )
+            )
+          }
+        }
+      }
+      incomeOccurrenceDao.deleteFutureExpectedBySource(src.id, nextDayIso)
+      incomeSourceDao.update(
+        src.copy(
+          endDateIso = ManilaTime.formatIso(endDate),
+          isActive = false,
+          isPrimary = false,
+          updatedAtEpochMillis = now
+        )
+      )
+      val profile = budgetProfileDao.getProfile()
+      if (profile != null && profile.primarySourceId == sourceId) {
+        val nextActive = incomeSourceDao.getAll().firstOrNull { it.id != sourceId && it.isActive }
+        budgetProfileDao.upsert(
+          profile.copy(
+            primarySourceId = nextActive?.id,
+            updatedAtEpochMillis = now
+          )
+        )
+      }
+    }
+  }
+
+  /**
+   * Confirms, partially confirms, misses, cancels, or edits an expected/past income occurrence
+   * atomically while maintaining strict 1-to-1 synchronization with ONE [AllowanceRecordEntity]
+   * and ONE [TransactionEntity] (zero double-counting).
+   */
+  suspend fun confirmOrUpdateIncomeOccurrence(
+    occurrenceId: Long?,
+    sourceId: Long?,
+    expectedDateIso: String,
+    expectedAmountCents: Long,
+    status: IncomeOccurrenceStatus,
+    actualAmountCents: Long,
+    actualDateIso: String?,
+    notes: String = ""
+  ): Long {
+    return db.withTransaction {
+      confirmOrUpdateIncomeOccurrenceInternal(
+        occurrenceId = occurrenceId,
+        sourceId = sourceId,
+        expectedDateIso = expectedDateIso,
+        expectedAmountCents = expectedAmountCents,
+        status = status,
+        actualAmountCents = actualAmountCents,
+        actualDateIso = actualDateIso,
+        notes = notes
+      )
+    }
+  }
+
+  private suspend fun confirmOrUpdateIncomeOccurrenceInternal(
+    occurrenceId: Long?,
+    sourceId: Long?,
+    expectedDateIso: String,
+    expectedAmountCents: Long,
+    status: IncomeOccurrenceStatus,
+    actualAmountCents: Long,
+    actualDateIso: String?,
+    notes: String
+  ): Long {
+    val now = ManilaTime.nowMillis()
+    val src = sourceId?.let { incomeSourceDao.getById(it) }
+    val existing = occurrenceId?.let { incomeOccurrenceDao.getById(it) }
+      ?: sourceId?.let { incomeOccurrenceDao.findBySourceAndExpectedDate(it, expectedDateIso) }
+
+    val sourceName = src?.name ?: existing?.sourceNameSnapshot?.ifBlank { null } ?: "Allowance"
+
+    val finalStatus = if (status.isSettledCashIn) {
+      require(actualAmountCents > 0L) { "Received allowance amount must be positive." }
+      if (actualAmountCents < expectedAmountCents && status == IncomeOccurrenceStatus.RECEIVED) {
+        status // user explicitly kept RECEIVED or caller selected PARTIALLY_RECEIVED
+      } else {
+        status
+      }
+    } else {
+      status
+    }
+
+    val safeExpectedAmount = existing?.expectedAmountCents ?: expectedAmountCents.coerceAtLeast(0L)
+    val baseOcc = existing?.copy(
+      sourceNameSnapshot = sourceName,
+      expectedAmountCents = safeExpectedAmount,
+      status = finalStatus,
+      actualReceivedAmountCents = if (finalStatus.isSettledCashIn) actualAmountCents else 0L,
+      actualReceivedDateIso = if (finalStatus.isSettledCashIn) (actualDateIso ?: expectedDateIso) else null,
+      isFrozenScheduleHistory = true,
+      notes = notes,
+      updatedAtEpochMillis = now
+    ) ?: IncomeOccurrenceEntity(
+      sourceId = sourceId,
+      sourceNameSnapshot = sourceName,
+      expectedDateIso = expectedDateIso,
+      expectedAmountCents = safeExpectedAmount,
+      actualReceivedAmountCents = if (finalStatus.isSettledCashIn) actualAmountCents else 0L,
+      actualReceivedDateIso = if (finalStatus.isSettledCashIn) (actualDateIso ?: expectedDateIso) else null,
+      status = finalStatus,
+      isFrozenScheduleHistory = true,
+      notes = notes,
+      updatedAtEpochMillis = now
+    )
+
+    val occId = if (existing == null) {
+      incomeOccurrenceDao.insert(baseOcc)
+    } else {
+      incomeOccurrenceDao.update(baseOcc)
+      existing.id
+    }
+
+    val existingLinkedRecord = existing?.linkedAllowanceRecordId?.let { allowanceDao.getById(it) }
+      ?: allowanceDao.findByIncomeOccurrenceId(occId)
+
+    if (finalStatus.isSettledCashIn) {
+      val settledDateStr = actualDateIso?.takeIf { ManilaTime.parseDate(it) != null } ?: expectedDateIso
+      val settledLocalDate = ManilaTime.parseDate(settledDateStr) ?: ManilaTime.today()
+      val weekStartIso = ManilaTime.formatIso(ManilaTime.weekStart(settledLocalDate))
+
+      val recordId = if (existingLinkedRecord == null) {
+        val insertedRecId = allowanceDao.insert(
+          AllowanceRecordEntity(
+            weekStartDate = weekStartIso,
+            receivedDate = settledDateStr,
+            amountCents = actualAmountCents,
+            sourceLabel = sourceName,
+            notes = notes,
+            isManuallyEntered = true,
+            incomeOccurrenceId = occId,
+            createdAtEpochMillis = now
+          )
+        )
+        transactionDao.insert(
+          TransactionEntity(
+            type = TransactionType.ALLOWANCE,
+            title = sourceName,
+            amountCents = actualAmountCents,
+            date = settledDateStr,
+            allowanceId = insertedRecId,
+            category = "Allowance",
+            notes = notes,
+            isManuallyEntered = true,
+            createdAtEpochMillis = now
+          )
+        )
+        insertedRecId
+      } else {
+        allowanceDao.update(
+          existingLinkedRecord.copy(
+            weekStartDate = weekStartIso,
+            receivedDate = settledDateStr,
+            amountCents = actualAmountCents,
+            sourceLabel = sourceName,
+            notes = notes,
+            incomeOccurrenceId = occId
+          )
+        )
+        val activeTx = transactionDao.findActiveByAllowanceId(existingLinkedRecord.id)
+        if (activeTx != null) {
+          transactionDao.update(
+            activeTx.copy(
+              title = sourceName,
+              amountCents = actualAmountCents,
+              date = settledDateStr,
+              notes = notes,
+              isCorrected = activeTx.amountCents != actualAmountCents || activeTx.date != settledDateStr,
+              correctionReason = if (activeTx.amountCents != actualAmountCents || activeTx.date != settledDateStr) {
+                "Updated allowance receipt"
+              } else activeTx.correctionReason
+            )
+          )
+        } else {
+          transactionDao.insert(
+            TransactionEntity(
+              type = TransactionType.ALLOWANCE,
+              title = sourceName,
+              amountCents = actualAmountCents,
+              date = settledDateStr,
+              allowanceId = existingLinkedRecord.id,
+              category = "Allowance",
+              notes = notes,
+              isManuallyEntered = true,
+              createdAtEpochMillis = now
+            )
+          )
+        }
+        existingLinkedRecord.id
+      }
+
+      val persistedOcc = incomeOccurrenceDao.getById(occId)
+      if (persistedOcc != null && persistedOcc.linkedAllowanceRecordId != recordId) {
+        incomeOccurrenceDao.update(persistedOcc.copy(linkedAllowanceRecordId = recordId))
+      }
+    } else if (existingLinkedRecord != null) {
+      val activeTx = transactionDao.findActiveByAllowanceId(existingLinkedRecord.id)
+      if (activeTx != null) {
+        transactionDao.update(
+          activeTx.copy(
+            isVoided = true,
+            isCorrected = true,
+            correctionReason = "Occurrence marked ${finalStatus.label.lowercase()}"
+          )
+        )
+      }
+      allowanceDao.deleteById(existingLinkedRecord.id)
+      val persistedOcc = incomeOccurrenceDao.getById(occId)
+      if (persistedOcc != null && persistedOcc.linkedAllowanceRecordId != null) {
+        incomeOccurrenceDao.update(persistedOcc.copy(linkedAllowanceRecordId = null))
+      }
+    }
+
+    return occId
+  }
+
+  suspend fun upsertBudgetAllocation(categoryKey: BudgetCategoryKey, amountCents: Long, enabled: Boolean) {
+    require(amountCents >= 0L) { "Allocation cannot be negative." }
+    db.withTransaction {
+      val existing = budgetAllocationDao.getByCategoryKey(categoryKey)
+      val now = ManilaTime.nowMillis()
+      if (existing == null) {
+        budgetAllocationDao.insert(
+          BudgetAllocationEntity(
+            categoryKey = categoryKey,
+            allocatedAmountCents = amountCents,
+            isEnabled = enabled && amountCents > 0L,
+            updatedAtEpochMillis = now
+          )
+        )
+      } else {
+        budgetAllocationDao.update(
+          existing.copy(
+            allocatedAmountCents = amountCents,
+            isEnabled = enabled && amountCents > 0L,
+            updatedAtEpochMillis = now
+          )
+        )
+      }
+    }
+  }
+
+  suspend fun deleteBudgetAllocation(categoryKey: BudgetCategoryKey) {
+    budgetAllocationDao.deleteByCategoryKey(categoryKey)
   }
 
   suspend fun recordExpense(
@@ -853,7 +1424,10 @@ class BaonPlanRepository(
       )
       debtDao.update(updatedDebt)
 
-      val existing = installmentDao.getByDebtId(debtId)
+      val existing = FinancialCalculator.effectiveInstallmentsForDebt(
+        updatedDebt,
+        installmentDao.getByDebtId(debtId)
+      )
       val unpaid = existing.filter { it.status.isPayableInstallment }
       if (generateFullSchedule &&
         updatedDebt.frequency != RepaymentFrequency.UNKNOWN &&
@@ -873,7 +1447,7 @@ class BaonPlanRepository(
           customIntervalDays = updatedDebt.customIntervalDays,
           dateStatus = DueDateStatus.CONFIRMED
         )
-        installmentDao.deleteUnpaidByDebtId(debtId)
+        installmentDao.deleteUnpaidByDebtIdAndVersion(debtId, updatedDebt.scheduleVersion)
         val paidCount = existing.count { it.status == InstallmentStatus.PAID }
         installmentDao.insertAll(
           specs.mapIndexed { idx, spec ->
@@ -885,7 +1459,8 @@ class BaonPlanRepository(
               dateStatus = spec.dateStatus,
               status = InstallmentStatus.UPCOMING,
               isManuallyEntered = true,
-              notes = "Confirmed schedule"
+              notes = "Confirmed schedule",
+              scheduleVersion = updatedDebt.scheduleVersion
             )
           }
         )
@@ -909,7 +1484,8 @@ class BaonPlanRepository(
               dateStatus = DueDateStatus.CONFIRMED,
               status = InstallmentStatus.UPCOMING,
               isManuallyEntered = true,
-              notes = "User confirmed due date"
+              notes = "User confirmed due date",
+              scheduleVersion = updatedDebt.scheduleVersion
             )
           )
         }
@@ -944,8 +1520,11 @@ class BaonPlanRepository(
       )
       if (specs.isEmpty()) return@withTransaction false
 
-      val paidCount = installmentDao.getByDebtId(debtId).count { it.status == InstallmentStatus.PAID }
-      installmentDao.deleteUnpaidByDebtId(debtId)
+      val paidCount = FinancialCalculator.effectiveInstallmentsForDebt(
+        debt,
+        installmentDao.getByDebtId(debtId)
+      ).count { it.status == InstallmentStatus.PAID }
+      installmentDao.deleteUnpaidByDebtIdAndVersion(debtId, debt.scheduleVersion)
       installmentDao.insertAll(
         specs.mapIndexed { idx, spec ->
           InstallmentEntity(
@@ -956,7 +1535,8 @@ class BaonPlanRepository(
             dateStatus = spec.dateStatus,
             status = InstallmentStatus.UPCOMING,
             isManuallyEntered = true,
-            notes = "Generated schedule (${frequency.label})"
+            notes = "Generated schedule (${frequency.label})",
+            scheduleVersion = debt.scheduleVersion
           )
         }
       )
@@ -1078,8 +1658,8 @@ class BaonPlanRepository(
       )
     )
 
-    // Apply payment cleanly to pending installments
-    val allInst = installmentDao.getByDebtId(debtId)
+    // Apply payment cleanly to pending installments of active scheduleVersion
+    val allInst = FinancialCalculator.effectiveInstallmentsForDebt(debt, installmentDao.getByDebtId(debtId))
     val pendingInst = allInst.filter { it.status.isPayableInstallment }
     val orderedPending = if (targetInstallmentId != null) {
       val target = pendingInst.firstOrNull { it.id == targetInstallmentId }
@@ -1113,7 +1693,10 @@ class BaonPlanRepository(
     val newTrackedPaid = debt.trackedPaidCents + appliedPayment
     val newStatus = if (newRemainingBalance == 0L) DebtStatus.PAID else debt.status
 
-    val updatedInstallments = installmentDao.getByDebtId(debtId)
+    val updatedInstallments = FinancialCalculator.effectiveInstallmentsForDebt(
+      debt,
+      installmentDao.getByDebtId(debtId)
+    )
     val nextUnpaid = updatedInstallments.firstOrNull { it.status.isPayableInstallment }
 
     val nextRemainingInstallments = when {
@@ -1202,11 +1785,12 @@ class BaonPlanRepository(
           if (voidTransaction) {
             if (debt != null) {
               // Revert installments linked to this transaction first so unpaid count & dates stay accurate
-              val allInstBeforeRevert = installmentDao.getByDebtId(debt.id)
-              val primaryLinked = allInstBeforeRevert
+              val allInstRaw = installmentDao.getByDebtId(debt.id)
+              val effectiveInstBeforeRevert = FinancialCalculator.effectiveInstallmentsForDebt(debt, allInstRaw)
+              val primaryLinked = allInstRaw
                 .filter { it.linkedTransactionId == tx.id || it.id == tx.installmentId }
                 .sortedByDescending { it.installmentNumber }
-              val fallbackLinked = allInstBeforeRevert
+              val fallbackLinked = effectiveInstBeforeRevert
                 .filter { it.paidAmountCents > 0L && it.linkedTransactionId != tx.id && it.id != tx.installmentId }
                 .sortedByDescending { it.installmentNumber }
 
@@ -1232,7 +1816,10 @@ class BaonPlanRepository(
                 toRevert -= revertAmt
               }
 
-              val allInstAfterRevert = installmentDao.getByDebtId(debt.id)
+              val allInstAfterRevert = FinancialCalculator.effectiveInstallmentsForDebt(
+                debt,
+                installmentDao.getByDebtId(debt.id)
+              )
               val firstUnpaidAfterRevert = allInstAfterRevert.firstOrNull { it.status.isPayableInstallment }
               val unpaidCountAfterRevert = allInstAfterRevert.count { it.status.isPayableInstallment }
 
@@ -1313,10 +1900,11 @@ class BaonPlanRepository(
 
             val delta = targetAmount - tx.amountCents
             if (debt != null && (delta != 0L || effectiveDate != tx.date)) {
-              val allInstBefore = installmentDao.getByDebtId(debt.id)
+              val allInstRaw = installmentDao.getByDebtId(debt.id)
+              val allInstBefore = FinancialCalculator.effectiveInstallmentsForDebt(debt, allInstRaw)
               if (delta < 0L) {
                 var toRevert = -delta
-                val primary = allInstBefore
+                val primary = allInstRaw
                   .filter { it.linkedTransactionId == tx.id || it.id == tx.installmentId }
                   .sortedByDescending { it.installmentNumber }
                 val fallback = allInstBefore
@@ -1379,7 +1967,10 @@ class BaonPlanRepository(
                 }
               }
 
-              val allInstAfter = installmentDao.getByDebtId(debt.id)
+              val allInstAfter = FinancialCalculator.effectiveInstallmentsForDebt(
+                debt,
+                installmentDao.getByDebtId(debt.id)
+              )
               val firstUnpaid = allInstAfter.firstOrNull { it.status.isPayableInstallment }
               val unpaidCount = allInstAfter.count { it.status.isPayableInstallment }
 
@@ -1447,8 +2038,21 @@ class BaonPlanRepository(
 
         TransactionType.ALLOWANCE -> {
           val record = tx.allowanceId?.let { allowanceDao.getById(it) }
+          val linkedOcc = record?.incomeOccurrenceId?.let { incomeOccurrenceDao.getById(it) }
+            ?: record?.let { incomeOccurrenceDao.findByLinkedAllowanceId(it.id) }
           if (voidTransaction) {
             if (record != null) allowanceDao.deleteById(record.id)
+            if (linkedOcc != null) {
+              incomeOccurrenceDao.update(
+                linkedOcc.copy(
+                  status = IncomeOccurrenceStatus.EXPECTED,
+                  actualReceivedAmountCents = 0L,
+                  actualReceivedDateIso = null,
+                  linkedAllowanceRecordId = null,
+                  updatedAtEpochMillis = ManilaTime.nowMillis()
+                )
+              )
+            }
             transactionDao.update(
               tx.copy(isVoided = true, isCorrected = true, correctionReason = reason)
             )
@@ -1466,6 +2070,22 @@ class BaonPlanRepository(
                   weekStartDate = ManilaTime.formatIso(ManilaTime.weekStart(parsed)),
                   sourceLabel = effectiveTitle,
                   notes = effectiveNotes
+                )
+              )
+            }
+            if (linkedOcc != null) {
+              val nextOccStatus = if (targetAmount < linkedOcc.expectedAmountCents) {
+                IncomeOccurrenceStatus.PARTIALLY_RECEIVED
+              } else {
+                IncomeOccurrenceStatus.RECEIVED
+              }
+              incomeOccurrenceDao.update(
+                linkedOcc.copy(
+                  actualReceivedAmountCents = targetAmount,
+                  actualReceivedDateIso = effectiveDate,
+                  status = nextOccStatus,
+                  notes = effectiveNotes,
+                  updatedAtEpochMillis = ManilaTime.nowMillis()
                 )
               )
             }
@@ -1628,7 +2248,11 @@ class BaonPlanRepository(
       allowanceRecords = allowanceDao.getAll(),
       expenses = expenseDao.getAll(),
       debtReserves = reserveDao.getAll(),
-      debtAttachments = attachmentDao.getAll()
+      debtAttachments = attachmentDao.getAll(),
+      budgetProfile = budgetProfileDao.getProfile(),
+      incomeSources = incomeSourceDao.getAll(),
+      incomeOccurrences = incomeOccurrenceDao.getAll(),
+      budgetAllocations = budgetAllocationDao.getAll()
     )
   }
 
@@ -1644,6 +2268,10 @@ class BaonPlanRepository(
       allowanceDao.deleteAll()
       expenseDao.deleteAll()
       reserveDao.deleteAll()
+      incomeOccurrenceDao.deleteAll()
+      incomeSourceDao.deleteAll()
+      budgetAllocationDao.deleteAll()
+      budgetProfileDao.deleteAll()
       debtDao.deleteAll()
       settingsDao.deleteAll()
 
@@ -1654,6 +2282,14 @@ class BaonPlanRepository(
       if (payload.allowanceRecords.isNotEmpty()) allowanceDao.insertAll(payload.allowanceRecords)
       if (payload.expenses.isNotEmpty()) expenseDao.insertAll(payload.expenses)
       if (payload.debtReserves.isNotEmpty()) reserveDao.insertAll(payload.debtReserves)
+      if (payload.incomeSources.isNotEmpty()) incomeSourceDao.insertAll(payload.incomeSources)
+      val sourceIds = payload.incomeSources.mapTo(HashSet()) { it.id }
+      val cleanOccurrences = payload.incomeOccurrences.map { occ ->
+        if (occ.sourceId != null && occ.sourceId !in sourceIds) occ.copy(sourceId = null) else occ
+      }
+      if (cleanOccurrences.isNotEmpty()) incomeOccurrenceDao.insertAll(cleanOccurrences)
+      if (payload.budgetAllocations.isNotEmpty()) budgetAllocationDao.insertAll(payload.budgetAllocations)
+      payload.budgetProfile?.let { budgetProfileDao.upsert(it.copy(id = 1)) }
       val debtIds = payload.debts.mapTo(HashSet()) { it.id }
       val validAttachments = payload.debtAttachments.filter { it.debtId in debtIds }
       if (validAttachments.isNotEmpty()) attachmentDao.insertAll(validAttachments)

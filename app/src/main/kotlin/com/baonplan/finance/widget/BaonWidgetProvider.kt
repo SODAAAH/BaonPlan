@@ -13,7 +13,8 @@ import com.baonplan.finance.R
 import com.baonplan.finance.data.local.BaonPlanDatabase
 import com.baonplan.finance.data.local.DefaultSettingsProvider
 import com.baonplan.finance.domain.FinancialCalculator
-import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.budget.CashFlowBudgetEngine
+import com.baonplan.finance.domain.budget.PaymentGroupingEngine
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import kotlinx.coroutines.CoroutineScope
@@ -68,6 +69,10 @@ class BaonWidgetProvider : AppWidgetProvider() {
       val allowances = db.allowanceRecordDao().getAll()
       val expenses = db.expenseDao().getAll()
       val reserves = db.debtReserveDao().getAll()
+      val budgetProfile = db.budgetProfileDao().getProfile()
+      val incomeSources = db.incomeSourceDao().getAll()
+      val incomeOccurrences = db.incomeOccurrenceDao().getAll()
+      val budgetAllocations = db.budgetAllocationDao().getAll()
 
       val today = ManilaTime.today()
       val weekly = FinancialCalculator.calculateWeeklyBudgetSummary(
@@ -78,33 +83,61 @@ class BaonWidgetProvider : AppWidgetProvider() {
         reserves = reserves,
         transactions = transactions
       )
-      val overview = FinancialCalculator.buildPaymentOverview(
+      val budgetOverview = CashFlowBudgetEngine.calculateOverview(
+        today = today,
+        profile = budgetProfile,
+        sources = incomeSources,
+        occurrences = incomeOccurrences,
+        allocations = budgetAllocations,
+        allowances = allowances,
+        expenses = expenses,
+        reserves = reserves,
+        transactions = transactions,
+        debts = debts,
+        installments = installments
+      )
+      val grouping = PaymentGroupingEngine.buildGroupedPayments(
         debts = debts,
         installments = installments,
         today = today
       )
-      val nextPayment = overview.overduePayments.firstOrNull()
-        ?: overview.dueTodayPayments.firstOrNull()
-        ?: overview.dueTomorrowPayments.firstOrNull()
-        ?: overview.nextConfirmedPayment
-        ?: overview.nextEstimatedPayment
-        ?: overview.unconfirmedOrUnknownDebts.firstOrNull()
 
-      val moneyText = MoneyFormatter.formatPeso(weekly.availableSpendingMoneyCents)
+      val displayMoneyCents = if (budgetOverview.isConfigured) {
+        budgetOverview.projectedRemainingCents
+      } else {
+        weekly.availableSpendingMoneyCents
+      }
+      val moneyText = MoneyFormatter.formatPeso(displayMoneyCents)
       val moneyColor = ContextCompat.getColor(
         context,
-        if (weekly.availableSpendingMoneyCents < 0L) R.color.widget_danger else R.color.widget_positive
+        if (displayMoneyCents < 0L) R.color.widget_danger else R.color.widget_positive
       )
-      val nextText = if (nextPayment != null) {
-        val dateLabel = if (nextPayment.dueDateIso != null) {
-          val prefix = if (nextPayment.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION) "Est. " else ""
-          "$prefix${ManilaTime.formatShort(nextPayment.dueDateIso)}"
-        } else {
-          "Date unconfirmed"
+
+      val focusGroup = grouping.overdueGroup ?: grouping.nextGroup
+      val firstUnconfirmed = grouping.undatedOrUnconfirmedPayments.firstOrNull()
+      val nextText = when {
+        focusGroup != null && focusGroup.isMultiItemGroup -> {
+          val prefix = if (focusGroup.isOverdueGroup) "Overdue" else "Next"
+          val amt = if (focusGroup.knownTotalCents > 0L) {
+            MoneyFormatter.formatPesoCompact(focusGroup.knownTotalCents) +
+              if (focusGroup.hasIncompleteAmounts) "+" else ""
+          } else {
+            "Amount unavailable"
+          }
+          "$prefix (${focusGroup.dateRangeLabel}): $amt (${focusGroup.distinctLoansCount} loans)"
         }
-        "Next: ${nextPayment.debtName} · ${MoneyFormatter.formatPesoCompact(nextPayment.amountCents)} ($dateLabel)"
-      } else {
-        "No upcoming payments"
+        focusGroup != null -> {
+          val single = focusGroup.items.first()
+          val dateLabel = buildString {
+            if (single.isEstimatedDate) append("Est. ")
+            append(focusGroup.dateRangeLabel)
+          }
+          val amt = single.unpaidAmountCents?.let { MoneyFormatter.formatPesoCompact(it) } ?: "Amount unavailable"
+          val prefix = if (focusGroup.isOverdueGroup) "Overdue" else "Next"
+          "$prefix: ${single.debtName} · $amt ($dateLabel)"
+        }
+        firstUnconfirmed != null -> "Date unconfirmed: ${firstUnconfirmed.debtName}"
+        else -> "No upcoming payments"
       }
 
       val openAppIntent = Intent(context, MainActivity::class.java).apply {

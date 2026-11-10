@@ -322,6 +322,7 @@ fun AddExpenseDialog(
     ExpenseCategory.SCHOOL_FOOD to "Food",
     ExpenseCategory.TRANSPORT to "Transport",
     ExpenseCategory.SCHOOL_SUPPLIES to "Supplies",
+    ExpenseCategory.BILLS to "Bills",
     ExpenseCategory.PERSONAL to "Personal",
     ExpenseCategory.EMERGENCY to "Emergency",
     ExpenseCategory.OTHER to "Other"

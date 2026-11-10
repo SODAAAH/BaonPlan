@@ -15,7 +15,13 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.baonplan.finance.data.local.entity.DebtEntity
+import com.baonplan.finance.data.local.entity.InstallmentEntity
+import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ThemeMode
+import com.baonplan.finance.domain.util.ManilaTime
 import kotlinx.coroutines.runBlocking
 import org.junit.Rule
 import org.junit.Test
@@ -190,5 +196,106 @@ class BaonPlanUiInstrumentedTest {
         true
       }.getOrDefault(false)
     }
+  }
+
+  @Test
+  fun homeBudgetOverviewSetupPeriodNavigationPaymentGroupingAndNoDevTestUi() {
+    composeTestRule.waitUntil(timeoutMillis = 8_000) {
+      runCatching {
+        composeTestRule.onNodeWithText("Here's your money overview.").assertIsDisplayed()
+        true
+      }.getOrDefault(false)
+    }
+
+    // Seed two close-due-date loans (today + 2 days) to exercise 3-day payment grouping & breakdown
+    val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as BaonPlanApp
+    val today = ManilaTime.today()
+    val d1Iso = ManilaTime.formatIso(today.plusDays(1))
+    val d2Iso = ManilaTime.formatIso(today.plusDays(3))
+    runBlocking {
+      app.repository.saveImportedDebtWithSchedule(
+        debt = DebtEntity(
+          name = "GCash UI Loan",
+          lender = "GCash",
+          category = "Cash Loan",
+          remainingBalanceCents = 30_000L,
+          installmentAmountCents = 30_000L,
+          remainingInstallmentsCount = 1,
+          frequency = RepaymentFrequency.MONTHLY,
+          nextDueDate = d1Iso
+        ),
+        scheduleRows = listOf(
+          InstallmentEntity(
+            debtId = 0L,
+            installmentNumber = 1,
+            dueDate = d1Iso,
+            amountDueCents = 30_000L,
+            dateStatus = DueDateStatus.CONFIRMED,
+            status = InstallmentStatus.UPCOMING
+          )
+        )
+      )
+      app.repository.saveImportedDebtWithSchedule(
+        debt = DebtEntity(
+          name = "Maya UI Loan",
+          lender = "Maya",
+          category = "Cash Loan",
+          remainingBalanceCents = 45_000L,
+          installmentAmountCents = 45_000L,
+          remainingInstallmentsCount = 1,
+          frequency = RepaymentFrequency.MONTHLY,
+          nextDueDate = d2Iso
+        ),
+        scheduleRows = listOf(
+          InstallmentEntity(
+            debtId = 0L,
+            installmentNumber = 1,
+            dueDate = d2Iso,
+            amountDueCents = 45_000L,
+            dateStatus = DueDateStatus.CONFIRMED,
+            status = InstallmentStatus.UPCOMING
+          )
+        )
+      )
+    }
+
+    // Grouped Next Payment shows combined ₱750.00 & opens breakdown -> Debt Details
+    composeTestRule.waitUntil(timeoutMillis = 5_000) {
+      runCatching {
+        composeTestRule.onAllNodesWithText("₱750.00").onFirst().assertIsDisplayed()
+        composeTestRule.onNodeWithText("2 payments · 2 loans", substring = true).assertIsDisplayed()
+        true
+      }.getOrDefault(false)
+    }
+    composeTestRule.onNodeWithText("View breakdown").performClick()
+    composeTestRule.onNodeWithText("GCash UI Loan").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Maya UI Loan").performClick()
+    composeTestRule.onNodeWithText("Balance remaining").assertIsDisplayed()
+    composeTestRule.onNodeWithContentDescription("Back").performClick()
+
+    // Budget Overview empty state -> configure Monthly allowance -> verify period controls
+    scrollLazyListTo("Set up budget")
+    composeTestRule.onNodeWithText("Set up budget").performClick()
+    composeTestRule.onNodeWithText("Expected amount per schedule *").performTextInput("8000")
+    composeTestRule.onNodeWithText("Monthly").performScrollTo().performClick()
+    composeTestRule.onNodeWithText("Save budget").performScrollTo().performClick()
+
+    composeTestRule.waitUntil(timeoutMillis = 5_000) {
+      runCatching {
+        scrollLazyListTo("Budget overview")
+        composeTestRule.onNodeWithContentDescription("Next period").assertIsDisplayed()
+        true
+      }.getOrDefault(false)
+    }
+    composeTestRule.onNodeWithContentDescription("Next period").performClick()
+    composeTestRule.onNodeWithText("Current").performClick()
+
+    // Notifications screen contains no developer-only test buttons or Doze jargon
+    composeTestRule.onNodeWithText("More").performClick()
+    composeTestRule.onNodeWithText("Notifications").performClick()
+    composeTestRule.onNodeWithText("Payment & allowance reminders").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Send test alert").assertDoesNotExist()
+    composeTestRule.onNodeWithText("Check due dates now").assertDoesNotExist()
+    composeTestRule.onNodeWithText("Doze mode", substring = true).assertDoesNotExist()
   }
 }

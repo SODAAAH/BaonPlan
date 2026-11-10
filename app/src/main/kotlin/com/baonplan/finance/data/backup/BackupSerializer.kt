@@ -1,10 +1,14 @@
 package com.baonplan.finance.data.backup
 
 import com.baonplan.finance.data.local.entity.AllowanceRecordEntity
+import com.baonplan.finance.data.local.entity.BudgetAllocationEntity
+import com.baonplan.finance.data.local.entity.BudgetProfileEntity
 import com.baonplan.finance.data.local.entity.DebtAttachmentEntity
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.DebtReserveEntity
 import com.baonplan.finance.data.local.entity.ExpenseEntity
+import com.baonplan.finance.data.local.entity.IncomeOccurrenceEntity
+import com.baonplan.finance.data.local.entity.IncomeSourceEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
@@ -16,7 +20,7 @@ import java.time.Instant
 
 @Serializable
 data class BaonPlanBackupPayload(
-  val schemaVersion: Int = 4,
+  val schemaVersion: Int = 5,
   val appId: String = "com.baonplan.finance",
   val currency: String = "PHP",
   val timezone: String = "Asia/Manila",
@@ -28,7 +32,11 @@ data class BaonPlanBackupPayload(
   val allowanceRecords: List<AllowanceRecordEntity>,
   val expenses: List<ExpenseEntity>,
   val debtReserves: List<DebtReserveEntity>,
-  val debtAttachments: List<DebtAttachmentEntity> = emptyList()
+  val debtAttachments: List<DebtAttachmentEntity> = emptyList(),
+  val budgetProfile: BudgetProfileEntity? = null,
+  val incomeSources: List<IncomeSourceEntity> = emptyList(),
+  val incomeOccurrences: List<IncomeOccurrenceEntity> = emptyList(),
+  val budgetAllocations: List<BudgetAllocationEntity> = emptyList()
 )
 
 object BackupSerializer {
