@@ -26,6 +26,7 @@ import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.ThemeMode
 import com.baonplan.finance.domain.model.TransactionType
+import com.baonplan.finance.domain.ocr.LearnedScannerPreferences
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import kotlinx.coroutines.Dispatchers
@@ -127,6 +128,10 @@ class BaonPlanRepository(
 
   suspend fun setExpensePresets(presets: List<ExpensePreset>) {
     prefs.setExpensePresets(presets)
+  }
+
+  suspend fun setLearnedScannerPreferences(updated: LearnedScannerPreferences) {
+    prefs.setLearnedScannerPreferences(updated)
   }
 
   suspend fun carryOverPriorWeekCash(prevWeekStartIso: String, amountCents: Long, todayIso: String) {

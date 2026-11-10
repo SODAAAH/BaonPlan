@@ -15,8 +15,12 @@ object DebtImportValidator {
   fun validateDraft(draft: DebtImportDraft): List<ImportValidationIssue> =
     validateValues(
       debtName = draft.loanName.value.orEmpty(),
-      remainingBalanceCents = draft.outstandingBalanceCents.value ?: draft.remainingInstallmentTotalCents.value,
+      remainingBalanceCents = draft.outstandingBalanceCents.value
+        ?: draft.remainingInstallmentTotalCents.value
+        ?: draft.calculatedUnpaidScheduleSumCents.value
+        ?: draft.amountCurrentlyDueCents.value,
       explicitBalanceCents = draft.outstandingBalanceCents.value,
+      explicitAmountCurrentlyDueCents = draft.amountCurrentlyDueCents.value,
       explicitRemainingInstallmentTotalCents = draft.remainingInstallmentTotalCents.value,
       originalPrincipalCents = draft.originalPrincipalCents.value,
       amountReceivedCents = draft.amountReceivedCents.value,
@@ -41,6 +45,7 @@ object DebtImportValidator {
     debtName: String,
     remainingBalanceCents: Long?,
     explicitBalanceCents: Long? = remainingBalanceCents,
+    explicitAmountCurrentlyDueCents: Long? = null,
     explicitRemainingInstallmentTotalCents: Long? = null,
     originalPrincipalCents: Long? = null,
     amountReceivedCents: Long? = null,
@@ -93,6 +98,7 @@ object DebtImportValidator {
       "processingFeeCents" to ("Processing fee" to processingFeeCents),
       "otherFeesCents" to ("Other fees" to otherFeesCents),
       "totalRepaymentCents" to ("Total scheduled repayment" to totalScheduledCents),
+      "amountCurrentlyDueCents" to ("Amount currently due" to explicitAmountCurrentlyDueCents),
       "remainingInstallmentTotalCents" to ("Remaining installment total" to explicitRemainingInstallmentTotalCents)
     )
     for ((key, pair) in nonNegativeMap) {
@@ -224,6 +230,21 @@ object DebtImportValidator {
           severity = ImportSeverity.WARNING,
           title = "Balance vs. remaining installment total differ",
           message = "Balance is ${MoneyFormatter.formatPeso(explicitBalanceCents)}, while remaining installment total is ${MoneyFormatter.formatPeso(explicitRemainingInstallmentTotalCents)}. Check whether fees/interest explain the gap."
+        )
+      )
+    }
+
+    if (explicitAmountCurrentlyDueCents != null &&
+      explicitBalanceCents != null &&
+      explicitBalanceCents > 0L &&
+      explicitAmountCurrentlyDueCents > explicitBalanceCents + 100L
+    ) {
+      issues.add(
+        ImportValidationIssue(
+          fieldKey = "amountDueVsBalance",
+          severity = ImportSeverity.WARNING,
+          title = "Amount currently due exceeds remaining balance",
+          message = "Amount due now (${MoneyFormatter.formatPeso(explicitAmountCurrentlyDueCents)}) is larger than remaining balance (${MoneyFormatter.formatPeso(explicitBalanceCents)}). Confirm whether fees or penalties are included."
         )
       )
     }

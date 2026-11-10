@@ -1,8 +1,24 @@
 package com.baonplan.finance.domain.ocr
 
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+
+data class OcrCell(
+  val text: String,
+  val left: Int,
+  val top: Int,
+  val right: Int,
+  val bottom: Int,
+  val confidence: Float? = null,
+  val blockId: Int? = null
+) {
+  val width: Int get() = (right - left).coerceAtLeast(0)
+  val height: Int get() = (bottom - top).coerceAtLeast(0)
+  val centerX: Int get() = left + width / 2
+  val centerY: Int get() = top + height / 2
+}
 
 data class NormalizedOcrRow(
   val text: String,
@@ -12,120 +28,348 @@ data class NormalizedOcrRow(
   val bottom: Int,
   val left: Int,
   val right: Int,
-  val screenshotIndex: Int
+  val screenshotIndex: Int,
+  val cells: List<OcrCell> = emptyList(),
+  val averageConfidence: Float? = null
 )
 
 /**
- * Reconstructs logical horizontal rows from OCR bounding boxes so split-column layouts
- * (e.g. left label + right currency amount, or date + amount + status columns) are
- * paired accurately without relying solely on ML Kit block grouping.
+ * Reconstructs logical horizontal rows and 2D cells from OCR bounding boxes so
+ * split-column, metric-grid, hero-above-label, and separated currency tokens
+ * (e.g. "₱ | 1,087.38") are paired accurately.
  */
 object OcrLayoutNormalizer {
 
-  fun normalize(page: OcrDocumentPage): List<NormalizedOcrRow> {
-    val nonBlank = page.lines
-      .map { it.copy(text = sanitizeOcrGlyphs(it.text)) }
-      .filter { it.text.isNotBlank() }
-    if (nonBlank.isEmpty()) return emptyList()
+  private val standaloneCurrencyPrefixRegex = Regex(
+    """^(?:₱|PHP|Php|PhP|P\.?|Ph\.?|F|£)$"""
+  )
 
-    val boxed = nonBlank.filter { it.box != null && it.box.height > 0 && it.box.width > 0 }
-    if (boxed.size < nonBlank.size / 2 || boxed.isEmpty()) {
-      return nonBlank.mapIndexed { idx, line ->
+  private val startsWithMoneyDigitsRegex = Regex(
+    """^\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{1,2})?(?:\b|$)"""
+  )
+
+  private val systemChromeClockOrSignalRegex = Regex(
+    """^(?:\d{1,2}:\d{2}(?:\s*[ap]m)?|5g|4g|lte|volte|vo\s*wifi|wifi|\d{1,3}%|[<>\u25A0\u25CF\u25B2\|/\\]{1,3}|kb/s|mb/s)$""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private val financialGuardRegex = Regex(
+    """\b(?:loan|balance|due|installment|repayment|principal|amount|paid|interest|fee|spay|sloan|gloan|ggives|billease|maya|tala|atome|juanhand|peso|php)\b|₱""",
+    RegexOption.IGNORE_CASE
+  )
+
+  fun normalize(page: OcrDocumentPage): List<NormalizedOcrRow> {
+    val sanitized = page.lines
+      .map { line ->
+        line.copy(
+          text = sanitizeOcrGlyphs(line.text),
+          elements = line.elements.map { it.copy(text = sanitizeOcrGlyphs(it.text)) }
+        )
+      }
+      .filter { it.text.isNotBlank() }
+    if (sanitized.isEmpty()) return emptyList()
+
+    val boxedCount = sanitized.count { it.box != null && it.box.height > 0 && it.box.width > 0 }
+    if (boxedCount < sanitized.size / 2 || boxedCount == 0) {
+      return sanitized.mapIndexed { idx, line ->
         val trimmed = line.text.trim()
+        val cols = mergeStandaloneCurrencyColumns(
+          trimmed.split('|').map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(trimmed) }
+        )
+        val joined = cols.joinToString(" | ")
+        val cells = cols.mapIndexed { colIdx, col ->
+          OcrCell(
+            text = col,
+            left = colIdx * 300,
+            top = idx * 24,
+            right = (colIdx + 1) * 300 - 20,
+            bottom = (idx + 1) * 24,
+            confidence = line.confidence,
+            blockId = line.blockId
+          )
+        }
         NormalizedOcrRow(
-          text = trimmed,
-          columns = trimmed.split('|').map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(trimmed) },
+          text = joined,
+          columns = cols,
           lines = listOf(line),
           top = idx * 24,
           bottom = (idx + 1) * 24,
           left = 0,
           right = 1000,
-          screenshotIndex = page.screenshotIndex
+          screenshotIndex = page.screenshotIndex,
+          cells = cells,
+          averageConfidence = line.confidence
         )
       }
     }
 
-    val heights = boxed.mapNotNull { it.box?.height }.sorted()
-    val medianHeight = heights[heights.size / 2].coerceAtLeast(12)
+    val filtered = filterSystemChromeLines(sanitized, page.height)
+    val working = filtered.ifEmpty { sanitized }
 
-    val sortedLines = nonBlank.sortedWith(
-      compareBy<OcrLine> { it.box?.top ?: Int.MAX_VALUE }.thenBy { it.box?.left ?: Int.MAX_VALUE }
+    val heights = working.mapNotNull { it.box?.height }.filter { it > 0 }.sorted()
+    val medianHeight = if (heights.isNotEmpty()) heights[heights.size / 2].coerceAtLeast(12) else 24
+
+    // Split wide lines that have large internal element horizontal gaps (e.g. merged 2-column row)
+    val splitPieces = splitWideMultiColumnLines(working, medianHeight)
+
+    val sortedPieces = splitPieces.sortedWith(
+      compareBy<LinePiece> { it.box?.top ?: Int.MAX_VALUE }.thenBy { it.box?.left ?: Int.MAX_VALUE }
     )
 
-    val clusters = mutableListOf<MutableList<OcrLine>>()
-    for (line in sortedLines) {
-      val box = line.box
+    val clusters = mutableListOf<MutableList<LinePiece>>()
+    for (piece in sortedPieces) {
+      val box = piece.box
       if (box == null) {
-        clusters.add(mutableListOf(line))
+        clusters.add(mutableListOf(piece))
         continue
       }
-      var bestCluster: MutableList<OcrLine>? = null
+      var bestCluster: MutableList<LinePiece>? = null
       var bestScore = Int.MAX_VALUE
+
       for (cluster in clusters) {
         val sampleBoxes = cluster.mapNotNull { it.box }
         if (sampleBoxes.isEmpty()) continue
         val clusterTop = sampleBoxes.minOf { it.top }
         val clusterBottom = sampleBoxes.maxOf { it.bottom }
         val clusterCenterY = (clusterTop + clusterBottom) / 2
-        val minHeight = min(box.height, (clusterBottom - clusterTop).coerceAtLeast(1)).coerceAtLeast(1)
+        val clusterHeight = (clusterBottom - clusterTop).coerceAtLeast(1)
+        val minHeight = min(box.height, clusterHeight).coerceAtLeast(1)
         val overlap = max(0, min(box.bottom, clusterBottom) - max(box.top, clusterTop))
         val overlapRatio = overlap.toFloat() / minHeight.toFloat()
         val centerDelta = abs(box.centerY - clusterCenterY)
 
-        if (overlapRatio >= 0.45f || centerDelta <= (medianHeight * 0.55f)) {
-          if (centerDelta < bestScore) {
-            bestScore = centerDelta
-            bestCluster = cluster
-          }
+        // Prevent vertically stacked lines (sharing significant horizontal span without vertical overlap)
+        // from being collapsed into a single horizontal row.
+        val horizontallyStackedBelow = sampleBoxes.any { existing ->
+          val xOverlap = max(0, min(box.right, existing.right) - max(box.left, existing.left))
+          val narrowerW = min(box.width, existing.width).coerceAtLeast(1)
+          xOverlap.toFloat() / narrowerW.toFloat() > 0.35f && overlapRatio < 0.25f
+        }
+        if (horizontallyStackedBelow) continue
+
+        // Support tall hero currency values aligned visually with a smaller adjacent caption line
+        val isCompatibleRowHeight = overlapRatio >= 0.38f ||
+          (centerDelta <= (medianHeight * 0.55f) && max(box.height, clusterHeight) <= medianHeight * 2.8f)
+
+        if (isCompatibleRowHeight && centerDelta < bestScore) {
+          bestScore = centerDelta
+          bestCluster = cluster
         }
       }
+
       if (bestCluster != null) {
-        bestCluster.add(line)
+        bestCluster.add(piece)
       } else {
-        clusters.add(mutableListOf(line))
+        clusters.add(mutableListOf(piece))
       }
     }
 
     return clusters.map { cluster ->
       val ordered = cluster.sortedBy { it.box?.left ?: 0 }
+      val rawCells = ordered.mapNotNull { piece ->
+        val t = piece.text.trim()
+        if (t.isEmpty()) null else OcrCell(
+          text = t,
+          left = piece.box?.left ?: 0,
+          top = piece.box?.top ?: 0,
+          right = piece.box?.right ?: 1000,
+          bottom = piece.box?.bottom ?: 0,
+          confidence = piece.sourceLine.confidence,
+          blockId = piece.sourceLine.blockId
+        )
+      }
+
+      // First merge standalone currency tokens like ["₱", "1,087.38"] on the same visual band
+      val currencyMergedCells = mergeAdjacentCurrencyCells(rawCells, medianHeight)
+
+      // Then build logical columns split at wider horizontal gaps
       val columns = mutableListOf<String>()
-      val currentCol = StringBuilder()
-      var prevRight: Int? = null
-      for (item in ordered) {
-        val t = item.text.trim()
-        if (t.isEmpty()) continue
-        val box = item.box
-        val gap = if (prevRight != null && box != null) box.left - prevRight else 0
-        if (currentCol.isEmpty()) {
-          currentCol.append(t)
-        } else if (gap > medianHeight * 0.9f) {
-          columns.add(currentCol.toString().trim())
-          currentCol.clear()
-          currentCol.append(t)
+      val finalCells = mutableListOf<OcrCell>()
+      var currentBuilder: OcrCell? = null
+
+      for (cell in currencyMergedCells) {
+        val prev = currentBuilder
+        if (prev == null) {
+          currentBuilder = cell
         } else {
-          currentCol.append(' ').append(t)
+          val gap = cell.left - prev.right
+          if (gap > medianHeight * 0.9f) {
+            columns.add(prev.text)
+            finalCells.add(prev)
+            currentBuilder = cell
+          } else {
+            val combinedConf = averageConfidences(listOfNotNull(prev.confidence, cell.confidence))
+            currentBuilder = OcrCell(
+              text = "${prev.text} ${cell.text}".trim(),
+              left = min(prev.left, cell.left),
+              top = min(prev.top, cell.top),
+              right = max(prev.right, cell.right),
+              bottom = max(prev.bottom, cell.bottom),
+              confidence = combinedConf,
+              blockId = prev.blockId ?: cell.blockId
+            )
+          }
         }
-        prevRight = box?.right ?: prevRight
       }
-      if (currentCol.isNotEmpty()) {
-        columns.add(currentCol.toString().trim())
+      if (currentBuilder != null) {
+        columns.add(currentBuilder.text)
+        finalCells.add(currentBuilder)
       }
+
       val rowText = columns.joinToString(" | ")
-      val boxes = ordered.mapNotNull { it.box }
+      val sourceLines = ordered.map { it.sourceLine }.distinct()
+      val boxes = finalCells
+      val avgConf = averageConfidences(sourceLines.mapNotNull { it.confidence })
       NormalizedOcrRow(
         text = rowText,
         columns = columns.ifEmpty { listOf(rowText) },
-        lines = ordered,
+        lines = sourceLines,
         top = boxes.minOfOrNull { it.top } ?: 0,
         bottom = boxes.maxOfOrNull { it.bottom } ?: 0,
         left = boxes.minOfOrNull { it.left } ?: 0,
         right = boxes.maxOfOrNull { it.right } ?: 0,
-        screenshotIndex = page.screenshotIndex
+        screenshotIndex = page.screenshotIndex,
+        cells = finalCells,
+        averageConfidence = avgConf
       )
     }.sortedWith(compareBy<NormalizedOcrRow> { it.top }.thenBy { it.left })
   }
 
-  private fun sanitizeOcrGlyphs(raw: String): String =
+  private data class LinePiece(
+    val text: String,
+    val box: OcrBoundingBox?,
+    val sourceLine: OcrLine
+  )
+
+  private fun filterSystemChromeLines(lines: List<OcrLine>, pageHeight: Int): List<OcrLine> {
+    if (pageHeight < 400 || lines.size < 4) return lines
+    val topCutoff = (pageHeight * 0.048f).toInt()
+    val bottomCutoff = (pageHeight * 0.952f).toInt()
+
+    return lines.filter { line ->
+      val box = line.box ?: return@filter true
+      val inChromeBand = box.bottom <= topCutoff || box.top >= bottomCutoff
+      if (!inChromeBand) return@filter true
+
+      val trimmed = line.text.trim()
+      if (financialGuardRegex.containsMatchIn(trimmed)) return@filter true
+
+      val tokens = trimmed.split(Regex("""\s+""")).filter { it.isNotBlank() }
+      val allChromeTokens = tokens.isNotEmpty() && tokens.all { token ->
+        systemChromeClockOrSignalRegex.matches(token)
+      }
+      !allChromeTokens
+    }
+  }
+
+  private fun splitWideMultiColumnLines(
+    lines: List<OcrLine>,
+    medianHeight: Int
+  ): List<LinePiece> {
+    val result = mutableListOf<LinePiece>()
+    for (line in lines) {
+      val elements = line.elements.filter { it.text.isNotBlank() && it.box != null }
+      if (elements.size < 2) {
+        result.add(LinePiece(line.text, line.box, line))
+        continue
+      }
+      val sortedEls = elements.sortedBy { it.box!!.left }
+      val subGroups = mutableListOf<MutableList<OcrElement>>()
+      for (el in sortedEls) {
+        val current = subGroups.lastOrNull()
+        val prevBox = current?.lastOrNull()?.box
+        val gap = if (prevBox != null && el.box != null) el.box.left - prevBox.right else 0
+        if (current == null || gap > medianHeight * 1.15f) {
+          subGroups.add(mutableListOf(el))
+        } else {
+          current.add(el)
+        }
+      }
+      if (subGroups.size <= 1) {
+        result.add(LinePiece(line.text, line.box, line))
+      } else {
+        for (group in subGroups) {
+          val boxes = group.mapNotNull { it.box }
+          val joinedText = group.joinToString(" ") { it.text.trim() }.trim()
+          val box = if (boxes.isNotEmpty()) {
+            OcrBoundingBox(
+              left = boxes.minOf { it.left },
+              top = boxes.minOf { it.top },
+              right = boxes.maxOf { it.right },
+              bottom = boxes.maxOf { it.bottom }
+            )
+          } else line.box
+          result.add(LinePiece(joinedText, box, line))
+        }
+      }
+    }
+    return result
+  }
+
+  private fun mergeAdjacentCurrencyCells(cells: List<OcrCell>, medianHeight: Int): List<OcrCell> {
+    if (cells.size < 2) return cells
+    val result = mutableListOf<OcrCell>()
+    var i = 0
+    while (i < cells.size) {
+      val curr = cells[i]
+      val next = cells.getOrNull(i + 1)
+      if (next != null &&
+        standaloneCurrencyPrefixRegex.matches(curr.text.trim()) &&
+        startsWithMoneyDigitsRegex.containsMatchIn(next.text.trim()) &&
+        (next.left - curr.right) <= medianHeight * 3.5f
+      ) {
+        val prefix = curr.text.trim()
+        val numText = next.text.trim()
+        val mergedText = if (prefix.length <= 2 || prefix.equals("PHP", ignoreCase = true)) {
+          "$prefix$numText"
+        } else {
+          "$prefix $numText"
+        }
+        result.add(
+          OcrCell(
+            text = mergedText,
+            left = min(curr.left, next.left),
+            top = min(curr.top, next.top),
+            right = max(curr.right, next.right),
+            bottom = max(curr.bottom, next.bottom),
+            confidence = averageConfidences(listOfNotNull(curr.confidence, next.confidence)),
+            blockId = curr.blockId ?: next.blockId
+          )
+        )
+        i += 2
+      } else {
+        result.add(curr)
+        i++
+      }
+    }
+    return result
+  }
+
+  private fun mergeStandaloneCurrencyColumns(cols: List<String>): List<String> {
+    if (cols.size < 2) return cols
+    val out = mutableListOf<String>()
+    var i = 0
+    while (i < cols.size) {
+      val curr = cols[i]
+      val next = cols.getOrNull(i + 1)
+      if (next != null &&
+        standaloneCurrencyPrefixRegex.matches(curr) &&
+        startsWithMoneyDigitsRegex.containsMatchIn(next)
+      ) {
+        out.add("$curr$next")
+        i += 2
+      } else {
+        out.add(curr)
+        i++
+      }
+    }
+    return out
+  }
+
+  private fun averageConfidences(values: List<Float>): Float? =
+    if (values.isEmpty()) null else (values.sum() / values.size.toFloat()).coerceIn(0f, 1f)
+
+  internal fun sanitizeOcrGlyphs(raw: String): String =
     raw
       .replace('\u00A0', ' ')
       .replace('\u2007', ' ')
@@ -133,4 +377,7 @@ object OcrLayoutNormalizer {
       .replace('\u202F', ' ')
       .replace('\u0131', 'i')
       .replace('\u0130', 'I')
+      .replace('\u2013', '-')
+      .replace('\u2014', '-')
+      .replace('\u2212', '-')
 }

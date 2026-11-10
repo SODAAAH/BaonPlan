@@ -12,7 +12,7 @@ BaonPlan is intentionally engineered as a **100% offline** native Android applic
 
 ## Supported Versions
 
-Security and financial-integrity fixes are applied to the latest release on the `main` branch (`v1.2.0+`).
+Security and financial-integrity fixes are applied to the latest release on the `main` branch (`v1.3.0+`).
 
 ## Reporting a Vulnerability or Financial Calculation Bug
 

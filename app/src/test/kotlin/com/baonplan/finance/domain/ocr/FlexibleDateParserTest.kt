@@ -73,7 +73,8 @@ class FlexibleDateParserTest {
     )
     assertNotNull(resolvedAmbiguous)
     assertEquals("2026-05-04", resolvedAmbiguous!!.isoDate)
-    assertEquals(ExtractionConfidence.NEEDS_VERIFICATION, resolvedAmbiguous.confidence)
+    assertEquals(ExtractionConfidence.MEDIUM, resolvedAmbiguous.confidence)
+    assertTrue(resolvedAmbiguous.isAmbiguousNumericOrder)
 
     val pureAmbiguous = FlexibleDateParser.parseSingleDate(
       "04/05/2026",
@@ -81,12 +82,32 @@ class FlexibleDateParserTest {
       referenceDate = refDate
     )
     assertNotNull(pureAmbiguous)
-    assertEquals(ExtractionConfidence.NEEDS_VERIFICATION, pureAmbiguous!!.confidence)
+    assertEquals(ExtractionConfidence.MEDIUM, pureAmbiguous!!.confidence)
+    assertTrue(pureAmbiguous.isAmbiguousNumericOrder)
     assertNotNull(pureAmbiguous.note)
+
+    val dotNumeric = FlexibleDateParser.parseSingleDate(
+      "11.16.2026",
+      numericOrder = NumericDateOrder.AMBIGUOUS,
+      referenceDate = refDate
+    )
+    assertNotNull(dotNumeric)
+    assertEquals("2026-11-16", dotNumeric!!.isoDate)
+    assertEquals(ExtractionConfidence.HIGH, dotNumeric.confidence)
+    assertTrue(!dotNumeric.isAmbiguousNumericOrder)
   }
 
   @Test
-  fun yearlessDatesAlwaysRequireVerificationNeverMarkedHigh() {
+  fun parsesShortApostropheYearWithMediumConfidenceAndYearlessDatesSafely() {
+    val shortYear = FlexibleDateParser.parseSingleDate(
+      "Nov 16, '26",
+      referenceDate = refDate
+    )
+    assertNotNull(shortYear)
+    assertEquals("2026-11-16", shortYear!!.isoDate)
+    assertEquals(ExtractionConfidence.MEDIUM, shortYear.confidence)
+    assertNotNull(shortYear.note)
+
     val yearless = FlexibleDateParser.parseSingleDate(
       "Nov 16",
       contextYear = 2026,
@@ -95,7 +116,7 @@ class FlexibleDateParserTest {
     assertNotNull(yearless)
     assertEquals("2026-11-16", yearless!!.isoDate)
     assertTrue(yearless.isYearInferred)
-    assertEquals(ExtractionConfidence.NEEDS_VERIFICATION, yearless.confidence)
+    assertEquals(ExtractionConfidence.MEDIUM, yearless.confidence)
 
     val dayMonthYearless = FlexibleDateParser.parseSingleDate(
       "19 Mar",
@@ -104,7 +125,7 @@ class FlexibleDateParserTest {
     )
     assertNotNull(dayMonthYearless)
     assertEquals("2026-03-19", dayMonthYearless!!.isoDate)
-    assertEquals(ExtractionConfidence.NEEDS_VERIFICATION, dayMonthYearless.confidence)
+    assertEquals(ExtractionConfidence.MEDIUM, dayMonthYearless.confidence)
   }
 
   @Test

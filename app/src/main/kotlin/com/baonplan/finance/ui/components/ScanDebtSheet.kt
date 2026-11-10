@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +41,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -62,13 +65,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.data.ocr.ImageScanPreprocessor
 import com.baonplan.finance.domain.ocr.DebtImportDraft
+import com.baonplan.finance.domain.ocr.ImportSeverity
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.ui.BaonPlanViewModel
 import com.baonplan.finance.ui.ScanDebtUiState
 import com.baonplan.finance.ui.StagedScreenshotUiItem
 import com.baonplan.finance.ui.theme.LocalBaonColors
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ScanDebtSheet(
   scanState: ScanDebtUiState,
@@ -79,6 +83,10 @@ fun ScanDebtSheet(
   onRotateItem: (String) -> Unit,
   onRemoveItem: (String) -> Unit,
   onAnalyze: () -> Unit,
+  onCombineAllIntoOneLoan: () -> Unit = {},
+  onSplitIntoSeparateLoans: () -> Unit = {},
+  onResetAutoGrouping: () -> Unit = {},
+  onAssignScreenshotToGroup: (Int, Int) -> Unit = { _, _ -> },
   onSelectCandidateDraft: (DebtImportDraft) -> Unit,
   onEnterManually: () -> Unit,
   onDismiss: () -> Unit
@@ -267,14 +275,109 @@ fun ScanDebtSheet(
         }
       }
 
-      if (scanState.candidateDrafts.size > 1) {
-        InfoCallout(
-          icon = Icons.Outlined.AccountBalance,
-          title = "${scanState.candidateDrafts.size} separate loans detected",
-          body = scanState.multipleLoansExplanation
-            ?: "Review each loan separately so balances and schedules never mix.",
-          tone = BadgeTone.PRIMARY
-        )
+      if (scanState.extractedPages.size >= 2 && scanState.candidateDrafts.isNotEmpty()) {
+        val uniqueGroupCount = scanState.groupAssignments.values.distinct().size.coerceAtLeast(1)
+        val groupLabels = listOf("Loan A", "Loan B", "Loan C", "Loan D", "Loan E", "Loan F")
+        val allSameGroup = uniqueGroupCount == 1
+        val allSeparate = uniqueGroupCount >= scanState.extractedPages.size
+
+        BaonCard(contentPadding = 14.dp) {
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+              text = "Confirm screenshot grouping (${scanState.extractedPages.size} pages)",
+              style = MaterialTheme.typography.titleSmall,
+              color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+              text = "Combine pages from the same loan into one record, or separate distinct loans.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+              FilterChip(
+                selected = allSameGroup,
+                onClick = onCombineAllIntoOneLoan,
+                label = { Text("Same loan") }
+              )
+              FilterChip(
+                selected = allSeparate,
+                onClick = onSplitIntoSeparateLoans,
+                label = { Text("Separate loans") }
+              )
+              FilterChip(
+                selected = false,
+                onClick = onResetAutoGrouping,
+                label = { Text("Auto-detect") }
+              )
+            }
+
+            scanState.extractedPages.sortedBy { it.screenshotIndex }.forEach { page ->
+              val currentGroup = scanState.groupAssignments[page.screenshotIndex] ?: 0
+              val snippetBal = page.outstandingBalanceCents.value
+                ?: page.amountCurrentlyDueCents.value
+                ?: page.originalPrincipalCents.value
+                ?: page.installmentAmountCents.value
+              val labelPreview = page.lender.value
+                ?: page.loanName.value
+                ?: "Page"
+              val amtPreview = snippetBal?.let { " · ${MoneyFormatter.formatPeso(it)}" }.orEmpty()
+              val rowCountPreview = page.installmentRows.size.takeIf { it > 0 }?.let { " · $it rows" }.orEmpty()
+
+              Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                  text = "#${page.screenshotIndex + 1} · $labelPreview$amtPreview$rowCountPreview",
+                  style = MaterialTheme.typography.bodySmall,
+                  fontWeight = FontWeight.Medium,
+                  color = MaterialTheme.colorScheme.onSurface,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis
+                )
+                FlowRow(
+                  horizontalArrangement = Arrangement.spacedBy(6.dp),
+                  verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                  val choicesCount = (uniqueGroupCount + 1).coerceAtMost(scanState.extractedPages.size)
+                  for (g in 0 until choicesCount) {
+                    val label = if (g == uniqueGroupCount) {
+                      "+ ${groupLabels.getOrElse(g) { "Loan ${g + 1}" }}"
+                    } else {
+                      groupLabels.getOrElse(g) { "Loan ${g + 1}" }
+                    }
+                    FilterChip(
+                      selected = currentGroup == g,
+                      onClick = { onAssignScreenshotToGroup(page.screenshotIndex, g) },
+                      label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (scanState.candidateDrafts.isNotEmpty()) {
+        if (scanState.candidateDrafts.size > 1) {
+          InfoCallout(
+            icon = Icons.Outlined.AccountBalance,
+            title = "${scanState.candidateDrafts.size} separate loans ready for review",
+            body = scanState.multipleLoansExplanation
+              ?: "Review each loan separately so balances and schedules never mix.",
+            tone = BadgeTone.PRIMARY
+          )
+        } else if (scanState.extractedPages.size >= 2) {
+          val draft = scanState.candidateDrafts.single()
+          val mergedPages = draft.sourceScreenshotIndices.joinToString(", ") { "#${it + 1}" }
+          InfoCallout(
+            icon = Icons.Outlined.AccountBalance,
+            title = "Combined screenshots $mergedPages into 1 loan",
+            body = "Tap Review & save to inspect extracted, calculated, and estimated values before saving.",
+            tone = BadgeTone.POSITIVE
+          )
+        }
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
           scanState.candidateDrafts.forEachIndexed { idx, draft ->
@@ -285,8 +388,10 @@ fun ScanDebtSheet(
             val balCents = draft.outstandingBalanceCents.value
               ?: draft.remainingInstallmentTotalCents.value
               ?: draft.calculatedUnpaidScheduleSumCents.value
+              ?: draft.amountCurrentlyDueCents.value
             val balanceText = balCents?.let { MoneyFormatter.formatPeso(it) } ?: "Balance not detected"
             val pagesText = draft.sourceScreenshotIndices.joinToString(", ") { "#${it + 1}" }
+            val warningCount = draft.validationIssues.count { it.severity == ImportSeverity.WARNING }
 
             BaonCard(contentPadding = 14.dp) {
               Row(
@@ -304,7 +409,8 @@ fun ScanDebtSheet(
                   )
                   Spacer(modifier = Modifier.height(2.dp))
                   Text(
-                    text = "$balanceText · From $pagesText",
+                    text = "$balanceText · From $pagesText" +
+                      if (warningCount > 0) " · $warningCount check(s)" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -328,7 +434,7 @@ fun ScanDebtSheet(
         }
       }
 
-      if (scanState.candidateDrafts.size > 1) {
+      if (scanState.candidateDrafts.isNotEmpty()) {
         val anySaved = scanState.completedCandidateIds.isNotEmpty()
         Row(
           modifier = Modifier.fillMaxWidth().padding(top = 4.dp),

@@ -41,6 +41,8 @@ import com.baonplan.finance.domain.model.WeeklyDuesReadiness
 import com.baonplan.finance.domain.model.WeeklyTrendPoint
 import com.baonplan.finance.domain.ocr.DebtImportDraft
 import com.baonplan.finance.domain.ocr.ScanAnalysisOutcome
+import com.baonplan.finance.domain.ocr.ScannerCorrectionLearner
+import com.baonplan.finance.domain.ocr.SingleScreenshotExtraction
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import com.baonplan.finance.notifications.NotificationHelper
@@ -77,6 +79,8 @@ data class ScanDebtUiState(
   val isSavingDraft: Boolean = false,
   val errorMessage: String? = null,
   val partialWarnings: List<String> = emptyList(),
+  val extractedPages: List<SingleScreenshotExtraction> = emptyList(),
+  val groupAssignments: Map<Int, Int> = emptyMap(),
   val candidateDrafts: List<DebtImportDraft> = emptyList(),
   val multipleLoansExplanation: String? = null,
   val activeDraftForReview: DebtImportDraft? = null,
@@ -727,6 +731,7 @@ class BaonPlanViewModel(
     val items = _scanState.value.stagedItems
     val pendingCam = pendingCameraRawFile
     pendingCameraRawFile = null
+    DebtScanCoordinator.clearSessionCache()
     _scanState.value = ScanDebtUiState()
     viewModelScope.launch(Dispatchers.IO) {
       items.forEach { ImageScanPreprocessor.deleteTempFile(it.tempFile) }
@@ -776,6 +781,8 @@ class BaonPlanViewModel(
         state.copy(
           stagedItems = merged,
           isImportingImages = false,
+          extractedPages = emptyList(),
+          groupAssignments = emptyMap(),
           candidateDrafts = emptyList(),
           multipleLoansExplanation = null,
           activeDraftForReview = null,
@@ -825,6 +832,8 @@ class BaonPlanViewModel(
           state.copy(
             stagedItems = reindexStaged(state.stagedItems + added),
             isImportingImages = false,
+            extractedPages = emptyList(),
+            groupAssignments = emptyMap(),
             candidateDrafts = emptyList(),
             multipleLoansExplanation = null,
             activeDraftForReview = null,
@@ -851,6 +860,8 @@ class BaonPlanViewModel(
       }
       state.copy(
         stagedItems = updated,
+        extractedPages = emptyList(),
+        groupAssignments = emptyMap(),
         candidateDrafts = emptyList(),
         multipleLoansExplanation = null,
         errorMessage = null
@@ -869,6 +880,8 @@ class BaonPlanViewModel(
       val remaining = reindexStaged(state.stagedItems.filterNot { it.id == itemId })
       state.copy(
         stagedItems = remaining,
+        extractedPages = emptyList(),
+        groupAssignments = emptyMap(),
         candidateDrafts = emptyList(),
         multipleLoansExplanation = null,
         errorMessage = null,
@@ -887,6 +900,8 @@ class BaonPlanViewModel(
           isAnalyzing = true,
           errorMessage = null,
           partialWarnings = emptyList(),
+          extractedPages = emptyList(),
+          groupAssignments = emptyMap(),
           candidateDrafts = emptyList(),
           multipleLoansExplanation = null,
           activeDraftForReview = null,
@@ -906,7 +921,8 @@ class BaonPlanViewModel(
         inputs = inputs,
         existingDebts = ledgerState.debts,
         existingInstallments = ledgerState.installments,
-        referenceDate = ledgerState.today
+        referenceDate = ledgerState.today,
+        learnedPrefs = ledgerState.preferences.learnedScannerPreferences
       )
 
       when (val outcome = report.outcome) {
@@ -915,27 +931,49 @@ class BaonPlanViewModel(
             it.copy(
               isAnalyzing = false,
               errorMessage = outcome.userMessage,
-              partialWarnings = report.partialImageWarnings
+              partialWarnings = report.partialImageWarnings,
+              extractedPages = report.extractedPages
             )
           }
         }
         is ScanAnalysisOutcome.SingleLoan -> {
-          _scanState.update {
-            it.copy(
-              isSheetOpen = false,
-              isAnalyzing = false,
-              partialWarnings = report.partialImageWarnings,
-              candidateDrafts = listOf(outcome.draft),
-              activeDraftForReview = outcome.draft
-            )
+          val assignments = report.extractedPages.associate { it.screenshotIndex to 0 }
+          if (report.extractedPages.size <= 1) {
+            _scanState.update {
+              it.copy(
+                isSheetOpen = false,
+                isAnalyzing = false,
+                partialWarnings = report.partialImageWarnings,
+                extractedPages = report.extractedPages,
+                groupAssignments = assignments,
+                candidateDrafts = listOf(outcome.draft),
+                activeDraftForReview = outcome.draft
+              )
+            }
+          } else {
+            _scanState.update {
+              it.copy(
+                isSheetOpen = true,
+                isAnalyzing = false,
+                partialWarnings = report.partialImageWarnings,
+                extractedPages = report.extractedPages,
+                groupAssignments = assignments,
+                candidateDrafts = listOf(outcome.draft),
+                multipleLoansExplanation = null,
+                activeDraftForReview = null
+              )
+            }
           }
         }
         is ScanAnalysisOutcome.MultipleLoans -> {
+          val assignments = buildAssignmentsFromDrafts(outcome.drafts, report.extractedPages)
           _scanState.update {
             it.copy(
               isSheetOpen = true,
               isAnalyzing = false,
               partialWarnings = report.partialImageWarnings,
+              extractedPages = report.extractedPages,
+              groupAssignments = assignments,
               candidateDrafts = outcome.drafts,
               multipleLoansExplanation = outcome.explanation,
               activeDraftForReview = null
@@ -944,6 +982,136 @@ class BaonPlanViewModel(
         }
       }
     }
+  }
+
+  fun combineAllScreenshotsIntoOneLoan() {
+    val pages = _scanState.value.extractedPages
+    if (pages.size < 2) return
+    val assignments = pages.associate { it.screenshotIndex to 0 }
+    applyUserScreenshotGrouping(assignments)
+  }
+
+  fun splitScreenshotsIntoSeparateLoans() {
+    val pages = _scanState.value.extractedPages
+    if (pages.size < 2) return
+    val assignments = pages.mapIndexed { idx, p -> p.screenshotIndex to idx }.toMap()
+    applyUserScreenshotGrouping(assignments)
+  }
+
+  fun resetAutoScreenshotGrouping() {
+    val pages = _scanState.value.extractedPages
+    if (pages.isEmpty()) return
+    val ledger = uiState.value
+    when (val outcome = DebtScanCoordinator.remergeAuto(pages, ledger.debts, ledger.installments)) {
+      is ScanAnalysisOutcome.SingleLoan -> {
+        val assignments = pages.associate { it.screenshotIndex to 0 }
+        _scanState.update {
+          it.copy(
+            groupAssignments = assignments,
+            candidateDrafts = listOf(outcome.draft),
+            multipleLoansExplanation = null,
+            completedCandidateIds = emptySet()
+          )
+        }
+      }
+      is ScanAnalysisOutcome.MultipleLoans -> {
+        val assignments = buildAssignmentsFromDrafts(outcome.drafts, pages)
+        _scanState.update {
+          it.copy(
+            groupAssignments = assignments,
+            candidateDrafts = outcome.drafts,
+            multipleLoansExplanation = outcome.explanation,
+            completedCandidateIds = emptySet()
+          )
+        }
+      }
+      is ScanAnalysisOutcome.Failed -> {
+        _scanState.update { it.copy(errorMessage = outcome.userMessage) }
+      }
+    }
+  }
+
+  fun assignScreenshotToGroup(screenshotIndex: Int, targetGroupIndex: Int) {
+    val state = _scanState.value
+    if (state.extractedPages.size < 2) return
+    val updated = state.groupAssignments.toMutableMap()
+    updated[screenshotIndex] = targetGroupIndex.coerceAtLeast(0)
+    // Compact group indices cleanly (0, 1, 2...) while preserving relative ordering
+    val distinctOrder = updated.entries
+      .sortedBy { it.key }
+      .map { it.value }
+      .distinct()
+    val remap = distinctOrder.mapIndexed { compactIdx, oldIdx -> oldIdx to compactIdx }.toMap()
+    val compacted = updated.mapValues { (_, grp) -> remap[grp] ?: 0 }
+    applyUserScreenshotGrouping(compacted)
+  }
+
+  private fun applyUserScreenshotGrouping(assignments: Map<Int, Int>) {
+    val state = _scanState.value
+    val pages = state.extractedPages
+    if (pages.isEmpty()) return
+
+    val groupedIndices = pages
+      .map { it.screenshotIndex }
+      .groupBy { assignments[it] ?: 0 }
+      .toSortedMap()
+      .values
+      .toList()
+
+    val ledger = uiState.value
+    when (
+      val outcome = DebtScanCoordinator.remergeWithUserGroups(
+        pages = pages,
+        groupedIndices = groupedIndices,
+        existingDebts = ledger.debts,
+        existingInstallments = ledger.installments
+      )
+    ) {
+      is ScanAnalysisOutcome.SingleLoan -> {
+        _scanState.update {
+          it.copy(
+            groupAssignments = assignments,
+            candidateDrafts = listOf(outcome.draft),
+            multipleLoansExplanation = null,
+            completedCandidateIds = emptySet(),
+            errorMessage = null
+          )
+        }
+      }
+      is ScanAnalysisOutcome.MultipleLoans -> {
+        val newAssignments = buildAssignmentsFromDrafts(outcome.drafts, pages)
+        _scanState.update {
+          it.copy(
+            groupAssignments = newAssignments,
+            candidateDrafts = outcome.drafts,
+            multipleLoansExplanation = outcome.explanation,
+            completedCandidateIds = emptySet(),
+            errorMessage = null
+          )
+        }
+      }
+      is ScanAnalysisOutcome.Failed -> {
+        _scanState.update { it.copy(errorMessage = outcome.userMessage) }
+      }
+    }
+  }
+
+  private fun buildAssignmentsFromDrafts(
+    drafts: List<DebtImportDraft>,
+    pages: List<SingleScreenshotExtraction>
+  ): Map<Int, Int> {
+    val map = mutableMapOf<Int, Int>()
+    drafts.forEachIndexed { grpIdx, draft ->
+      draft.sourceScreenshotIndices.forEach { sIdx ->
+        map[sIdx] = grpIdx
+      }
+    }
+    pages.forEach { p ->
+      if (p.screenshotIndex !in map) {
+        map[p.screenshotIndex] = (map.values.maxOrNull() ?: -1) + 1
+      }
+    }
+    return map
   }
 
   fun selectCandidateDraftForReview(draft: DebtImportDraft) {
@@ -957,8 +1125,8 @@ class BaonPlanViewModel(
 
   fun dismissActiveDraftReview(context: Context) {
     val state = _scanState.value
-    if (state.candidateDrafts.size > 1) {
-      // Return to multi-loan selector inside ScanDebtSheet without throwing away remaining scanned loans
+    if (state.candidateDrafts.size > 1 || state.extractedPages.size >= 2) {
+      // Return to screenshot grouping / multi-loan selector inside ScanDebtSheet
       _scanState.update {
         it.copy(
           isSheetOpen = true,
@@ -1005,6 +1173,16 @@ class BaonPlanViewModel(
           attachmentSources = retainedSources
         )
       }.onSuccess {
+        val currentLearned = uiState.value.preferences.learnedScannerPreferences
+        val (updatedLearned, didLearn) = ScannerCorrectionLearner.learnFromSave(
+          currentPrefs = currentLearned,
+          initialDraft = draft,
+          confirmedDebt = confirmedDebt
+        )
+        if (didLearn) {
+          runCatching { repository.setLearnedScannerPreferences(updatedLearned) }
+        }
+
         val updatedDone = _scanState.value.completedCandidateIds + draft.candidateId
         val hasMorePending = _scanState.value.candidateDrafts.any { it.candidateId !in updatedDone }
         if (hasMorePending && _scanState.value.candidateDrafts.size > 1) {
@@ -1030,6 +1208,7 @@ class BaonPlanViewModel(
 
   override fun onCleared() {
     super.onCleared()
+    DebtScanCoordinator.clearSessionCache()
     _scanState.value.stagedItems.forEach { ImageScanPreprocessor.deleteTempFile(it.tempFile) }
     ImageScanPreprocessor.deleteTempFile(pendingCameraRawFile)
   }

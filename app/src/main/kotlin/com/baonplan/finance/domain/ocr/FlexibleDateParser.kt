@@ -11,6 +11,7 @@ data class ParsedDateMatch(
   val rawText: String,
   val confidence: ExtractionConfidence,
   val isYearInferred: Boolean = false,
+  val isAmbiguousNumericOrder: Boolean = false,
   val note: String? = null
 )
 
@@ -41,31 +42,32 @@ object FlexibleDateParser {
     "dec" to 12, "december" to 12
   )
 
-  private val isoPattern = Regex("""\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b""")
+  // "2026-11-16", "2026/11/16", "2026.11.16"
+  private val isoPattern = Regex("""\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b""")
 
-  // "Nov 16, 2026" | "Feb 27,2027" | "November 16th 2026" | "Nov. 16, 2026"
+  // "Nov 16, 2026" | "Feb 27,2027" | "November 16th 2026" | "Nov. 16, '26" | "Nov16, 2026"
   private val monthFirstNamedWithYear = Regex(
-    """\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.\-\s]+|(?=\d))(\d{1,2})(?:st|nd|rd|th)?(?:[,\.\-/]\s*|\s+)(20\d{2})\b""",
+    """\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:[.\-\s]+|(?=\d))(\d{1,2})(?:st|nd|rd|th)?(?:[,\.\-/]\s*|\s+)(20\d{2}|'\d{2})\b""",
     RegexOption.IGNORE_CASE
   )
 
-  // "16 Nov 2026" | "16-Nov-2026" | "16 Nov,2026" | "16th November, 2026"
+  // "16 Nov 2026" | "16-Nov-2026" | "16 Nov,2026" | "16th November, '26"
   private val dayFirstNamedWithYear = Regex(
-    """\b(\d{1,2})(?:st|nd|rd|th)?(?:[\s\-/]+|(?=[A-Za-z]))(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?(?:[,\.\-/]\s*|\s+)(20\d{2})\b""",
+    """\b(\d{1,2})(?:st|nd|rd|th)?(?:[\s\-/]+|(?=[A-Za-z]))(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?(?:[,\.\-/]\s*|\s+)(20\d{2}|'\d{2})\b""",
     RegexOption.IGNORE_CASE
   )
 
-  // "11/16/2026" | "16/11/2026" | "11-16-26"
-  private val slashedNumericPattern = Regex("""\b(\d{1,2})([/\-])(\d{1,2})\2(20\d{2}|\d{2})\b""")
+  // "11/16/2026" | "16/11/2026" | "11-16-26" | "11.16.2026"
+  private val slashedNumericPattern = Regex("""\b(\d{1,2})([/\-.])(\d{1,2})\2(20\d{2}|\d{2})\b""")
 
-  // Yearless: "Nov 16" | "16 Nov" (parsed cautiously with NEEDS_VERIFICATION)
+  // Yearless: "Nov 16" | "16 Nov" (parsed cautiously with MEDIUM confidence)
   private val monthFirstYearless = Regex(
-    """\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b(?![,\s\-]+\d{2,4})""",
+    """\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\.?\s+|(?=\d))(\d{1,2})(?:st|nd|rd|th)?\b(?![,\s\-']+\d{2,4})""",
     RegexOption.IGNORE_CASE
   )
 
   private val dayFirstYearless = Regex(
-    """\b(\d{1,2})(?:st|nd|rd|th)?[\s\-]+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\b(?![,\s\-]+\d{2,4})""",
+    """\b(\d{1,2})(?:st|nd|rd|th)?(?:[\s\-]+|(?=[A-Za-z]))(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\b(?![,\s\-']+\d{2,4})""",
     RegexOption.IGNORE_CASE
   )
 
@@ -128,13 +130,17 @@ object FlexibleDateParser {
       if (overlapsExisting(m.range)) continue
       val month = monthMap[m.groupValues[1].lowercase(Locale.US)] ?: continue
       val day = m.groupValues[2].toIntOrNull() ?: continue
-      val year = m.groupValues[3].toIntOrNull() ?: continue
+      val rawYr = m.groupValues[3].removePrefix("'")
+      val yearNum = rawYr.toIntOrNull() ?: continue
+      val isShortYr = rawYr.length == 2
+      val year = if (isShortYr) 2000 + yearNum else yearNum
       val date = safeLocalDate(year, month, day) ?: continue
       found.add(
         m.range to ParsedDateMatch(
           isoDate = ManilaTime.formatIso(date),
           rawText = m.value,
-          confidence = ExtractionConfidence.HIGH
+          confidence = if (isShortYr) ExtractionConfidence.MEDIUM else ExtractionConfidence.HIGH,
+          note = if (isShortYr) "Short year in \"${m.value}\" — verify" else null
         )
       )
     }
@@ -144,18 +150,22 @@ object FlexibleDateParser {
       if (overlapsExisting(m.range)) continue
       val day = m.groupValues[1].toIntOrNull() ?: continue
       val month = monthMap[m.groupValues[2].lowercase(Locale.US)] ?: continue
-      val year = m.groupValues[3].toIntOrNull() ?: continue
+      val rawYr = m.groupValues[3].removePrefix("'")
+      val yearNum = rawYr.toIntOrNull() ?: continue
+      val isShortYr = rawYr.length == 2
+      val year = if (isShortYr) 2000 + yearNum else yearNum
       val date = safeLocalDate(year, month, day) ?: continue
       found.add(
         m.range to ParsedDateMatch(
           isoDate = ManilaTime.formatIso(date),
           rawText = m.value,
-          confidence = ExtractionConfidence.HIGH
+          confidence = if (isShortYr) ExtractionConfidence.MEDIUM else ExtractionConfidence.HIGH,
+          note = if (isShortYr) "Short year in \"${m.value}\" — verify" else null
         )
       )
     }
 
-    // 4. Slashed / dashed numeric dates
+    // 4. Slashed / dashed / dotted numeric dates
     for (m in slashedNumericPattern.findAll(text)) {
       if (overlapsExisting(m.range)) continue
       val a = m.groupValues[1].toIntOrNull() ?: continue
@@ -164,28 +174,30 @@ object FlexibleDateParser {
       val year = if (yearRaw < 100) 2000 + yearRaw else yearRaw
       val isTwoDigitYear = m.groupValues[4].length == 2
 
-      val resolved: Pair<LocalDate, ExtractionConfidence>? = when {
+      val resolved: Triple<LocalDate, ExtractionConfidence, Boolean>? = when {
         a in 1..12 && b in 13..31 -> safeLocalDate(year, a, b)?.let {
-          it to if (isTwoDigitYear) ExtractionConfidence.NEEDS_VERIFICATION else ExtractionConfidence.HIGH
+          Triple(it, if (isTwoDigitYear) ExtractionConfidence.MEDIUM else ExtractionConfidence.HIGH, false)
         }
         b in 1..12 && a in 13..31 -> safeLocalDate(year, b, a)?.let {
-          it to if (isTwoDigitYear) ExtractionConfidence.NEEDS_VERIFICATION else ExtractionConfidence.HIGH
+          Triple(it, if (isTwoDigitYear) ExtractionConfidence.MEDIUM else ExtractionConfidence.HIGH, false)
         }
         a in 1..12 && b in 1..12 -> {
           when (numericOrder) {
             NumericDateOrder.DAY_FIRST -> safeLocalDate(year, b, a)?.let {
-              it to ExtractionConfidence.NEEDS_VERIFICATION
+              Triple(it, ExtractionConfidence.MEDIUM, a != b)
             }
             NumericDateOrder.MONTH_FIRST -> safeLocalDate(year, a, b)?.let {
-              it to ExtractionConfidence.NEEDS_VERIFICATION
+              Triple(it, ExtractionConfidence.MEDIUM, a != b)
             }
             NumericDateOrder.AMBIGUOUS -> {
               if (a == b) {
                 safeLocalDate(year, a, b)?.let {
-                  it to if (isTwoDigitYear) ExtractionConfidence.NEEDS_VERIFICATION else ExtractionConfidence.HIGH
+                  Triple(it, if (isTwoDigitYear) ExtractionConfidence.MEDIUM else ExtractionConfidence.HIGH, false)
                 }
               } else {
-                safeLocalDate(year, a, b)?.let { it to ExtractionConfidence.NEEDS_VERIFICATION }
+                safeLocalDate(year, a, b)?.let {
+                  Triple(it, ExtractionConfidence.MEDIUM, true)
+                }
               }
             }
           }
@@ -193,17 +205,18 @@ object FlexibleDateParser {
         else -> null
       }
       if (resolved != null) {
+        val (date, conf, ambiguousOrder) = resolved
         val note = when {
-          resolved.second == ExtractionConfidence.NEEDS_VERIFICATION && a != b && a <= 12 && b <= 12 ->
-            "Numeric date \"${m.value}\" could be MM/DD or DD/MM"
+          ambiguousOrder -> "Numeric date \"${m.value}\" could be MM/DD or DD/MM"
           isTwoDigitYear -> "Two-digit year in \"${m.value}\" — verify"
           else -> null
         }
         found.add(
           m.range to ParsedDateMatch(
-            isoDate = ManilaTime.formatIso(resolved.first),
+            isoDate = ManilaTime.formatIso(date),
             rawText = m.value,
-            confidence = resolved.second,
+            confidence = conf,
+            isAmbiguousNumericOrder = ambiguousOrder,
             note = note
           )
         )
@@ -221,7 +234,7 @@ object FlexibleDateParser {
         m.range to ParsedDateMatch(
           isoDate = ManilaTime.formatIso(date),
           rawText = m.value,
-          confidence = ExtractionConfidence.NEEDS_VERIFICATION,
+          confidence = ExtractionConfidence.MEDIUM,
           isYearInferred = true,
           note = "Year not shown for \"${m.value}\" — inferred $inferredYear, please verify"
         )
@@ -238,7 +251,7 @@ object FlexibleDateParser {
         m.range to ParsedDateMatch(
           isoDate = ManilaTime.formatIso(date),
           rawText = m.value,
-          confidence = ExtractionConfidence.NEEDS_VERIFICATION,
+          confidence = ExtractionConfidence.MEDIUM,
           isYearInferred = true,
           note = "Year not shown for \"${m.value}\" — inferred $inferredYear, please verify"
         )

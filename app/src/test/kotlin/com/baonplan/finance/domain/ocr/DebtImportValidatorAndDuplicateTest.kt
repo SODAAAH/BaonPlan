@@ -73,6 +73,21 @@ class DebtImportValidatorAndDuplicateTest {
   }
 
   @Test
+  fun warnsWhenAmountCurrentlyDueExceedsRemainingBalanceWithoutOverwriting() {
+    val issues = DebtImportValidator.validateValues(
+      debtName = "Maya Credit",
+      remainingBalanceCents = 100_000L,
+      explicitBalanceCents = 100_000L,
+      explicitAmountCurrentlyDueCents = 115_000L,
+      requireNonBlankName = true
+    )
+
+    val warningKeys = issues.filter { it.severity == ImportSeverity.WARNING }.map { it.fieldKey }.toSet()
+    assertTrue("amountDueVsBalance" in warningKeys)
+    assertEquals(0, issues.count { it.severity == ImportSeverity.ERROR })
+  }
+
+  @Test
   fun detectsDuplicateLoanWithoutFalsePositiveOnDistinctLoanFromSameLender() {
     val existingSpayLaterOrder1 = DebtEntity(
       id = 10L,

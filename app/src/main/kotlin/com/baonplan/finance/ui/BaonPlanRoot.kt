@@ -716,6 +716,10 @@ fun BaonPlanRoot(
       onRotateItem = { id -> viewModel.rotateStagedScreenshot(id) },
       onRemoveItem = { id -> viewModel.removeStagedScreenshot(id) },
       onAnalyze = { viewModel.analyzeStagedScreenshots() },
+      onCombineAllIntoOneLoan = { viewModel.combineAllScreenshotsIntoOneLoan() },
+      onSplitIntoSeparateLoans = { viewModel.splitScreenshotsIntoSeparateLoans() },
+      onResetAutoGrouping = { viewModel.resetAutoScreenshotGrouping() },
+      onAssignScreenshotToGroup = { sIdx, grpIdx -> viewModel.assignScreenshotToGroup(sIdx, grpIdx) },
       onSelectCandidateDraft = { draft -> viewModel.selectCandidateDraftForReview(draft) },
       onEnterManually = {
         viewModel.closeAndClearScanSession(context)

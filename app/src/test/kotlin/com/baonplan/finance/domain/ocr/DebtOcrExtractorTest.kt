@@ -231,4 +231,125 @@ class DebtOcrExtractorTest {
     )
     assertTrue(ex.installmentRows.all { it.amountCents == 70_000L })
   }
+
+  @Test
+  fun mergesSplitPesoTokenIgnoresOsChromeAndSolvesTwoColumnMetricGrid() {
+    val page = OcrDocumentPage(
+      screenshotIndex = 0,
+      width = 1080,
+      height = 1920,
+      lines = listOf(
+        // Top OS status bar clock/battery should be filtered out
+        OcrLine("12:41 PM", OcrBoundingBox(40, 12, 180, 40)),
+        OcrLine("98%", OcrBoundingBox(950, 12, 1040, 40)),
+        OcrLine("GCash GLoan Summary", OcrBoundingBox(40, 120, 620, 160)),
+        // Split currency glyph + numeric token on the same baseline
+        OcrLine(
+          text = "₱ 1,087.38",
+          box = OcrBoundingBox(320, 220, 740, 290),
+          elements = listOf(
+            OcrElement("₱", OcrBoundingBox(320, 220, 360, 290)),
+            OcrElement("1,087.38", OcrBoundingBox(376, 220, 740, 290))
+          )
+        ),
+        // Hero amount sits directly ABOVE its label
+        OcrLine("Outstanding Balance", OcrBoundingBox(310, 305, 750, 338)),
+        // Two-column metric grid: two headers on one horizontal row, two values directly below
+        OcrLine(
+          text = "Loan Amount          Weekly Installment",
+          box = OcrBoundingBox(40, 420, 1020, 452),
+          elements = listOf(
+            OcrElement("Loan", OcrBoundingBox(40, 420, 140, 452)),
+            OcrElement("Amount", OcrBoundingBox(152, 420, 310, 452)),
+            OcrElement("Weekly", OcrBoundingBox(580, 420, 730, 452)),
+            OcrElement("Installment", OcrBoundingBox(742, 420, 1020, 452))
+          )
+        ),
+        OcrLine(
+          text = "₱1,200.00           ₱51.78",
+          box = OcrBoundingBox(40, 470, 1020, 504),
+          elements = listOf(
+            OcrElement("₱", OcrBoundingBox(40, 470, 65, 504)),
+            OcrElement("1,200.00", OcrBoundingBox(72, 470, 290, 504)),
+            OcrElement("₱", OcrBoundingBox(580, 470, 605, 504)),
+            OcrElement("51.78", OcrBoundingBox(612, 470, 740, 504))
+          )
+        ),
+        OcrLine("Available Credit Limit: ₱20,000.00", OcrBoundingBox(40, 560, 760, 592)),
+        OcrLine("GScore: 650", OcrBoundingBox(40, 610, 400, 642)),
+        OcrLine("Total Installments: 24", OcrBoundingBox(40, 660, 500, 692)),
+        OcrLine("Installments Paid: 3", OcrBoundingBox(40, 710, 500, 742))
+      )
+    )
+
+    val ex = DebtOcrExtractor.extract(page, refDate)
+
+    assertEquals("GCash (GLoan)", ex.lender.value)
+    assertEquals(108_738L, ex.outstandingBalanceCents.value)
+    assertEquals(120_000L, ex.originalPrincipalCents.value)
+    assertEquals(5_178L, ex.installmentAmountCents.value)
+    assertEquals(24, ex.originalInstallmentCount.value)
+    assertEquals(3, ex.paidInstallmentsCount.value)
+    assertEquals(21, ex.remainingInstallmentsCount.value)
+    assertEquals(FieldOrigin.CALCULATED, ex.remainingInstallmentsCount.origin)
+    // 51.78 * 21 = 1087.38 CALCULATED without overwriting extracted balance
+    assertEquals(108_738L, ex.remainingInstallmentTotalCents.value)
+    assertEquals(FieldOrigin.CALCULATED, ex.remainingInstallmentTotalCents.origin)
+    assertEquals(RepaymentFrequency.WEEKLY, ex.frequency.value)
+  }
+
+  @Test
+  fun repairsCommonOcrNumberTyposAndDistinguishesProviderFields() {
+    val mayaPage = OcrDocumentPage(
+      screenshotIndex = 0,
+      lines = listOf(
+        OcrLine("Maya Easy Credit"),
+        OcrLine("Credit Limit: ₱15,000.00"),
+        OcrLine("Used Credit: ₱1,O87.38"),
+        OcrLine("Total Amount Due: ₱1 087.38"),
+        OcrLine("Processing Fee: ₱51,78"),
+        OcrLine("Service Fee: ₱1.250.00"),
+        OcrLine("Next Due Date: 04/05/2026")
+      )
+    )
+
+    val ex = DebtOcrExtractor.extract(mayaPage, refDate)
+
+    assertEquals("Maya (Maya Credit)", ex.lender.value)
+    // O->0 and whitespace grouping repairs: ₱1,O87.38 -> 108_738L
+    assertEquals(108_738L, ex.outstandingBalanceCents.value)
+    // Provider profile keeps Maya "Total Amount Due" in amountCurrentlyDue rather than overwriting principal/balance
+    assertEquals(108_738L, ex.amountCurrentlyDueCents.value)
+    assertEquals(5_178L, ex.processingFeeCents.value)
+    assertEquals(125_000L, ex.serviceFeeCents.value)
+    // Ambiguous MM/DD vs DD/MM date populates swap alternative
+    assertEquals("2026-04-05", ex.nextDueDateIso.value)
+    assertTrue(ex.nextDueDateIso.alternatives.any { it.value == "2026-05-04" })
+  }
+
+  @Test
+  fun appliesLearnedLabelOverridesAndProviderDateOrder() {
+    val customPage = OcrDocumentPage(
+      screenshotIndex = 0,
+      lines = listOf(
+        OcrLine("BillEase Loan Summary"),
+        OcrLine("Financed Basis: ₱5,000.00"),
+        OcrLine("Remaining Balance: ₱3,200.00"),
+        OcrLine("Next Due Date: 04/05/2026")
+      )
+    )
+    val learned = LearnedScannerPreferences(
+      labelOverrides = mapOf("financed basis" to LoanFieldKey.ORIGINAL_PRINCIPAL),
+      providerDateOrder = mapOf("billease" to NumericDateOrder.DAY_FIRST.name),
+      providerCategoryDefaults = mapOf("billease" to "Laptop")
+    )
+
+    val ex = DebtOcrExtractor.extract(customPage, refDate, learnedPrefs = learned)
+
+    assertEquals(500_000L, ex.originalPrincipalCents.value)
+    assertEquals(320_000L, ex.outstandingBalanceCents.value)
+    assertEquals("2026-05-04", ex.nextDueDateIso.value)
+    assertEquals("Laptop", ex.loanType.value)
+    assertEquals(FieldOrigin.ESTIMATED, ex.loanType.origin)
+  }
 }

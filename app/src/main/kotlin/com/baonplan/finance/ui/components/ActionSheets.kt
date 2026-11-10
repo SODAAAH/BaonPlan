@@ -74,6 +74,7 @@ import com.baonplan.finance.domain.ocr.ExtractedField
 import com.baonplan.finance.domain.ocr.ExtractedInstallmentRow
 import com.baonplan.finance.domain.ocr.ExtractedInstallmentStatus
 import com.baonplan.finance.domain.ocr.ExtractionConfidence
+import com.baonplan.finance.domain.ocr.FieldAlternative
 import com.baonplan.finance.domain.ocr.FieldOrigin
 import com.baonplan.finance.domain.ocr.ImportSeverity
 import com.baonplan.finance.ui.theme.LocalBaonColors
@@ -1074,14 +1075,22 @@ fun DebtEditorDialog(
       }
     )
   }
+  val initialBalanceField: ExtractedField<Long>? = remember(stateKey) {
+    when {
+      prefillDraft == null -> null
+      prefillDraft.outstandingBalanceCents.value != null -> prefillDraft.outstandingBalanceCents
+      prefillDraft.remainingInstallmentTotalCents.value != null -> prefillDraft.remainingInstallmentTotalCents
+      prefillDraft.calculatedUnpaidScheduleSumCents.value != null && prefillDraft.calculatedUnpaidScheduleSumCents.value > 0L ->
+        prefillDraft.calculatedUnpaidScheduleSumCents
+      prefillDraft.amountCurrentlyDueCents.value != null -> prefillDraft.amountCurrentlyDueCents
+      else -> prefillDraft.outstandingBalanceCents
+    }
+  }
   var remainingBalanceText by remember(stateKey) {
     mutableStateOf(
       when {
         existing != null -> MoneyFormatter.formatEditableAmount(existing.remainingBalanceCents)
-        prefillDraft?.outstandingBalanceCents?.value != null ->
-          MoneyFormatter.formatEditableAmount(prefillDraft.outstandingBalanceCents.value)
-        prefillDraft?.remainingInstallmentTotalCents?.value != null ->
-          MoneyFormatter.formatEditableAmount(prefillDraft.remainingInstallmentTotalCents.value)
+        initialBalanceField?.value != null -> MoneyFormatter.formatEditableAmount(initialBalanceField.value)
         else -> ""
       }
     )
@@ -1146,6 +1155,7 @@ fun DebtEditorDialog(
     }
   }
   var editingScheduleDateRowId by remember(stateKey) { mutableStateOf<String?>(null) }
+  var explanationTarget by remember(stateKey) { mutableStateOf<ExplanationSheetTarget?>(null) }
   var allowDuplicateOverride by remember(stateKey) { mutableStateOf(false) }
   var attachScreenshots by remember(stateKey) { mutableStateOf(false) }
   val isSaving = isSavingImport
@@ -1192,6 +1202,7 @@ fun DebtEditorDialog(
       debtName = name,
       remainingBalanceCents = parsedRemainingBalance,
       explicitBalanceCents = scanDraft.outstandingBalanceCents.value ?: parsedRemainingBalance,
+      explicitAmountCurrentlyDueCents = scanDraft.amountCurrentlyDueCents.value,
       explicitRemainingInstallmentTotalCents = scanDraft.remainingInstallmentTotalCents.value,
       originalPrincipalCents = parsedOrigPrincipal,
       amountReceivedCents = parsedAmountReceived,
@@ -1338,7 +1349,19 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
-        ScanFieldCaption(field = scanDraft.loanName, currentText = name)
+        ScanFieldCaption(
+          field = scanDraft.loanName,
+          currentText = name,
+          onExplain = {
+            explanationTarget = buildExplanationTarget(
+              title = "Debt name",
+              field = scanDraft.loanName,
+              currentDisplay = name.ifBlank { null },
+              formatAlt = { it },
+              onApplyAlt = { alt -> name = alt; errorText = null }
+            )
+          }
+        )
       }
 
       OutlinedTextField(
@@ -1351,7 +1374,19 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
-        ScanFieldCaption(field = scanDraft.lender, currentText = lender)
+        ScanFieldCaption(
+          field = scanDraft.lender,
+          currentText = lender,
+          onExplain = {
+            explanationTarget = buildExplanationTarget(
+              title = "Lender / Provider",
+              field = scanDraft.lender,
+              currentDisplay = lender.ifBlank { null },
+              formatAlt = { it },
+              onApplyAlt = { alt -> lender = alt }
+            )
+          }
+        )
       }
 
       OutlinedTextField(
@@ -1366,15 +1401,27 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
-        val primaryBalField = if (scanDraft.outstandingBalanceCents.value != null) {
-          scanDraft.outstandingBalanceCents
-        } else {
-          scanDraft.remainingInstallmentTotalCents
-        }
-        ScanFieldCaption(field = primaryBalField, currentText = remainingBalanceText)
+        val primaryBalField = initialBalanceField ?: scanDraft.outstandingBalanceCents
+        ScanFieldCaption(
+          field = primaryBalField,
+          currentText = remainingBalanceText,
+          onExplain = {
+            explanationTarget = buildExplanationTarget(
+              title = "Remaining balance",
+              field = primaryBalField,
+              currentDisplay = parsedRemainingBalance?.let { MoneyFormatter.formatPeso(it) },
+              formatAlt = { MoneyFormatter.formatPeso(it) },
+              onApplyAlt = { alt ->
+                remainingBalanceText = MoneyFormatter.formatEditableAmount(alt)
+                errorText = null
+              }
+            )
+          }
+        )
 
         BalanceComparisonReviewCard(
           extractedBalanceCents = scanDraft.outstandingBalanceCents.value,
+          extractedAmountCurrentlyDueCents = scanDraft.amountCurrentlyDueCents.value,
           extractedRemainingInstallmentTotalCents = scanDraft.remainingInstallmentTotalCents.value,
           calculatedUnpaidScheduleSumCents = editableScheduleRows
             .filter { it.status != ExtractedInstallmentStatus.PAID }
@@ -1402,7 +1449,22 @@ fun DebtEditorDialog(
             modifier = Modifier.fillMaxWidth()
           )
           if (scanDraft != null) {
-            ScanFieldCaption(field = scanDraft.installmentAmountCents, currentText = installmentAmountText)
+            ScanFieldCaption(
+              field = scanDraft.installmentAmountCents,
+              currentText = installmentAmountText,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Installment amount",
+                  field = scanDraft.installmentAmountCents,
+                  currentDisplay = parsedInstallmentAmount?.let { MoneyFormatter.formatPeso(it) },
+                  formatAlt = { MoneyFormatter.formatPeso(it) },
+                  onApplyAlt = { alt ->
+                    installmentAmountText = MoneyFormatter.formatEditableAmount(alt)
+                    errorText = null
+                  }
+                )
+              }
+            )
           }
         }
         Column(modifier = Modifier.weight(0.9f)) {
@@ -1417,7 +1479,22 @@ fun DebtEditorDialog(
             modifier = Modifier.fillMaxWidth()
           )
           if (scanDraft != null) {
-            ScanFieldCaption(field = scanDraft.remainingInstallmentsCount, currentText = remainingCountText)
+            ScanFieldCaption(
+              field = scanDraft.remainingInstallmentsCount,
+              currentText = remainingCountText,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Remaining installments",
+                  field = scanDraft.remainingInstallmentsCount,
+                  currentDisplay = remainingCountText.ifBlank { null },
+                  formatAlt = { it.toString() },
+                  onApplyAlt = { alt ->
+                    remainingCountText = alt.toString()
+                    errorText = null
+                  }
+                )
+              }
+            )
           }
         }
       }
@@ -1442,7 +1519,16 @@ fun DebtEditorDialog(
       if (scanDraft != null) {
         ScanFieldCaption(
           field = scanDraft.frequency,
-          currentText = if (frequency == RepaymentFrequency.UNKNOWN) "" else frequency.label
+          currentText = if (frequency == RepaymentFrequency.UNKNOWN) "" else frequency.label,
+          onExplain = {
+            explanationTarget = buildExplanationTarget(
+              title = "Repayment frequency",
+              field = scanDraft.frequency,
+              currentDisplay = frequency.label,
+              formatAlt = { it.label },
+              onApplyAlt = { alt -> frequency = alt; errorText = null }
+            )
+          }
         )
       }
       if (frequency == RepaymentFrequency.CUSTOM_DAYS) {
@@ -1470,7 +1556,22 @@ fun DebtEditorDialog(
         allowClear = true
       )
       if (scanDraft != null) {
-        ScanFieldCaption(field = scanDraft.nextDueDateIso, currentText = nextDueDate.orEmpty())
+        ScanFieldCaption(
+          field = scanDraft.nextDueDateIso,
+          currentText = nextDueDate.orEmpty(),
+          onExplain = {
+            explanationTarget = buildExplanationTarget(
+              title = "Next payment date",
+              field = scanDraft.nextDueDateIso,
+              currentDisplay = nextDueDate?.let { ManilaTime.formatDisplay(it) },
+              formatAlt = { ManilaTime.formatDisplay(it) },
+              onApplyAlt = { alt ->
+                nextDueDate = alt
+                errorText = null
+              }
+            )
+          }
+        )
       }
 
       Text(
@@ -1528,30 +1629,63 @@ fun DebtEditorDialog(
                 )
               }
             }
-            OutlinedButton(
-              onClick = {
-                editableScheduleRows.add(
-                  EditableScheduleRowState(
-                    id = "manual_${System.nanoTime()}",
-                    installmentNumberHint = editableScheduleRows.size + 1,
-                    dueDateIso = null,
-                    rawDateText = "",
-                    dateStatus = DueDateStatus.UNCONFIRMED,
-                    dateConfidence = ExtractionConfidence.HIGH,
-                    amountText = installmentAmountText,
-                    status = ExtractedInstallmentStatus.UPCOMING,
-                    sourceSnippet = "Added during review",
-                    screenshotIndex = -1,
-                    verificationNote = null
-                  )
-                )
-              },
-              shape = RoundedCornerShape(10.dp),
+            Row(
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
               modifier = Modifier.fillMaxWidth()
             ) {
-              Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(modifier = Modifier.width(6.dp))
-              Text("Add payment row")
+              OutlinedButton(
+                onClick = {
+                  editableScheduleRows.add(
+                    EditableScheduleRowState(
+                      id = "manual_${System.nanoTime()}",
+                      installmentNumberHint = editableScheduleRows.size + 1,
+                      dueDateIso = null,
+                      rawDateText = "",
+                      dateStatus = DueDateStatus.UNCONFIRMED,
+                      dateConfidence = ExtractionConfidence.HIGH,
+                      amountText = installmentAmountText,
+                      status = ExtractedInstallmentStatus.UPCOMING,
+                      sourceSnippet = "Added during review",
+                      screenshotIndex = -1,
+                      verificationNote = null
+                    )
+                  )
+                },
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.weight(1f)
+              ) {
+                Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Add payment row")
+              }
+              if (editableScheduleRows.isNotEmpty()) {
+                FilledTonalButton(
+                  onClick = {
+                    val unpaid = editableScheduleRows.filter { it.status != ExtractedInstallmentStatus.PAID }
+                    val paid = editableScheduleRows.filter { it.status == ExtractedInstallmentStatus.PAID }
+                    remainingCountText = unpaid.size.toString()
+                    if (paid.isNotEmpty()) {
+                      paidCountText = paid.size.toString()
+                      val paidSum = paid.mapNotNull { MoneyFormatter.parsePesoToCents(it.amountText) }.sum()
+                      if (paidSum > 0L) {
+                        priorPaidText = MoneyFormatter.formatEditableAmount(paidSum)
+                      }
+                    }
+                    val firstUnpaidDate = unpaid
+                      .mapNotNull { it.dueDateIso }
+                      .sorted()
+                      .firstOrNull()
+                    if (firstUnpaidDate != null) {
+                      nextDueDate = firstUnpaidDate
+                    }
+                    errorText = null
+                  },
+                  shape = RoundedCornerShape(10.dp),
+                  modifier = Modifier.weight(1f)
+                ) {
+                  Text("Sync count & due", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+              }
             }
           }
         }
@@ -1572,6 +1706,22 @@ fun DebtEditorDialog(
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
           )
+          if (scanDraft != null) {
+            ScanFieldCaption(
+              field = scanDraft.loanType,
+              currentText = category,
+              showNotDetectedCaption = false,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Loan category / type",
+                  field = scanDraft.loanType,
+                  currentDisplay = category.ifBlank { null },
+                  formatAlt = { it },
+                  onApplyAlt = { alt -> category = alt }
+                )
+              }
+            )
+          }
           if (isScanReview) {
             OutlinedTextField(
               value = loanReferenceId,
@@ -1582,27 +1732,73 @@ fun DebtEditorDialog(
               shape = RoundedCornerShape(12.dp),
               modifier = Modifier.fillMaxWidth()
             )
+            ScanFieldCaption(
+              field = scanDraft.loanReferenceId,
+              currentText = loanReferenceId,
+              showNotDetectedCaption = false,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Reference / Order ID",
+                  field = scanDraft.loanReferenceId,
+                  currentDisplay = loanReferenceId.ifBlank { null },
+                  formatAlt = { it },
+                  onApplyAlt = { alt -> loanReferenceId = alt }
+                )
+              }
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-              OutlinedTextField(
-                value = originalCountText,
-                onValueChange = { originalCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
-                label = { Text("Orig. count") },
-                placeholder = placeholderIfScan,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.weight(1f)
-              )
-              OutlinedTextField(
-                value = paidCountText,
-                onValueChange = { paidCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
-                label = { Text("Already paid #") },
-                placeholder = placeholderIfScan,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.weight(1f)
-              )
+              Column(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                  value = originalCountText,
+                  onValueChange = { originalCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
+                  label = { Text("Orig. count") },
+                  placeholder = placeholderIfScan,
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                  singleLine = true,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier.fillMaxWidth()
+                )
+                ScanFieldCaption(
+                  field = scanDraft.originalInstallmentCount,
+                  currentText = originalCountText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Total installments",
+                      field = scanDraft.originalInstallmentCount,
+                      currentDisplay = originalCountText.ifBlank { null },
+                      formatAlt = { it.toString() },
+                      onApplyAlt = { alt -> originalCountText = alt.toString(); errorText = null }
+                    )
+                  }
+                )
+              }
+              Column(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                  value = paidCountText,
+                  onValueChange = { paidCountText = it.filter { ch -> ch.isDigit() }; errorText = null },
+                  label = { Text("Already paid #") },
+                  placeholder = placeholderIfScan,
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                  singleLine = true,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier.fillMaxWidth()
+                )
+                ScanFieldCaption(
+                  field = scanDraft.paidInstallmentsCount,
+                  currentText = paidCountText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Paid installments",
+                      field = scanDraft.paidInstallmentsCount,
+                      currentDisplay = paidCountText.ifBlank { null },
+                      formatAlt = { it.toString() },
+                      onApplyAlt = { alt -> paidCountText = alt.toString(); errorText = null }
+                    )
+                  }
+                )
+              }
             }
             DatePickerField(
               label = "Final payment date (optional)",
@@ -1610,79 +1806,199 @@ fun DebtEditorDialog(
               onDateChanged = { finalDueDate = it },
               allowClear = true
             )
-          }
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-              value = originalPrincipalText,
-              onValueChange = { originalPrincipalText = it; errorText = null },
-              label = { Text("Orig. principal") },
-              placeholder = placeholderIfScan,
-              prefix = { Text("₱") },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-              singleLine = true,
-              shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-              value = amountReceivedText,
-              onValueChange = { amountReceivedText = it; errorText = null },
-              label = { Text("Received") },
-              placeholder = placeholderIfScan,
-              prefix = { Text("₱") },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-              singleLine = true,
-              shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
+            ScanFieldCaption(
+              field = scanDraft.finalDueDateIso,
+              currentText = finalDueDate.orEmpty(),
+              showNotDetectedCaption = false,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Final payment date",
+                  field = scanDraft.finalDueDateIso,
+                  currentDisplay = finalDueDate?.let { ManilaTime.formatDisplay(it) },
+                  formatAlt = { ManilaTime.formatDisplay(it) },
+                  onApplyAlt = { alt -> finalDueDate = alt }
+                )
+              }
             )
           }
           Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-              value = interestText,
-              onValueChange = { interestText = it; errorText = null },
-              label = { Text("Interest") },
-              placeholder = placeholderIfScan,
-              prefix = { Text("₱") },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-              singleLine = true,
-              shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-              value = serviceFeeText,
-              onValueChange = { serviceFeeText = it; errorText = null },
-              label = { Text("Service fee") },
-              placeholder = placeholderIfScan,
-              prefix = { Text("₱") },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-              singleLine = true,
-              shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
-            )
-          }
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-              value = processingFeeText,
-              onValueChange = { processingFeeText = it; errorText = null },
-              label = { Text("Processing fee") },
-              placeholder = placeholderIfScan,
-              prefix = { Text("₱") },
-              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-              singleLine = true,
-              shape = RoundedCornerShape(12.dp),
-              modifier = Modifier.weight(1f)
-            )
-            if (isScanReview) {
+            Column(modifier = Modifier.weight(1f)) {
               OutlinedTextField(
-                value = otherFeesText,
-                onValueChange = { otherFeesText = it; errorText = null },
-                label = { Text("Other fees") },
+                value = originalPrincipalText,
+                onValueChange = { originalPrincipalText = it; errorText = null },
+                label = { Text("Orig. principal") },
                 placeholder = placeholderIfScan,
                 prefix = { Text("₱") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.fillMaxWidth()
               )
+              if (scanDraft != null) {
+                ScanFieldCaption(
+                  field = scanDraft.originalPrincipalCents,
+                  currentText = originalPrincipalText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Original loan principal",
+                      field = scanDraft.originalPrincipalCents,
+                      currentDisplay = parsedOrigPrincipal?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> originalPrincipalText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
+            }
+            Column(modifier = Modifier.weight(1f)) {
+              OutlinedTextField(
+                value = amountReceivedText,
+                onValueChange = { amountReceivedText = it; errorText = null },
+                label = { Text("Received") },
+                placeholder = placeholderIfScan,
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+              )
+              if (scanDraft != null) {
+                ScanFieldCaption(
+                  field = scanDraft.amountReceivedCents,
+                  currentText = amountReceivedText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Amount received",
+                      field = scanDraft.amountReceivedCents,
+                      currentDisplay = parsedAmountReceived?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> amountReceivedText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
+            }
+          }
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+              OutlinedTextField(
+                value = interestText,
+                onValueChange = { interestText = it; errorText = null },
+                label = { Text("Interest") },
+                placeholder = placeholderIfScan,
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+              )
+              if (scanDraft != null) {
+                ScanFieldCaption(
+                  field = scanDraft.interestCents,
+                  currentText = interestText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Interest",
+                      field = scanDraft.interestCents,
+                      currentDisplay = parsedInterest?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> interestText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
+            }
+            Column(modifier = Modifier.weight(1f)) {
+              OutlinedTextField(
+                value = serviceFeeText,
+                onValueChange = { serviceFeeText = it; errorText = null },
+                label = { Text("Service fee") },
+                placeholder = placeholderIfScan,
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+              )
+              if (scanDraft != null) {
+                ScanFieldCaption(
+                  field = scanDraft.serviceFeeCents,
+                  currentText = serviceFeeText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Service fee",
+                      field = scanDraft.serviceFeeCents,
+                      currentDisplay = parsedServiceFee?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> serviceFeeText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
+            }
+          }
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+              OutlinedTextField(
+                value = processingFeeText,
+                onValueChange = { processingFeeText = it; errorText = null },
+                label = { Text("Processing fee") },
+                placeholder = placeholderIfScan,
+                prefix = { Text("₱") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+              )
+              if (scanDraft != null) {
+                ScanFieldCaption(
+                  field = scanDraft.processingFeeCents,
+                  currentText = processingFeeText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Processing fee",
+                      field = scanDraft.processingFeeCents,
+                      currentDisplay = parsedProcessingFee?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> processingFeeText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
+            }
+            if (isScanReview) {
+              Column(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                  value = otherFeesText,
+                  onValueChange = { otherFeesText = it; errorText = null },
+                  label = { Text("Other fees") },
+                  placeholder = placeholderIfScan,
+                  prefix = { Text("₱") },
+                  keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                  singleLine = true,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier.fillMaxWidth()
+                )
+                ScanFieldCaption(
+                  field = scanDraft.otherFeesCents,
+                  currentText = otherFeesText,
+                  showNotDetectedCaption = false,
+                  onExplain = {
+                    explanationTarget = buildExplanationTarget(
+                      title = "Other fees",
+                      field = scanDraft.otherFeesCents,
+                      currentDisplay = parsedOtherFees?.let { MoneyFormatter.formatPeso(it) },
+                      formatAlt = { MoneyFormatter.formatPeso(it) },
+                      onApplyAlt = { alt -> otherFeesText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                    )
+                  }
+                )
+              }
             } else {
               OutlinedTextField(
                 value = totalScheduledText,
@@ -1708,6 +2024,20 @@ fun DebtEditorDialog(
               shape = RoundedCornerShape(12.dp),
               modifier = Modifier.fillMaxWidth()
             )
+            ScanFieldCaption(
+              field = scanDraft.totalRepaymentCents,
+              currentText = totalScheduledText,
+              showNotDetectedCaption = false,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Total scheduled repayment",
+                  field = scanDraft.totalRepaymentCents,
+                  currentDisplay = parsedTotalScheduled?.let { MoneyFormatter.formatPeso(it) },
+                  formatAlt = { MoneyFormatter.formatPeso(it) },
+                  onApplyAlt = { alt -> totalScheduledText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                )
+              }
+            )
           }
           OutlinedTextField(
             value = priorPaidText,
@@ -1721,7 +2051,20 @@ fun DebtEditorDialog(
             modifier = Modifier.fillMaxWidth()
           )
           if (scanDraft != null) {
-            ScanFieldCaption(field = scanDraft.calculatedPaidScheduleSumCents, currentText = priorPaidText)
+            ScanFieldCaption(
+              field = scanDraft.calculatedPaidScheduleSumCents,
+              currentText = priorPaidText,
+              showNotDetectedCaption = false,
+              onExplain = {
+                explanationTarget = buildExplanationTarget(
+                  title = "Already paid before adding",
+                  field = scanDraft.calculatedPaidScheduleSumCents,
+                  currentDisplay = MoneyFormatter.parsePesoToCents(priorPaidText)?.let { MoneyFormatter.formatPeso(it) },
+                  formatAlt = { MoneyFormatter.formatPeso(it) },
+                  onApplyAlt = { alt -> priorPaidText = MoneyFormatter.formatEditableAmount(alt); errorText = null }
+                )
+              }
+            )
           }
           OutlinedTextField(
             value = notes,
@@ -1978,6 +2321,194 @@ fun DebtEditorDialog(
       )
     }
   }
+
+  explanationTarget?.let { target ->
+    FieldExplanationDialog(
+      target = target,
+      onDismiss = { explanationTarget = null }
+    )
+  }
+}
+
+private data class ExplanationAlternativeUi(
+  val label: String,
+  val sourceNote: String?,
+  val onApply: () -> Unit
+)
+
+private data class ExplanationSheetTarget(
+  val title: String,
+  val currentDisplay: String?,
+  val origin: FieldOrigin,
+  val confidence: ExtractionConfidence,
+  val hasConflict: Boolean,
+  val reason: String,
+  val sourceSnippet: String?,
+  val sourceScreenshotIndex: Int?,
+  val alternatives: List<ExplanationAlternativeUi>
+)
+
+private fun <T> buildExplanationTarget(
+  title: String,
+  field: ExtractedField<T>,
+  currentDisplay: String?,
+  formatAlt: (T) -> String,
+  onApplyAlt: (T) -> Unit
+): ExplanationSheetTarget {
+  val defaultReason = when (field.origin) {
+    FieldOrigin.EXTRACTED -> "Directly read from the uploaded screenshot text."
+    FieldOrigin.CALCULATED -> "Calculated mathematically from other extracted values."
+    FieldOrigin.ESTIMATED -> "Estimated from surrounding dates, payment rows, or patterns."
+    FieldOrigin.NOT_DETECTED -> "Not clearly found in the uploaded screenshots."
+  }
+  val alts = field.alternatives.map { alt ->
+    val altLabel = alt.label.ifBlank { formatAlt(alt.value) }
+    val altNote = buildString {
+      append(alt.origin.badgeLabel)
+      if (alt.screenshotIndex != null) append(" · Screenshot #${alt.screenshotIndex + 1}")
+      if (!alt.sourceSnippet.isNullOrBlank()) append(" · \"${alt.sourceSnippet.take(48)}\"")
+    }.ifBlank { null }
+    ExplanationAlternativeUi(
+      label = altLabel,
+      sourceNote = altNote,
+      onApply = { onApplyAlt(alt.value) }
+    )
+  }
+  return ExplanationSheetTarget(
+    title = title,
+    currentDisplay = currentDisplay,
+    origin = field.origin,
+    confidence = field.confidence,
+    hasConflict = field.hasConflict,
+    reason = field.verificationReason?.takeIf { it.isNotBlank() } ?: defaultReason,
+    sourceSnippet = field.sourceSnippet,
+    sourceScreenshotIndex = field.sourceScreenshotIndex,
+    alternatives = alts
+  )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FieldExplanationDialog(
+  target: ExplanationSheetTarget,
+  onDismiss: () -> Unit
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(target.title) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+          val originTone = when (target.origin) {
+            FieldOrigin.EXTRACTED -> BadgeTone.NEUTRAL
+            FieldOrigin.CALCULATED -> BadgeTone.PRIMARY
+            FieldOrigin.ESTIMATED -> BadgeTone.WARNING
+            FieldOrigin.NOT_DETECTED -> BadgeTone.NEUTRAL
+          }
+          StatusBadge(text = target.origin.badgeLabel, tone = originTone)
+
+          if (target.origin != FieldOrigin.NOT_DETECTED) {
+            if (target.hasConflict) {
+              StatusBadge(text = "Conflicting values — verify", tone = BadgeTone.DANGER)
+            } else {
+              val confTone = when (target.confidence) {
+                ExtractionConfidence.HIGH -> BadgeTone.POSITIVE
+                ExtractionConfidence.MEDIUM -> BadgeTone.WARNING
+                ExtractionConfidence.LOW -> BadgeTone.DANGER
+              }
+              StatusBadge(text = target.confidence.userLabel, tone = confTone)
+            }
+          }
+        }
+
+        if (!target.currentDisplay.isNullOrBlank()) {
+          Text(
+            text = "Current value: ${target.currentDisplay}",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+        }
+
+        Text(
+          text = target.reason,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (!target.sourceSnippet.isNullOrBlank()) {
+          Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border = BorderStroke(1.dp, LocalBaonColors.current.divider),
+            modifier = Modifier.fillMaxWidth()
+          ) {
+            Column(
+              modifier = Modifier.padding(10.dp),
+              verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+              val header = target.sourceScreenshotIndex?.let { "Source text · Screenshot #${it + 1}" }
+                ?: "Supporting evidence"
+              Text(
+                text = header,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+              Text(
+                text = "\"${target.sourceSnippet}\"",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+              )
+            }
+          }
+        }
+
+        if (target.alternatives.isNotEmpty()) {
+          Text(
+            text = "Other detected options (tap to use)",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+          Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            target.alternatives.forEach { alt ->
+              OutlinedButton(
+                onClick = {
+                  alt.onApply()
+                  onDismiss()
+                },
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth()
+              ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                  Text(
+                    text = alt.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                  )
+                  if (!alt.sourceNote.isNullOrBlank()) {
+                    Text(
+                      text = alt.sourceNote,
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = onDismiss) {
+        Text("Got it")
+      }
+    }
+  )
 }
 
 private data class EditableScheduleRowState(
@@ -2027,41 +2558,137 @@ private data class EditableScheduleRowState(
 @Composable
 private fun <T> ScanFieldCaption(
   field: ExtractedField<T>,
-  currentText: String
+  currentText: String,
+  showNotDetectedCaption: Boolean = true,
+  onExplain: (() -> Unit)? = null
 ) {
   val semantic = LocalBaonColors.current
-  val textAndColor: Pair<String, androidx.compose.ui.graphics.Color>? = when {
-    currentText.isBlank() && field.origin == FieldOrigin.NOT_DETECTED ->
-      "Not detected" to semantic.muted
-    field.origin == FieldOrigin.NOT_DETECTED -> null
-    field.origin == FieldOrigin.APP_CALCULATED ->
-      "Calculated by app${field.verificationReason?.let { " · $it" } ?: ""}" to MaterialTheme.colorScheme.primary
-    else -> {
-      val srcPrefix = field.sourceScreenshotIndex?.let { "From #${it + 1}" } ?: "Extracted"
-      val statusTag = when (field.confidence) {
-        ExtractionConfidence.HIGH -> ""
-        ExtractionConfidence.NEEDS_VERIFICATION -> " · Verify"
-        ExtractionConfidence.CONFLICT -> " · Conflict"
-      }
-      val snippet = field.verificationReason
-        ?: field.sourceSnippet?.take(44)?.let { "\"$it\"" }
-      val color = when (field.confidence) {
-        ExtractionConfidence.HIGH -> semantic.muted
-        ExtractionConfidence.NEEDS_VERIFICATION -> semantic.warning
-        ExtractionConfidence.CONFLICT -> semantic.danger
-      }
-      "$srcPrefix$statusTag${snippet?.let { " · $it" } ?: ""}" to color
+  if (currentText.isBlank() && field.origin == FieldOrigin.NOT_DETECTED) {
+    if (!showNotDetectedCaption) return
+    val reasonPreview = field.verificationReason?.takeIf { it.isNotBlank() }
+    val captionText = if (reasonPreview != null) {
+      "Not detected · $reasonPreview"
+    } else {
+      "Not detected"
     }
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .then(if (onExplain != null && reasonPreview != null) Modifier.clickable(onClick = onExplain) else Modifier)
+        .padding(horizontal = 4.dp, vertical = 2.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Text(
+        text = captionText,
+        style = MaterialTheme.typography.labelSmall,
+        color = semantic.muted,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f)
+      )
+      if (onExplain != null && reasonPreview != null) {
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+          text = "Why?",
+          style = MaterialTheme.typography.labelSmall,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.primary
+        )
+      }
+    }
+    return
   }
-  if (textAndColor != null) {
-    Text(
-      text = textAndColor.first,
-      style = MaterialTheme.typography.labelSmall,
-      color = textAndColor.second,
-      maxLines = 2,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.padding(horizontal = 4.dp)
-    )
+
+  if (field.origin == FieldOrigin.NOT_DETECTED) return
+
+  val needsVerify = field.hasConflict || field.confidence == ExtractionConfidence.LOW
+  val highlightReview = !needsVerify && field.confidence == ExtractionConfidence.MEDIUM
+  val originTag = when (field.origin) {
+    FieldOrigin.CALCULATED -> "Calculated"
+    FieldOrigin.ESTIMATED -> "Estimated"
+    FieldOrigin.EXTRACTED -> field.sourceScreenshotIndex?.let { "From #${it + 1}" } ?: "Extracted"
+    FieldOrigin.NOT_DETECTED -> "Not detected"
+  }
+  val statusTag = when {
+    field.hasConflict -> " · Conflicting values"
+    field.confidence == ExtractionConfidence.LOW -> " · Verify required"
+    field.confidence == ExtractionConfidence.MEDIUM -> " · Check value"
+    else -> ""
+  }
+  val snippetOrReason = field.verificationReason
+    ?: field.sourceSnippet?.take(44)?.let { "\"$it\"" }
+  val summaryText = "$originTag$statusTag${snippetOrReason?.let { " · $it" } ?: ""}"
+
+  val (containerBg, textColor) = when {
+    needsVerify -> semantic.dangerContainer.copy(alpha = 0.72f) to semantic.onDangerContainer
+    highlightReview -> semantic.warningContainer.copy(alpha = 0.72f) to semantic.onWarningContainer
+    field.origin == FieldOrigin.CALCULATED ->
+      androidx.compose.ui.graphics.Color.Transparent to MaterialTheme.colorScheme.primary
+    else -> androidx.compose.ui.graphics.Color.Transparent to semantic.muted
+  }
+
+  val clickableMod = if (onExplain != null) Modifier.clickable(onClick = onExplain) else Modifier
+  if (needsVerify || highlightReview) {
+    Surface(
+      shape = RoundedCornerShape(8.dp),
+      color = containerBg,
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(top = 2.dp)
+        .then(clickableMod)
+    ) {
+      Row(
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Text(
+          text = summaryText,
+          style = MaterialTheme.typography.labelSmall,
+          color = textColor,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.weight(1f)
+        )
+        if (onExplain != null) {
+          Spacer(modifier = Modifier.width(6.dp))
+          Icon(
+            imageVector = Icons.Outlined.Info,
+            contentDescription = "Why BaonPlan chose this value",
+            tint = textColor,
+            modifier = Modifier.size(14.dp)
+          )
+        }
+      }
+    }
+  } else {
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .then(clickableMod)
+        .padding(horizontal = 4.dp, vertical = 2.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Text(
+        text = summaryText,
+        style = MaterialTheme.typography.labelSmall,
+        color = textColor,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f)
+      )
+      if (onExplain != null) {
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+          text = "Why?",
+          style = MaterialTheme.typography.labelSmall,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.primary
+        )
+      }
+    }
   }
 }
 
@@ -2069,11 +2696,13 @@ private fun <T> ScanFieldCaption(
 @Composable
 private fun BalanceComparisonReviewCard(
   extractedBalanceCents: Long?,
+  extractedAmountCurrentlyDueCents: Long? = null,
   extractedRemainingInstallmentTotalCents: Long?,
   calculatedUnpaidScheduleSumCents: Long?,
   onApplyAmount: (Long) -> Unit
 ) {
   if (extractedBalanceCents == null &&
+    extractedAmountCurrentlyDueCents == null &&
     extractedRemainingInstallmentTotalCents == null &&
     calculatedUnpaidScheduleSumCents == null
   ) {
@@ -2101,6 +2730,13 @@ private fun BalanceComparisonReviewCard(
         value = extractedBalanceCents?.let { MoneyFormatter.formatPeso(it) } ?: "Not detected",
         boldValue = false
       )
+      if (extractedAmountCurrentlyDueCents != null) {
+        MetricRow(
+          label = "Amount currently due",
+          value = MoneyFormatter.formatPeso(extractedAmountCurrentlyDueCents),
+          boldValue = false
+        )
+      }
       if (extractedRemainingInstallmentTotalCents != null) {
         MetricRow(
           label = "Extracted Remaining Inst. Total",
@@ -2116,8 +2752,14 @@ private fun BalanceComparisonReviewCard(
           boldValue = false
         )
       }
-      val hasChoices = (extractedBalanceCents != null && extractedRemainingInstallmentTotalCents != null) ||
-        (extractedBalanceCents == null && calculatedUnpaidScheduleSumCents != null)
+      val distinctAmounts = listOfNotNull(
+        extractedBalanceCents,
+        extractedAmountCurrentlyDueCents,
+        extractedRemainingInstallmentTotalCents,
+        calculatedUnpaidScheduleSumCents
+      ).distinct()
+      val hasChoices = distinctAmounts.size > 1 ||
+        (extractedBalanceCents == null && distinctAmounts.isNotEmpty())
       if (hasChoices) {
         FlowRow(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -2130,6 +2772,15 @@ private fun BalanceComparisonReviewCard(
               shape = RoundedCornerShape(8.dp)
             ) {
               Text("Use balance", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+          if (extractedAmountCurrentlyDueCents != null) {
+            OutlinedButton(
+              onClick = { onApplyAmount(extractedAmountCurrentlyDueCents) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use due now", style = MaterialTheme.typography.labelSmall)
             }
           }
           if (extractedRemainingInstallmentTotalCents != null) {

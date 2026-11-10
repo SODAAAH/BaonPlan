@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ExpensePreset
 import com.baonplan.finance.domain.model.ThemeMode
+import com.baonplan.finance.domain.ocr.LearnedScannerPreferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.builtins.ListSerializer
@@ -54,7 +55,8 @@ data class AppPreferencesState(
   val emergencySavingsGoalCents: Long = 50_000L,
   val lastResolvedCarryOverWeekIso: String? = null,
   val appLockEnabled: Boolean = false,
-  val expensePresets: List<ExpensePreset> = defaultExpensePresets()
+  val expensePresets: List<ExpensePreset> = defaultExpensePresets(),
+  val learnedScannerPreferences: LearnedScannerPreferences = LearnedScannerPreferences()
 )
 
 class SettingsPreferencesDataStore(private val context: Context) {
@@ -75,6 +77,7 @@ class SettingsPreferencesDataStore(private val context: Context) {
     val RESOLVED_CARRYOVER_WEEK = stringPreferencesKey("resolved_carryover_week")
     val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
     val EXPENSE_PRESETS_JSON = stringPreferencesKey("expense_presets_json")
+    val LEARNED_SCANNER_PREFS_JSON = stringPreferencesKey("learned_scanner_prefs_json")
   }
 
   val preferencesFlow: Flow<AppPreferencesState> = context.baonPlanPrefsDataStore.data.map { prefs ->
@@ -87,6 +90,13 @@ class SettingsPreferencesDataStore(private val context: Context) {
       runCatching { json.decodeFromString(presetListSerializer, rawPresets) }
         .getOrDefault(defaultExpensePresets())
     }
+    val rawLearned = prefs[Keys.LEARNED_SCANNER_PREFS_JSON]
+    val learnedScanner = if (rawLearned.isNullOrBlank()) {
+      LearnedScannerPreferences()
+    } else {
+      runCatching { json.decodeFromString(LearnedScannerPreferences.serializer(), rawLearned) }
+        .getOrDefault(LearnedScannerPreferences())
+    }
     AppPreferencesState(
       themeMode = themeMode,
       lastBackupEpochMillis = prefs[Keys.LAST_BACKUP_EPOCH] ?: 0L,
@@ -96,7 +106,8 @@ class SettingsPreferencesDataStore(private val context: Context) {
       emergencySavingsGoalCents = (prefs[Keys.EMERGENCY_GOAL_CENTS] ?: 50_000L).coerceAtLeast(0L),
       lastResolvedCarryOverWeekIso = prefs[Keys.RESOLVED_CARRYOVER_WEEK],
       appLockEnabled = prefs[Keys.APP_LOCK_ENABLED] ?: false,
-      expensePresets = presets
+      expensePresets = presets,
+      learnedScannerPreferences = learnedScanner
     )
   }
 
@@ -159,9 +170,16 @@ class SettingsPreferencesDataStore(private val context: Context) {
     }
   }
 
+  suspend fun setLearnedScannerPreferences(learned: LearnedScannerPreferences) {
+    context.baonPlanPrefsDataStore.edit { prefs ->
+      prefs[Keys.LEARNED_SCANNER_PREFS_JSON] = json.encodeToString(LearnedScannerPreferences.serializer(), learned)
+    }
+  }
+
   suspend fun clearOperationalPrefs() {
     context.baonPlanPrefsDataStore.edit { prefs ->
       prefs.remove(Keys.RESOLVED_CARRYOVER_WEEK)
+      prefs.remove(Keys.LEARNED_SCANNER_PREFS_JSON)
     }
   }
 }

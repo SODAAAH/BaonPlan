@@ -3,7 +3,11 @@ package com.baonplan.finance.data.ocr
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.net.Uri
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -12,15 +16,30 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
+data class OcrBitmapStrip(
+  val bitmap: Bitmap,
+  val yOffsetPx: Int,
+  val fullWidthPx: Int,
+  val fullHeightPx: Int
+)
+
 /**
- * Handles temporary scan image storage, EXIF correction, safe downsampling, and
- * privacy-safe cache cleanup under cacheDir/ocr_scan_tmp/.
+ * Handles temporary scan image storage, EXIF correction, tall-screenshot strip slicing,
+ * low-res small-font upscaling, optional contrast enhancement, and privacy-safe cache
+ * cleanup under cacheDir/ocr_scan_tmp/.
  * Never writes image metadata or OCR contents to logs.
  */
 object ImageScanPreprocessor {
 
   private const val TEMP_DIR_NAME = "ocr_scan_tmp"
-  private const val OCR_MAX_LONG_EDGE_PX = 2200
+  private const val OCR_MAX_LONG_EDGE_PX = 2400
+  private const val OCR_TALL_MAX_SHORT_EDGE_PX = 1440
+  private const val OCR_TALL_MAX_TOTAL_HEIGHT_PX = 16000
+  private const val OCR_STRIP_MAX_HEIGHT_PX = 2200
+  private const val OCR_STRIP_OVERLAP_PX = 240
+  private const val OCR_UPSCALE_MIN_SHORT_EDGE_PX = 720
+  private const val OCR_UPSCALE_TARGET_SHORT_EDGE_PX = 1080
+  private const val OCR_MAX_PIXELS = 18_000_000L
   private const val THUMB_MAX_EDGE_PX = 420
   private const val CAMERA_JPEG_QUALITY = 95
   private const val ATTACHMENT_JPEG_QUALITY = 92
@@ -65,7 +84,8 @@ object ImageScanPreprocessor {
 
   /**
    * Copies and normalizes a Photo Picker URI (or camera output file) into a compact,
-   * EXIF-corrected private JPEG inside cacheDir/ocr_scan_tmp/ without persisting original EXIF metadata.
+   * EXIF-corrected private PNG/JPEG inside cacheDir/ocr_scan_tmp/ without persisting EXIF metadata.
+   * Preserves crisp horizontal resolution even on tall scrolling screenshots.
    */
   suspend fun importUriToPrivateTempFile(context: Context, uri: Uri): Result<File> =
     withContext(Dispatchers.IO) {
@@ -107,7 +127,7 @@ object ImageScanPreprocessor {
     sourceFile: File,
     preferLosslessPng: Boolean
   ): Result<File> = runCatching {
-    val bitmap = decodeScaledRotatedBitmap(sourceFile, OCR_MAX_LONG_EDGE_PX, extraRotationDegrees = 0)
+    val bitmap = decodeForOcrStaging(sourceFile, extraRotationDegrees = 0, upscaleSmallFonts = false)
       ?: error("Unsupported or corrupted image format.")
     try {
       val ext = if (preferLosslessPng) "png" else "jpg"
@@ -137,10 +157,10 @@ object ImageScanPreprocessor {
     destFile: File,
     extraRotationDegrees: Int
   ): Boolean {
-    val bitmap = decodeScaledRotatedBitmap(
+    val bitmap = decodeForOcrStaging(
       file = sourceFile,
-      maxLongEdgePx = OCR_MAX_LONG_EDGE_PX,
-      extraRotationDegrees = extraRotationDegrees
+      extraRotationDegrees = extraRotationDegrees,
+      upscaleSmallFonts = false
     ) ?: return false
     return try {
       FileOutputStream(destFile).use { out ->
@@ -156,9 +176,90 @@ object ImageScanPreprocessor {
     rotationDegrees: Int = 0
   ): Result<Bitmap> = withContext(Dispatchers.Default) {
     runCatching {
-      decodeScaledRotatedBitmap(file, OCR_MAX_LONG_EDGE_PX, rotationDegrees)
+      decodeForOcrStaging(file, rotationDegrees, upscaleSmallFonts = true)
         ?: error("Unable to decode screenshot for text recognition.")
     }
+  }
+
+  /**
+   * Decodes one full upright image, upscaling low-res crops when helpful and slicing tall
+   * scrolling screenshots into overlapping vertical strips so horizontal text sharpness stays high.
+   */
+  suspend fun decodeBitmapStripsForOcr(
+    file: File,
+    rotationDegrees: Int = 0
+  ): Result<List<OcrBitmapStrip>> = withContext(Dispatchers.Default) {
+    runCatching {
+      val full = decodeForOcrStaging(file, rotationDegrees, upscaleSmallFonts = true)
+        ?: error("Unable to decode screenshot for text recognition.")
+      val fullW = full.width
+      val fullH = full.height
+
+      if (fullH <= 2600 || fullH <= (fullW * 2.1f).toInt()) {
+        return@runCatching listOf(
+          OcrBitmapStrip(
+            bitmap = full,
+            yOffsetPx = 0,
+            fullWidthPx = fullW,
+            fullHeightPx = fullH
+          )
+        )
+      }
+
+      val strips = mutableListOf<OcrBitmapStrip>()
+      try {
+        var y = 0
+        while (y < fullH) {
+          val h = minOf(OCR_STRIP_MAX_HEIGHT_PX, fullH - y)
+          val slice = Bitmap.createBitmap(full, 0, y, fullW, h)
+          strips.add(
+            OcrBitmapStrip(
+              bitmap = slice,
+              yOffsetPx = y,
+              fullWidthPx = fullW,
+              fullHeightPx = fullH
+            )
+          )
+          if (y + h >= fullH) break
+          y += (OCR_STRIP_MAX_HEIGHT_PX - OCR_STRIP_OVERLAP_PX).coerceAtLeast(1)
+        }
+        strips
+      } catch (t: Throwable) {
+        strips.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+        throw t
+      } finally {
+        if (!full.isRecycled) full.recycle()
+      }
+    }
+  }
+
+  /**
+   * Applies gentle contrast/brightness stretching + monochrome normalization to improve OCR
+   * on low-contrast, dark-mode, or faded screenshots. Caller must recycle returned Bitmap.
+   */
+  fun createContrastEnhancedCopy(source: Bitmap): Bitmap {
+    val dest = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(dest)
+
+    // Convert to luminance grayscale and stretch contrast around midpoint (gain = 1.45, offset = -48)
+    val contrast = 1.45f
+    val translate = (-0.5f * contrast + 0.5f) * 255f
+    val grayMatrix = ColorMatrix().apply { setSaturation(0f) }
+    val contrastMatrix = ColorMatrix(
+      floatArrayOf(
+        contrast, 0f, 0f, 0f, translate,
+        0f, contrast, 0f, 0f, translate,
+        0f, 0f, contrast, 0f, translate,
+        0f, 0f, 0f, 1f, 0f
+      )
+    )
+    grayMatrix.postConcat(contrastMatrix)
+
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+      colorFilter = ColorMatrixColorFilter(grayMatrix)
+    }
+    canvas.drawBitmap(source, 0f, 0f, paint)
+    return dest
   }
 
   suspend fun decodeThumbnail(
@@ -174,8 +275,127 @@ object ImageScanPreprocessor {
     file: File
   ): Bitmap? = withContext(Dispatchers.IO) {
     runCatching {
-      decodeScaledRotatedBitmap(file, maxLongEdgePx = 1600, extraRotationDegrees = 0)
+      decodeForOcrStaging(file, extraRotationDegrees = 0, upscaleSmallFonts = false)
     }.getOrNull()
+  }
+
+  private fun decodeForOcrStaging(
+    file: File,
+    extraRotationDegrees: Int,
+    upscaleSmallFonts: Boolean
+  ): Bitmap? {
+    if (!file.exists() || !file.isFile || file.length() <= 0L) return null
+    val exifTransform = readExifTransform(file)
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+    val normalizedExtra = ((extraRotationDegrees % 360) + 360) % 360
+    val totalRotation = (exifTransform.degrees + normalizedExtra) % 360
+    val swapDims = totalRotation == 90 || totalRotation == 270
+    val logicalW = if (swapDims) bounds.outHeight else bounds.outWidth
+    val logicalH = if (swapDims) bounds.outWidth else bounds.outHeight
+
+    val shortEdge = minOf(logicalW, logicalH)
+    val longEdge = maxOf(logicalW, logicalH)
+    val isTallScroll = longEdge > shortEdge * 2.2f
+
+    // Determine safe sample size preserving horizontal readability on tall scrolling screenshots
+    val targetSampleLongEdge = if (isTallScroll) {
+      minOf(longEdge, OCR_TALL_MAX_TOTAL_HEIGHT_PX)
+    } else {
+      OCR_MAX_LONG_EDGE_PX
+    }
+    var inSampleSize = computeInSampleSizeKeepingMinWidth(
+      rawW = bounds.outWidth,
+      rawH = bounds.outHeight,
+      isTallScroll = isTallScroll,
+      targetMaxLongEdge = targetSampleLongEdge
+    )
+
+    // Guard total pixels against OOM
+    while ((bounds.outWidth.toLong() / inSampleSize) * (bounds.outHeight.toLong() / inSampleSize) > OCR_MAX_PIXELS) {
+      inSampleSize *= 2
+    }
+
+    val decodeOpts = BitmapFactory.Options().apply {
+      inSampleSize = inSampleSize.coerceAtLeast(1)
+      inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    var bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOpts) ?: return null
+
+    // Apply orientation first so width/height constraints operate in final logical space
+    if (exifTransform.flipHorizontal || totalRotation != 0) {
+      val matrix = Matrix()
+      if (exifTransform.flipHorizontal) {
+        matrix.postScale(-1f, 1f)
+      }
+      if (totalRotation != 0) {
+        matrix.postRotate(totalRotation.toFloat())
+      }
+      val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+      if (rotated !== bitmap) {
+        bitmap.recycle()
+        bitmap = rotated
+      }
+    }
+
+    val curW = bitmap.width
+    val curH = bitmap.height
+    val curShort = minOf(curW, curH)
+    val curLong = maxOf(curW, curH)
+    val isNowTall = curLong > curShort * 2.2f
+
+    val scaleFactor: Float? = when {
+      isNowTall && curShort > OCR_TALL_MAX_SHORT_EDGE_PX ->
+        OCR_TALL_MAX_SHORT_EDGE_PX.toFloat() / curShort.toFloat()
+      isNowTall && curLong > OCR_TALL_MAX_TOTAL_HEIGHT_PX ->
+        OCR_TALL_MAX_TOTAL_HEIGHT_PX.toFloat() / curLong.toFloat()
+      !isNowTall && curLong > OCR_MAX_LONG_EDGE_PX ->
+        OCR_MAX_LONG_EDGE_PX.toFloat() / curLong.toFloat()
+      upscaleSmallFonts && curShort in 120 until OCR_UPSCALE_MIN_SHORT_EDGE_PX && !isNowTall -> {
+        val factor = OCR_UPSCALE_TARGET_SHORT_EDGE_PX.toFloat() / curShort.toFloat()
+        factor.coerceAtMost(2.5f)
+      }
+      else -> null
+    }
+
+    if (scaleFactor != null && scaleFactor != 1f) {
+      val targetW = (curW * scaleFactor).toInt().coerceAtLeast(1)
+      val targetH = (curH * scaleFactor).toInt().coerceAtLeast(1)
+      if (targetW.toLong() * targetH.toLong() <= OCR_MAX_PIXELS) {
+        val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+        if (scaled !== bitmap) {
+          bitmap.recycle()
+          bitmap = scaled
+        }
+      }
+    }
+
+    return bitmap
+  }
+
+  private fun computeInSampleSizeKeepingMinWidth(
+    rawW: Int,
+    rawH: Int,
+    isTallScroll: Boolean,
+    targetMaxLongEdge: Int
+  ): Int {
+    val longEdge = maxOf(rawW, rawH)
+    val shortEdge = minOf(rawW, rawH)
+    var inSampleSize = 1
+    if (isTallScroll) {
+      while (shortEdge / (inSampleSize * 2) >= OCR_TALL_MAX_SHORT_EDGE_PX &&
+        longEdge / (inSampleSize * 2) >= 1200
+      ) {
+        inSampleSize *= 2
+      }
+    } else {
+      while (longEdge / (inSampleSize * 2) >= targetMaxLongEdge) {
+        inSampleSize *= 2
+      }
+    }
+    return inSampleSize.coerceAtLeast(1)
   }
 
   private fun decodeScaledRotatedBitmap(

@@ -1,5 +1,6 @@
 package com.baonplan.finance.domain.ocr
 
+import com.baonplan.finance.domain.model.RepaymentFrequency
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,9 +51,9 @@ class MultiScreenshotDebtMergerTest {
     assertEquals(150_000L, draft.outstandingBalanceCents.value)
     assertEquals(4, draft.installmentRows.size)
     assertEquals(50_000L, draft.calculatedPaidScheduleSumCents.value)
-    assertEquals(FieldOrigin.APP_CALCULATED, draft.calculatedPaidScheduleSumCents.origin)
+    assertEquals(FieldOrigin.CALCULATED, draft.calculatedPaidScheduleSumCents.origin)
     assertEquals(150_000L, draft.calculatedUnpaidScheduleSumCents.value)
-    assertEquals(FieldOrigin.APP_CALCULATED, draft.calculatedUnpaidScheduleSumCents.origin)
+    assertEquals(FieldOrigin.CALCULATED, draft.calculatedUnpaidScheduleSumCents.origin)
     assertEquals(1, draft.paidInstallmentsCount.value)
     assertEquals(3, draft.remainingInstallmentsCount.value)
   }
@@ -161,8 +162,147 @@ class MultiScreenshotDebtMergerTest {
 
     assertTrue(outcome is ScanAnalysisOutcome.SingleLoan)
     val draft = (outcome as ScanAnalysisOutcome.SingleLoan).draft
-    assertEquals(ExtractionConfidence.CONFLICT, draft.outstandingBalanceCents.confidence)
+    assertEquals(ExtractionConfidence.LOW, draft.outstandingBalanceCents.confidence)
+    assertTrue(draft.outstandingBalanceCents.hasConflict)
+    assertTrue(draft.outstandingBalanceCents.alternatives.isNotEmpty())
     assertTrue(draft.validationIssues.any { it.title.contains("differs across screenshots") })
+  }
+
+  @Test
+  fun linksThreePartialScreenshotsIntoSingleCoherentDebtRecord() {
+    // Screenshot 1: Origination terms (lender, loan amount, installment amount)
+    val s1 = OcrDocumentPage(
+      screenshotIndex = 0,
+      lines = listOf(
+        OcrLine("GCash GLoan"),
+        OcrLine("Loan Name: Study Allowance Loan"),
+        OcrLine("Loan Amount: ₱2,400.00"),
+        OcrLine("Monthly Installment: ₱400.00"),
+        OcrLine("Total Installments: 6")
+      )
+    )
+    // Screenshot 2: Payment history (paid count & paid rows)
+    val s2 = OcrDocumentPage(
+      screenshotIndex = 1,
+      lines = listOf(
+        OcrLine("GCash GLoan Payment History"),
+        OcrLine("#1 | Sep 16, 2026 | ₱400.00 | Paid"),
+        OcrLine("#2 | Oct 16, 2026 | ₱400.00 | Paid")
+      )
+    )
+    // Screenshot 3: Upcoming payment schedule & balance
+    val s3 = OcrDocumentPage(
+      screenshotIndex = 2,
+      lines = listOf(
+        OcrLine("GCash GLoan"),
+        OcrLine("Remaining Balance: ₱1,600.00"),
+        OcrLine("#3 | Nov 16, 2026 | ₱400.00 | Upcoming"),
+        OcrLine("#4 | Dec 16, 2026 | ₱400.00 | Upcoming"),
+        OcrLine("#5 | Jan 16, 2027 | ₱400.00 | Upcoming"),
+        OcrLine("#6 | Feb 16, 2027 | ₱400.00 | Upcoming")
+      )
+    )
+
+    val outcome = MultiScreenshotDebtMerger.merge(
+      listOf(
+        DebtOcrExtractor.extract(s1, refDate),
+        DebtOcrExtractor.extract(s2, refDate),
+        DebtOcrExtractor.extract(s3, refDate)
+      )
+    )
+
+    assertTrue(outcome is ScanAnalysisOutcome.SingleLoan)
+    val draft = (outcome as ScanAnalysisOutcome.SingleLoan).draft
+    assertEquals(listOf(0, 1, 2), draft.sourceScreenshotIndices)
+    assertEquals(240_000L, draft.originalPrincipalCents.value)
+    assertEquals(160_000L, draft.outstandingBalanceCents.value)
+    assertEquals(40_000L, draft.installmentAmountCents.value)
+    assertEquals(6, draft.originalInstallmentCount.value)
+    assertEquals(2, draft.paidInstallmentsCount.value)
+    assertEquals(4, draft.remainingInstallmentsCount.value)
+    assertEquals(6, draft.installmentRows.size)
+    assertEquals("2026-11-16", draft.nextDueDateIso.value)
+    assertEquals("2026-10-16", draft.lastPaidDateIso.value)
+    assertEquals(RepaymentFrequency.MONTHLY, draft.frequency.value)
+  }
+
+  @Test
+  fun prefersNewerSnapshotBalanceAndPreservesOlderValueInAlternatives() {
+    val olderPage = OcrDocumentPage(
+      screenshotIndex = 0,
+      lines = listOf(
+        OcrLine("BillEase"),
+        OcrLine("Contract ID: BE-5500"),
+        OcrLine("As of: Oct 10, 2026"),
+        OcrLine("Remaining Balance: ₱1,800.00"),
+        OcrLine("Paid Installments: 1")
+      )
+    )
+    val newerPage = OcrDocumentPage(
+      screenshotIndex = 1,
+      lines = listOf(
+        OcrLine("BillEase"),
+        OcrLine("Contract ID: BE-5500"),
+        OcrLine("As of: Nov 10, 2026"),
+        OcrLine("Remaining Balance: ₱1,200.00"),
+        OcrLine("Paid Installments: 2")
+      )
+    )
+
+    val outcome = MultiScreenshotDebtMerger.merge(
+      listOf(
+        DebtOcrExtractor.extract(olderPage, refDate),
+        DebtOcrExtractor.extract(newerPage, refDate)
+      )
+    )
+
+    assertTrue(outcome is ScanAnalysisOutcome.SingleLoan)
+    val draft = (outcome as ScanAnalysisOutcome.SingleLoan).draft
+    assertEquals(120_000L, draft.outstandingBalanceCents.value)
+    assertTrue(!draft.outstandingBalanceCents.hasConflict)
+    assertTrue(draft.outstandingBalanceCents.alternatives.any { it.value == 180_000L })
+    assertEquals(2, draft.paidInstallmentsCount.value)
+  }
+
+  @Test
+  fun supportsUserConfirmedCustomGroupingOverrides() {
+    val page0 = DebtOcrExtractor.extract(
+      OcrDocumentPage(
+        screenshotIndex = 0,
+        lines = listOf(
+          OcrLine("Shopee SPayLater"),
+          OcrLine("Order #SP-100"),
+          OcrLine("Original Loan Amount: ₱2,000.00")
+        )
+      ),
+      refDate
+    )
+    val page1 = DebtOcrExtractor.extract(
+      OcrDocumentPage(
+        screenshotIndex = 1,
+        lines = listOf(
+          OcrLine("Shopee SPayLater"),
+          OcrLine("Order #SP-200"),
+          OcrLine("Remaining Balance: ₱1,500.00")
+        )
+      ),
+      refDate
+    )
+
+    // Default auto-detect keeps different order IDs separate
+    val autoOutcome = MultiScreenshotDebtMerger.merge(listOf(page0, page1))
+    assertTrue(autoOutcome is ScanAnalysisOutcome.MultipleLoans)
+
+    // User overrides to combine both screenshots into one loan
+    val combined = MultiScreenshotDebtMerger.mergeWithCustomGroups(
+      pages = listOf(page0, page1),
+      groupedScreenshotIndices = listOf(listOf(0, 1))
+    )
+    assertTrue(combined is ScanAnalysisOutcome.SingleLoan)
+    val combinedDraft = (combined as ScanAnalysisOutcome.SingleLoan).draft
+    assertEquals(listOf(0, 1), combinedDraft.sourceScreenshotIndices)
+    assertEquals(200_000L, combinedDraft.originalPrincipalCents.value)
+    assertEquals(150_000L, combinedDraft.outstandingBalanceCents.value)
   }
 
   @Test
