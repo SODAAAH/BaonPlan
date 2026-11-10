@@ -2,13 +2,17 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.ObligationRole
+import com.baonplan.finance.domain.model.SourceDocumentKind
 import java.util.Locale
 
 data class ProviderAdapterResult(
   val providerProfile: ProviderProfile?,
   val productClassification: ExtractedField<LoanProductClassification>,
   val applicationProvider: ExtractedField<String>,
+  val lendingCompany: ExtractedField<String> = ExtractedField.notDetected(),
   val actualCreditor: ExtractedField<String>,
+  val productName: ExtractedField<String> = ExtractedField.notDetected(),
+  val sourceDocumentKind: SourceDocumentKind = SourceDocumentKind.UNKNOWN_DOCUMENT,
   val obligationRole: ObligationRole = ObligationRole.STANDALONE,
   val isRestructuredOrFlexi: Boolean = false,
   val hasDisclosureStatement: Boolean = false,
@@ -25,12 +29,27 @@ data class ProviderAdapterResult(
 object ProviderProductAdapters {
 
   private val disclosureRegex = Regex(
-    """\b(?:disclosure\s+statement|truth\s+in\s+lending|loan\s+disclosure|amortization\s+schedule|loan\s+agreement)\b""",
+    """\b(?:disclosure\s+statement|truth\s+in\s+lending|loan\s+disclosure|ra\s*3765|republic\s+act\s+(?:no\.?\s*)?3765)\b""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private val loanAgreementRegex = Regex(
+    """\b(?:loan\s+agreement|credit\s+agreement|promissory\s+note|contract\s+of\s+loan|terms\s+and\s+conditions\s+of\s+loan|executed\s+agreement)\b""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private val amortizationScheduleRegex = Regex(
+    """\b(?:amortization\s+schedule|repayment\s+schedule\s+table|payment\s+schedule\s+annex|contractual\s+schedule)\b""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private val paymentReceiptRegex = Regex(
+    """\b(?:payment\s+receipt|official\s+receipt|payment\s+confirmation|transaction\s+receipt|successfully\s+paid|payment\s+successful|reference\s+no\.?\s*[:#]?\s*[a-z0-9-]+.*paid)\b""",
     RegexOption.IGNORE_CASE
   )
 
   private val restructuredFlexiRegex = Regex(
-    """\b(?:flexi|restructur(?:ed|ing)|re-?schedul(?:ed|ing)|modified\s+(?:schedule|terms)|new\s+schedule|payment\s+arrangement)\b""",
+    """\b(?:flexi|restructur(?:ed|ing)|re-?schedul(?:ed|ing)|modified\s+(?:schedule|terms)|new\s+schedule|revised\s+(?:repayment\s+)?schedule|payment\s+arrangement|payment\s+extension|loan\s+modification)\b""",
     RegexOption.IGNORE_CASE
   )
 
@@ -62,14 +81,30 @@ object ProviderProductAdapters {
     val profile = PhilippineLoanProviderCatalog.detectProfile(combinedText)
 
     val hasDisclosure = disclosureRegex.containsMatchIn(combinedText)
+    val hasLoanAgreement = loanAgreementRegex.containsMatchIn(combinedText)
+    val hasAmortizationSchedule = amortizationScheduleRegex.containsMatchIn(combinedText)
+    val hasPaymentReceipt = paymentReceiptRegex.containsMatchIn(combinedText)
     val isFlexiOrRestructured = restructuredFlexiRegex.containsMatchIn(combinedText)
     val isConverted = convertedInstallmentRegex.containsMatchIn(combinedText)
     val isBillingStatement = billingStatementRegex.containsMatchIn(combinedText)
     val hasRevolvingCues = revolvingCueRegex.containsMatchIn(combinedText)
 
+    val sourceDocKind = when {
+      isFlexiOrRestructured -> SourceDocumentKind.RESTRUCTURING_NOTICE
+      hasDisclosure -> SourceDocumentKind.DISCLOSURE_STATEMENT
+      hasLoanAgreement -> SourceDocumentKind.LOAN_AGREEMENT
+      hasAmortizationSchedule -> SourceDocumentKind.AMORTIZATION_SCHEDULE
+      isBillingStatement -> SourceDocumentKind.BILLING_STATEMENT
+      hasPaymentReceipt -> SourceDocumentKind.PAYMENT_RECEIPT
+      else -> SourceDocumentKind.UNKNOWN_DOCUMENT
+    }
+
     val notes = mutableListOf<String>()
     if (hasDisclosure) {
       notes.add("Disclosure Statement detected — contractual repayment terms take priority.")
+    }
+    if (hasLoanAgreement) {
+      notes.add("Loan Agreement detected — contractual repayment terms take priority.")
     }
     if (isFlexiOrRestructured) {
       notes.add("Restructured / Flexi schedule detected — newer schedule terms supersede prior schedule.")
@@ -81,7 +116,7 @@ object ProviderProductAdapters {
         sourceSnippet = findMatchingSnippet(rows, restructuredFlexiRegex),
         screenshotIndex = screenshotIndex,
         confidence = ExtractionConfidence.HIGH,
-        verificationReason = "Restructured or Flexi schedule terms detected in screenshot #${screenshotIndex + 1}."
+        verificationReason = "Restructured or Flexi schedule terms detected in source #${screenshotIndex + 1}."
       )
 
       isConverted -> ExtractedField.extracted(
@@ -89,7 +124,15 @@ object ProviderProductAdapters {
         sourceSnippet = findMatchingSnippet(rows, convertedInstallmentRegex),
         screenshotIndex = screenshotIndex,
         confidence = ExtractionConfidence.HIGH,
-        verificationReason = "Converted installment plan detected in screenshot #${screenshotIndex + 1}."
+        verificationReason = "Converted installment plan detected in source #${screenshotIndex + 1}."
+      )
+
+      profile?.id == "gcash_gcredit" -> ExtractedField.extracted(
+        value = LoanProductClassification.REVOLVING_CREDIT,
+        sourceSnippet = findMatchingSnippet(rows, profile.detectPatterns.first()),
+        screenshotIndex = screenshotIndex,
+        confidence = ExtractionConfidence.HIGH,
+        verificationReason = "GCash GCredit revolving credit line detected."
       )
 
       profile?.id == "gcash_ggives" -> ExtractedField.extracted(
@@ -212,26 +255,22 @@ object ProviderProductAdapters {
       else -> ObligationRole.STANDALONE
     }
 
-    val appProvider = profile?.applicationProviderName?.let { appName ->
-      ExtractedField.extracted(
-        value = appName,
-        sourceSnippet = findMatchingSnippet(rows, profile.detectPatterns.firstOrNull()),
-        screenshotIndex = screenshotIndex,
-        confidence = ExtractionConfidence.HIGH,
-        verificationReason = "Application platform identified as $appName."
-      )
-    } ?: ExtractedField.notDetected()
-
-    val creditor = resolveActualCreditor(rows, profile, screenshotIndex)
+    val appProvider = resolveApplicationProvider(rows, profile, screenshotIndex)
+    val lendingCompany = resolveLendingCompany(rows, combinedText, profile, screenshotIndex)
+    val creditor = resolveActualCreditor(rows, lendingCompany, profile, screenshotIndex)
+    val productName = resolveProductName(rows, profile, screenshotIndex)
 
     return ProviderAdapterResult(
       providerProfile = profile,
       productClassification = productField,
       applicationProvider = appProvider,
+      lendingCompany = lendingCompany,
       actualCreditor = creditor,
+      productName = productName,
+      sourceDocumentKind = sourceDocKind,
       obligationRole = role,
       isRestructuredOrFlexi = isFlexiOrRestructured,
-      hasDisclosureStatement = hasDisclosure,
+      hasDisclosureStatement = hasDisclosure || hasLoanAgreement,
       adapterNotes = notes
     )
   }
@@ -408,29 +447,131 @@ object ProviderProductAdapters {
     }
   }
 
-  private fun resolveActualCreditor(
+  private val secCorporateEntityRegex = Regex(
+    """\b([A-Z][A-Za-z0-9&.,'()\- ]{2,55}?\b(?:Lending|Financing|Finance|Credit|Digital\s+Bank|Rural\s+Bank|Savings\s+Bank|Bank)\s+(?:Corp\.?|Corporation|Inc\.?|Incorporated|Co\.?|Company(?:\s+Inc\.?)?))""",
+    RegexOption.IGNORE_CASE
+  )
+
+  private fun resolveApplicationProvider(
     rows: List<NormalizedOcrRow>,
     profile: ProviderProfile?,
     idx: Int
   ): ExtractedField<String> {
+    if (profile?.applicationProviderName != null) {
+      return ExtractedField.extracted(
+        value = profile.applicationProviderName,
+        sourceSnippet = findMatchingSnippet(rows, profile.detectPatterns.firstOrNull()),
+        screenshotIndex = idx,
+        confidence = ExtractionConfidence.HIGH,
+        verificationReason = "Application platform identified as ${profile.applicationProviderName}."
+      )
+    }
+    val platformLabelRegex = Regex(
+      """\b(?:app(?:lication)?|platform|portal|mobile\s+app|online\s+lending\s+platform|olp)\b""",
+      RegexOption.IGNORE_CASE
+    )
+    for (row in rows) {
+      if (platformLabelRegex.containsMatchIn(row.text)) {
+        val after = row.columns.drop(1).joinToString(" ").trim()
+          .ifBlank { row.text.substringAfter(':', "").trim() }
+        if (after.length in 2..45 && !after.contains("₱")) {
+          return ExtractedField.extracted(
+            value = after,
+            sourceSnippet = row.text,
+            screenshotIndex = idx,
+            confidence = ExtractionConfidence.HIGH,
+            verificationReason = "Application/platform read from header or disclosure line."
+          )
+        }
+      }
+    }
+    return ExtractedField.notDetected()
+  }
+
+  private fun resolveLendingCompany(
+    rows: List<NormalizedOcrRow>,
+    combinedText: String,
+    profile: ProviderProfile?,
+    idx: Int
+  ): ExtractedField<String> {
+    val lendingCompanyLabelRegex = Regex(
+      """\b(?:lending\s+company|financing\s+company|operated\s+by|registered\s+lender|sec\s+reg(?:istration)?)\b""",
+      RegexOption.IGNORE_CASE
+    )
+    for (row in rows) {
+      if (lendingCompanyLabelRegex.containsMatchIn(row.text)) {
+        val after = row.columns.drop(1).joinToString(" ").trim()
+          .ifBlank { row.text.substringAfter(':', "").trim() }
+        val corpMatch = secCorporateEntityRegex.find(after)?.groupValues?.getOrNull(1)?.trim()
+          ?: after.takeIf { it.length in 4..65 && !it.contains("₱") }
+        if (!corpMatch.isNullOrBlank()) {
+          return ExtractedField.extracted(
+            value = corpMatch,
+            sourceSnippet = row.text,
+            screenshotIndex = idx,
+            confidence = ExtractionConfidence.HIGH,
+            verificationReason = "Lending/financing company read directly from document."
+          )
+        }
+      }
+    }
+    val explicitCorpInDoc = secCorporateEntityRegex.find(combinedText)?.groupValues?.getOrNull(1)?.trim()
+    if (!explicitCorpInDoc.isNullOrBlank() && explicitCorpInDoc.length in 6..65) {
+      return ExtractedField.extracted(
+        value = explicitCorpInDoc,
+        sourceSnippet = explicitCorpInDoc,
+        screenshotIndex = idx,
+        confidence = ExtractionConfidence.HIGH,
+        verificationReason = "Registered lending/financing entity found in document text."
+      )
+    }
+    val defaultCorp = profile?.defaultLendingCompany
+    return if (!defaultCorp.isNullOrBlank()) {
+      ExtractedField.estimated(
+        value = defaultCorp,
+        sourceSnippet = profile.canonicalLender,
+        screenshotIndex = idx,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Reference lending/financing company associated with ${profile.canonicalLender} (confirm against your agreement)."
+      )
+    } else {
+      ExtractedField.notDetected()
+    }
+  }
+
+  private fun resolveActualCreditor(
+    rows: List<NormalizedOcrRow>,
+    lendingCompany: ExtractedField<String>,
+    profile: ProviderProfile?,
+    idx: Int
+  ): ExtractedField<String> {
     val creditorLabelRegex = Regex(
-      """\b(?:creditor|lending\s+partner|financed\s+by|underwritten\s+by|powered\s+by)\b""",
+      """\b(?:actual\s+creditor|creditor|lending\s+partner|financed\s+by|underwritten\s+by|powered\s+by|assignee|lender\s+name)\b""",
       RegexOption.IGNORE_CASE
     )
     for (row in rows) {
       if (creditorLabelRegex.containsMatchIn(row.text)) {
         val after = row.columns.drop(1).joinToString(" ").trim()
           .ifBlank { row.text.substringAfter(':', "").trim() }
-        if (after.length in 3..60) {
+        if (after.length in 3..65 && !after.contains("₱")) {
           return ExtractedField.extracted(
             value = after,
             sourceSnippet = row.text,
             screenshotIndex = idx,
             confidence = ExtractionConfidence.HIGH,
-            verificationReason = "Underlying creditor read from disclosure/partner line."
+            verificationReason = "Actual creditor read directly from disclosure/agreement line."
           )
         }
       }
+    }
+    if (lendingCompany.origin == FieldOrigin.EXTRACTED && !lendingCompany.value.isNullOrBlank()) {
+      return ExtractedField.extracted(
+        value = lendingCompany.value,
+        sourceSnippet = lendingCompany.sourceSnippet,
+        screenshotIndex = idx,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Derived from registered lending/financing company in document."
+      )
     }
     val knownCreditor = profile?.defaultActualCreditor
     return if (!knownCreditor.isNullOrBlank()) {
@@ -439,7 +580,45 @@ object ProviderProductAdapters {
         sourceSnippet = profile.canonicalLender,
         screenshotIndex = idx,
         confidence = ExtractionConfidence.MEDIUM,
-        verificationReason = "Known lending entity for ${profile.canonicalLender}."
+        verificationReason = "Reference creditor for ${profile.canonicalLender} — confirm if another partner funded the loan."
+      )
+    } else {
+      ExtractedField.notDetected()
+    }
+  }
+
+  private fun resolveProductName(
+    rows: List<NormalizedOcrRow>,
+    profile: ProviderProfile?,
+    idx: Int
+  ): ExtractedField<String> {
+    val productLabelRegex = Regex(
+      """\b(?:product\s+name|loan\s+product|facility\s+type|credit\s+product|plan\s+type)\b""",
+      RegexOption.IGNORE_CASE
+    )
+    for (row in rows) {
+      if (productLabelRegex.containsMatchIn(row.text)) {
+        val after = row.columns.drop(1).joinToString(" ").trim()
+          .ifBlank { row.text.substringAfter(':', "").trim() }
+        if (after.length in 3..55 && !after.contains("₱")) {
+          return ExtractedField.extracted(
+            value = after,
+            sourceSnippet = row.text,
+            screenshotIndex = idx,
+            confidence = ExtractionConfidence.HIGH,
+            verificationReason = "Loan product name extracted from document."
+          )
+        }
+      }
+    }
+    val defaultProd = profile?.defaultProductName
+    return if (!defaultProd.isNullOrBlank()) {
+      ExtractedField.estimated(
+        value = defaultProd,
+        sourceSnippet = profile.canonicalLender,
+        screenshotIndex = idx,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Product family identified as $defaultProd."
       )
     } else {
       ExtractedField.notDetected()

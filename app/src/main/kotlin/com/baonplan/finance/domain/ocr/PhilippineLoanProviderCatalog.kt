@@ -7,7 +7,9 @@ data class ProviderProfile(
   val id: String,
   val canonicalLender: String,
   val applicationProviderName: String? = null,
+  val defaultLendingCompany: String? = null,
   val defaultActualCreditor: String? = null,
+  val defaultProductName: String? = null,
   val defaultLoanType: String?,
   val defaultProductClassification: LoanProductClassification? = null,
   val detectPatterns: List<Regex>,
@@ -103,14 +105,16 @@ object PhilippineLoanProviderCatalog {
         LoanFieldKey.AMOUNT_CURRENTLY_DUE to listOf("amount to pay", "current due", "total due now", "total billed amount", "billed amount"),
         LoanFieldKey.OUTSTANDING_BALANCE to listOf("remaining balance", "loan balance", "total unpaid balance"),
         LoanFieldKey.AMOUNT_RECEIVED to listOf("net proceeds", "disbursed to gcash", "credited to gcash"),
-        LoanFieldKey.OTHER_FEES to listOf("doc stamp", "documentary stamp", "dst")
+        LoanFieldKey.DOCUMENTARY_STAMP_TAX to listOf("doc stamp", "documentary stamp", "dst")
       )
     ),
     ProviderProfile(
       id = "gcash_ggives",
       canonicalLender = "GCash (GGives)",
       applicationProviderName = "GCash",
+      defaultLendingCompany = "Fuse Lending Inc.",
       defaultActualCreditor = "Fuse Lending Inc.",
+      defaultProductName = "GGives",
       defaultLoanType = "Installment Loan",
       defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
       detectPatterns = listOf(Regex("""\bg\s*gives\b|\bggives\b""", RegexOption.IGNORE_CASE)),
@@ -121,10 +125,30 @@ object PhilippineLoanProviderCatalog {
       )
     ),
     ProviderProfile(
+      id = "gcash_gcredit",
+      canonicalLender = "GCash (GCredit)",
+      applicationProviderName = "GCash",
+      defaultLendingCompany = "Fuse Lending Inc.",
+      defaultActualCreditor = "Fuse Lending Inc.",
+      defaultProductName = "GCredit",
+      defaultLoanType = "Credit Line",
+      defaultProductClassification = LoanProductClassification.REVOLVING_CREDIT,
+      detectPatterns = listOf(Regex("""\bg\s*credit\b|\bgcredit\b""", RegexOption.IGNORE_CASE)),
+      extraNoisePhrases = listOf("gscore", "wallet balance", "gcash balance"),
+      fieldSynonyms = mapOf(
+        LoanFieldKey.STATEMENT_BALANCE to listOf("statement balance", "total statement due", "billed balance"),
+        LoanFieldKey.MINIMUM_DUE to listOf("minimum amount due", "minimum due"),
+        LoanFieldKey.USED_CREDIT to listOf("used credit", "credit used", "utilized credit")
+      ),
+      singlePaymentCardHint = true
+    ),
+    ProviderProfile(
       id = "gcash_cash_loan",
       canonicalLender = "GCash (Cash Loan)",
       applicationProviderName = "GCash",
+      defaultLendingCompany = "Fuse Lending Inc.",
       defaultActualCreditor = "Fuse Lending Inc.",
+      defaultProductName = "GCash Cash Loan",
       defaultLoanType = "Cash Loan",
       defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
       detectPatterns = listOf(
@@ -298,11 +322,149 @@ object PhilippineLoanProviderCatalog {
       id = "digido",
       canonicalLender = "Digido",
       applicationProviderName = "Digido",
+      defaultLendingCompany = "Digido Finance Corp.",
       defaultActualCreditor = "Digido Finance Corp.",
+      defaultProductName = "Digido Cash Loan",
       defaultLoanType = "Cash Loan",
       defaultProductClassification = LoanProductClassification.SHORT_TERM_LUMP_SUM_LOAN,
       detectPatterns = listOf(Regex("""\bdigido\b""", RegexOption.IGNORE_CASE)),
       extraNoisePhrases = listOf("available limit", "first loan")
+    ),
+    ProviderProfile(
+      id = "acom",
+      canonicalLender = "ACOM",
+      applicationProviderName = "ACOM",
+      defaultLendingCompany = "ACOM Consumer Finance Corporation",
+      defaultActualCreditor = "ACOM Consumer Finance Corporation",
+      defaultProductName = "ACOM Cash Loan",
+      defaultLoanType = "Cash Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\bacom\b|\bacom\s+consumer\s+finance\b""", RegexOption.IGNORE_CASE)),
+      extraNoisePhrases = listOf("credit limit offer")
+    ),
+    ProviderProfile(
+      id = "cashmart",
+      canonicalLender = "Cashmart",
+      applicationProviderName = "Cashmart",
+      defaultLendingCompany = "Cash Mart Asia Lending Inc.",
+      defaultActualCreditor = "Cash Mart Asia Lending Inc.",
+      defaultProductName = "Cashmart Loan",
+      defaultLoanType = "Cash Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\bcash\s*mart\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "advance",
+      canonicalLender = "Advance",
+      applicationProviderName = "Advance",
+      defaultLendingCompany = "Advance Tech Lending Inc.",
+      defaultActualCreditor = "Advance Tech Lending Inc.",
+      defaultProductName = "Salary Advance",
+      defaultLoanType = "Salary Advance",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\badvance\s+tech\s+lending\b|\badvance\.ph\b|\bsalary\s+advance\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "bukas",
+      canonicalLender = "Bukas",
+      applicationProviderName = "Bukas",
+      defaultLendingCompany = "Bukas Finance Corp.",
+      defaultActualCreditor = "Bukas Finance Corp.",
+      defaultProductName = "Student Tuition Plan",
+      defaultLoanType = "Installment Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\bbukas\b|\bbukas\s+finance\b""", RegexOption.IGNORE_CASE)),
+      fieldSynonyms = mapOf(
+        LoanFieldKey.ORIGINAL_PRINCIPAL to listOf("tuition amount", "financed tuition", "loan principal")
+      )
+    ),
+    ProviderProfile(
+      id = "salmon",
+      canonicalLender = "Salmon",
+      applicationProviderName = "Salmon",
+      defaultLendingCompany = "Sunbay Finance Inc.",
+      defaultActualCreditor = "Sunbay Finance Inc.",
+      defaultProductName = "Salmon Financing",
+      defaultLoanType = "Installment Loan",
+      defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
+      detectPatterns = listOf(Regex("""\bsalmon\b|\bsunbay\s+finance\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "kredivo",
+      canonicalLender = "Kredivo",
+      applicationProviderName = "Kredivo",
+      defaultLendingCompany = "FinAccel Finance Philippines Inc.",
+      defaultActualCreditor = "FinAccel Finance Philippines Inc.",
+      defaultProductName = "Kredivo BNPL",
+      defaultLoanType = "BNPL",
+      defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
+      detectPatterns = listOf(Regex("""\bkredivo\b|\bfinaccel\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "akulaku",
+      canonicalLender = "Akulaku",
+      applicationProviderName = "Akulaku",
+      defaultLendingCompany = "StreetCorner Lending Corp.",
+      defaultActualCreditor = "StreetCorner Lending Corp.",
+      defaultProductName = "Akulaku Installment",
+      defaultLoanType = "BNPL",
+      defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
+      detectPatterns = listOf(Regex("""\bakulaku\b|\bstreetcorner\s+lending\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "tendopay",
+      canonicalLender = "TendoPay",
+      applicationProviderName = "TendoPay",
+      defaultLendingCompany = "Tempus Lending Corp.",
+      defaultActualCreditor = "Tempus Lending Corp.",
+      defaultProductName = "TendoPay Installment",
+      defaultLoanType = "BNPL",
+      defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
+      detectPatterns = listOf(Regex("""\btendo\s*pay\b|\btempus\s+lending\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "asialink",
+      canonicalLender = "Asialink Finance",
+      applicationProviderName = "Asialink",
+      defaultLendingCompany = "Asialink Finance Corporation",
+      defaultActualCreditor = "Asialink Finance Corporation",
+      defaultProductName = "Asialink Loan",
+      defaultLoanType = "Installment Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\basialink\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "first_circle",
+      canonicalLender = "First Circle",
+      applicationProviderName = "First Circle",
+      defaultLendingCompany = "First Circle Growth Finance Corp.",
+      defaultActualCreditor = "First Circle Growth Finance Corp.",
+      defaultProductName = "First Circle Credit",
+      defaultLoanType = "Credit Line",
+      defaultProductClassification = LoanProductClassification.REVOLVING_CREDIT,
+      detectPatterns = listOf(Regex("""\bfirst\s+circle\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "esquire",
+      canonicalLender = "Esquire Financing",
+      applicationProviderName = "Esquire Financing",
+      defaultLendingCompany = "Esquire Financing Inc.",
+      defaultActualCreditor = "Esquire Financing Inc.",
+      defaultProductName = "Esquire Business Loan",
+      defaultLoanType = "Installment Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\besquire\s+financing\b""", RegexOption.IGNORE_CASE))
+    ),
+    ProviderProfile(
+      id = "radiowealth_rfc",
+      canonicalLender = "Radiowealth Finance (RFC)",
+      applicationProviderName = "RFC",
+      defaultLendingCompany = "Radiowealth Finance Company Inc.",
+      defaultActualCreditor = "Radiowealth Finance Company Inc.",
+      defaultProductName = "RFC Financing Loan",
+      defaultLoanType = "Installment Loan",
+      defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
+      detectPatterns = listOf(Regex("""\bradiowealth\b|\brfc\s+loan\b|\brfc\s+finance\b""", RegexOption.IGNORE_CASE))
     ),
     // Generic parent providers checked AFTER product-specific rules
     ProviderProfile(

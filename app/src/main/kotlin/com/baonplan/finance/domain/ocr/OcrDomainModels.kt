@@ -2,9 +2,14 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.InterestCalculationMethod
 import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.ObligationRole
+import com.baonplan.finance.domain.model.PrepaymentRuleType
+import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
+import com.baonplan.finance.domain.model.SourceDocumentKind
 import kotlinx.serialization.Serializable
 
 enum class FieldOrigin(val badgeLabel: String) {
@@ -54,7 +59,18 @@ enum class LoanFieldKey(val displayName: String) {
   LAST_PAID_DATE("Last paid date"),
   FREQUENCY("Repayment frequency"),
   LOAN_TYPE("Loan type"),
-  PRODUCT_CLASSIFICATION("Product classification")
+  PRODUCT_CLASSIFICATION("Product classification"),
+  LENDING_COMPANY("Lending / financing company"),
+  PRODUCT_NAME("Product name"),
+  CONTRACTUAL_MATURITY_DATE("Contractual maturity date"),
+  PROJECTED_PAYOFF_DATE("Projected full-payment date"),
+  ACTUAL_SETTLEMENT_DATE("Actual fully paid date"),
+  ANNUAL_INTEREST_RATE("Annual interest rate"),
+  MONTHLY_INTEREST_RATE("Monthly interest rate"),
+  DAILY_INTEREST_RATE("Daily interest rate"),
+  EFFECTIVE_INTEREST_RATE("Effective interest rate"),
+  DOCUMENTARY_STAMP_TAX("Documentary stamp tax"),
+  INSURANCE_CHARGE("Insurance charge")
 }
 
 @Serializable
@@ -228,7 +244,13 @@ data class OcrDocumentPage(
   val height: Int = 0,
   val lines: List<OcrLine>,
   val rawFullText: String = lines.joinToString("\n") { it.text },
-  val quality: OcrPageQuality = OcrPageQuality()
+  val quality: OcrPageQuality = OcrPageQuality(),
+  val sourceDocumentId: String? = null,
+  val documentTitle: String? = null,
+  val pageNumber: Int = 1,
+  val totalPagesInDocument: Int = 1,
+  val isPdfPage: Boolean = false,
+  val isScannedPdfPage: Boolean = false
 )
 
 enum class ExtractedInstallmentStatus(val label: String) {
@@ -273,9 +295,20 @@ data class ExtractedInstallmentRow(
   val dateStatus: DueDateStatus = DueDateStatus.UNCONFIRMED,
   val dateConfidence: ExtractionConfidence = ExtractionConfidence.MEDIUM,
   val amountCents: Long? = null,
+  val principalComponentCents: Long? = null,
+  val interestComponentCents: Long? = null,
+  val serviceFeeComponentCents: Long? = null,
+  val otherChargesComponentCents: Long? = null,
+  val amountPaidCents: Long? = null,
+  val actualPaymentDateIso: String? = null,
+  val remainingAmountCents: Long? = null,
+  val remainingPrincipalAfterCents: Long? = null,
   val status: ExtractedInstallmentStatus = ExtractedInstallmentStatus.UPCOMING,
   val sourceSnippet: String = "",
   val screenshotIndex: Int = 0,
+  val pageNumber: Int = 1,
+  val evidenceSourceLabel: String? = null,
+  val rawStatusLabel: String? = null,
   val verificationNote: String? = null
 )
 
@@ -318,10 +351,18 @@ data class DuplicateDebtMatch(
 data class SingleScreenshotExtraction(
   val screenshotIndex: Int,
   val documentKind: ExtractedDocumentKind,
+  val sourceDocumentKind: SourceDocumentKind = SourceDocumentKind.UNKNOWN_DOCUMENT,
+  val sourceDocumentId: String? = null,
+  val documentTitle: String? = null,
+  val pageNumber: Int = 1,
+  val totalPagesInDocument: Int = 1,
+  val isPdfPage: Boolean = false,
   val providerProfileId: String? = null,
   val productClassification: ExtractedField<LoanProductClassification> = ExtractedField.notDetected(),
   val applicationProvider: ExtractedField<String> = ExtractedField.notDetected(),
+  val lendingCompany: ExtractedField<String> = ExtractedField.notDetected(),
   val actualCreditor: ExtractedField<String> = ExtractedField.notDetected(),
+  val productName: ExtractedField<String> = ExtractedField.notDetected(),
   val lender: ExtractedField<String> = ExtractedField.notDetected(),
   val loanName: ExtractedField<String> = ExtractedField.notDetected(),
   val loanType: ExtractedField<String> = ExtractedField.notDetected(),
@@ -358,10 +399,14 @@ data class SingleScreenshotExtraction(
   val serviceFeeCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val processingFeeCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val otherFeesCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val documentaryStampTaxCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val insuranceChargeCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val contractualTerms: ContractualTermsSummary = ContractualTermsSummary(),
   val loanStatus: ExtractedField<DebtStatus> = ExtractedField.notDetected(),
   val isSchedulePartial: Boolean = false,
   val scheduleVersion: Int = 1,
   val scheduleEffectiveDateIso: String? = null,
+  val modificationReason: String? = null,
   val obligationRole: ObligationRole = ObligationRole.STANDALONE,
   val installmentRows: List<ExtractedInstallmentRow> = emptyList(),
   val textCorrections: List<TextCorrectionAudit> = emptyList(),
@@ -377,7 +422,9 @@ data class DebtImportDraft(
   val providerProfileId: String? = null,
   val productClassification: ExtractedField<LoanProductClassification> = ExtractedField.notDetected(),
   val applicationProvider: ExtractedField<String> = ExtractedField.notDetected(),
+  val lendingCompany: ExtractedField<String> = ExtractedField.notDetected(),
   val actualCreditor: ExtractedField<String> = ExtractedField.notDetected(),
+  val productName: ExtractedField<String> = ExtractedField.notDetected(),
   val lender: ExtractedField<String>,
   val loanName: ExtractedField<String>,
   val loanType: ExtractedField<String>,
@@ -414,6 +461,9 @@ data class DebtImportDraft(
   val serviceFeeCents: ExtractedField<Long>,
   val processingFeeCents: ExtractedField<Long>,
   val otherFeesCents: ExtractedField<Long>,
+  val documentaryStampTaxCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val insuranceChargeCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val contractualTerms: ContractualTermsSummary = ContractualTermsSummary(),
   val loanStatus: ExtractedField<DebtStatus>,
   val dueDateStatus: DueDateStatus,
   val isSchedulePartial: Boolean = false,
@@ -422,6 +472,10 @@ data class DebtImportDraft(
   val obligationRole: ObligationRole = ObligationRole.STANDALONE,
   val suggestedParentDebtId: Long? = null,
   val installmentRows: List<ExtractedInstallmentRow>,
+  val scheduleVersions: List<ScheduleVersionSnapshot> = emptyList(),
+  val payoffTimeline: PayoffTimelineProjection = PayoffTimelineProjection(),
+  val analyzedDocuments: List<AnalyzedDocumentSummary> = emptyList(),
+  val evidenceTraces: List<DocumentEvidenceTrace> = emptyList(),
   val textCorrections: List<TextCorrectionAudit> = emptyList(),
   val mergeNotes: List<String> = emptyList(),
   val validationIssues: List<ImportValidationIssue> = emptyList(),
@@ -441,3 +495,119 @@ sealed interface ScanAnalysisOutcome {
     val failedScreenshotIndices: List<Int> = emptyList()
   ) : ScanAnalysisOutcome
 }
+
+@Serializable
+data class ContractualTermsSummary(
+  val annualInterestRatePercent: Double? = null,
+  val monthlyInterestRatePercent: Double? = null,
+  val dailyInterestRatePercent: Double? = null,
+  val effectiveInterestRatePercent: Double? = null,
+  val interestCalculationMethod: InterestCalculationMethod = InterestCalculationMethod.UNKNOWN,
+  val feesIncludedInInstallment: Boolean? = null,
+  val feesDeductedUpfront: Boolean? = null,
+  val gracePeriodDays: Int? = null,
+  val latePaymentFeeRule: String? = null,
+  val prepaymentRule: PrepaymentRuleType = PrepaymentRuleType.UNKNOWN,
+  val prepaymentRuleDetail: String? = null,
+  val paymentAllocationOrder: String? = null,
+  val dayCountConvention: String? = null,
+  val interestAccrualStartDateIso: String? = null
+)
+
+@Serializable
+data class ReconstructedScheduleEntry(
+  val installmentNumber: Int,
+  val dueDateIso: String? = null,
+  val principalComponentCents: Long? = null,
+  val interestComponentCents: Long? = null,
+  val serviceFeeComponentCents: Long? = null,
+  val otherChargesComponentCents: Long? = null,
+  val totalInstallmentCents: Long? = null,
+  val amountPaidCents: Long = 0L,
+  val actualPaymentDateIso: String? = null,
+  val remainingAmountCents: Long? = null,
+  val remainingPrincipalAfterCents: Long? = null,
+  val statusLabel: String = "Upcoming",
+  val isPaid: Boolean = false,
+  val isOverdue: Boolean = false,
+  val isPartiallyPaid: Boolean = false,
+  val isCancelledOrReversed: Boolean = false,
+  val scheduleVersion: Int = 1,
+  val evidenceSourceLabel: String? = null,
+  val pageNumber: Int? = null,
+  val note: String? = null
+)
+
+@Serializable
+data class ScheduleVersionSnapshot(
+  val versionNumber: Int,
+  val effectiveDateIso: String? = null,
+  val modificationReason: String? = null,
+  val installmentAmountCents: Long? = null,
+  val totalInstallmentCount: Int? = null,
+  val maturityDateIso: String? = null,
+  val isCurrentlyEffective: Boolean = true,
+  val entries: List<ReconstructedScheduleEntry> = emptyList()
+)
+
+@Serializable
+data class PayoffTimelineProjection(
+  val originalLoanDateIso: String? = null,
+  val firstInstallmentDateIso: String? = null,
+  val nextPaymentDateIso: String? = null,
+  val contractualMaturityDateIso: String? = null,
+  val currentScheduledPayoffDateIso: String? = null,
+  val projectedPayoffDateIso: String? = null,
+  val actualFullyPaidDateIso: String? = null,
+  val totalInstallmentsCount: Int? = null,
+  val paidInstallmentsCount: Int? = null,
+  val remainingInstallmentsCount: Int? = null,
+  val remainingScheduledTotalCents: Long? = null,
+  val completenessStatus: ScheduleCompletenessStatus = ScheduleCompletenessStatus.NEEDS_USER_REVIEW,
+  val reliability: ProjectionReliability = ProjectionReliability.INSUFFICIENT_DATA,
+  val scheduleSourceSummary: String = "",
+  val missingInformationExplanation: String? = null,
+  val assumptionsUsed: List<String> = emptyList()
+)
+
+@Serializable
+data class HypotheticalPayoffScenario(
+  val scenarioTitle: String,
+  val isHypothetical: Boolean = true,
+  val projectedPayoffDateIso: String? = null,
+  val estimatedTotalPaidCents: Long? = null,
+  val estimatedInterestSavedCents: Long? = null,
+  val explanation: String
+)
+
+@Serializable
+data class AnalyzedDocumentSummary(
+  val documentId: String,
+  val displayTitle: String,
+  val documentKind: SourceDocumentKind,
+  val pageCount: Int = 1,
+  val pagesRead: Int = 1,
+  val documentDateIso: String? = null,
+  val detectedReferenceId: String? = null,
+  val isPdf: Boolean = false,
+  val usedOcrFallback: Boolean = false
+)
+
+@Serializable
+data class DocumentEvidenceTrace(
+  val fieldLabel: String,
+  val resolvedValueDisplay: String,
+  val sourceDocumentLabel: String,
+  val pageNumber: Int? = null,
+  val documentKind: SourceDocumentKind = SourceDocumentKind.UNKNOWN_DOCUMENT,
+  val explanation: String
+)
+
+@Serializable
+data class PersistedLoanAnalysisRecord(
+  val contractualTerms: ContractualTermsSummary = ContractualTermsSummary(),
+  val payoffTimeline: PayoffTimelineProjection = PayoffTimelineProjection(),
+  val scheduleVersions: List<ScheduleVersionSnapshot> = emptyList(),
+  val analyzedDocuments: List<AnalyzedDocumentSummary> = emptyList(),
+  val evidenceTraces: List<DocumentEvidenceTrace> = emptyList()
+)

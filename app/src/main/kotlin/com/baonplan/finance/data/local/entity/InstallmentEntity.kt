@@ -38,5 +38,11 @@ data class InstallmentEntity(
   val notes: String = "",
   @ColumnInfo(defaultValue = "1")
   val scheduleVersion: Int = 1,
-  val rawStatusLabel: String? = null
+  val rawStatusLabel: String? = null,
+  // Component breakdown & evidence provenance fields (v4)
+  val principalComponentCents: Long? = null,
+  val interestComponentCents: Long? = null,
+  val serviceFeeComponentCents: Long? = null,
+  val remainingPrincipalAfterCents: Long? = null,
+  val evidenceSourceLabel: String? = null
 )

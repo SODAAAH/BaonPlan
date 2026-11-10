@@ -40,7 +40,8 @@ data class RetainedAttachmentSource(
   val sourceFile: File,
   val displayLabel: String,
   val screenshotIndex: Int,
-  val rotationDegrees: Int = 0
+  val rotationDegrees: Int = 0,
+  val isPdf: Boolean = false
 )
 
 class BaonPlanRepository(
@@ -556,12 +557,17 @@ class BaonPlanRepository(
             if (!dir.exists()) dir.mkdirs()
             val validSources = attachmentSources.filter { it.sourceFile.exists() && it.sourceFile.isFile }
             validSources.mapIndexed { idx, src ->
-              val normalizedRotation = ((src.rotationDegrees % 360) + 360) % 360
-              val origExt = src.sourceFile.extension.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
-              val ext = if (normalizedRotation != 0) "jpg" else origExt
+              val isPdfSource = src.isPdf || src.sourceFile.extension.equals("pdf", ignoreCase = true)
+              val normalizedRotation = if (isPdfSource) 0 else ((src.rotationDegrees % 360) + 360) % 360
+              val origExt = if (isPdfSource) {
+                "pdf"
+              } else {
+                src.sourceFile.extension.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
+              }
+              val ext = if (!isPdfSource && normalizedRotation != 0) "jpg" else origExt
               val destName = "debt_${debtId}_s${src.screenshotIndex}_${now}_$idx.$ext"
               val destFile = File(dir, destName)
-              val savedRotated = if (normalizedRotation != 0) {
+              val savedRotated = if (!isPdfSource && normalizedRotation != 0) {
                 ImageScanPreprocessor.writeRotatedAttachmentJpeg(
                   sourceFile = src.sourceFile,
                   destFile = destFile,
@@ -590,6 +596,154 @@ class BaonPlanRepository(
         debtId
       }
       insertedId
+    } catch (t: Throwable) {
+      withContext(Dispatchers.IO) {
+        copiedFiles.forEach { (f, _) -> runCatching { f.delete() } }
+      }
+      throw t
+    }
+  }
+
+  /**
+   * Updates an existing tracked debt with newly analyzed document/schedule evidence while
+   * preserving earlier schedule versions (e.g., v1 retained when importing restructured v2),
+   * existing BaonPlan payment links, and prior attachments.
+   */
+  suspend fun updateExistingDebtWithImportedSchedule(
+    existingDebtId: Long,
+    updatedDebt: DebtEntity,
+    newScheduleRows: List<InstallmentEntity>,
+    attachmentSources: List<RetainedAttachmentSource> = emptyList()
+  ): Long {
+    val existing = debtDao.getById(existingDebtId)
+      ?: return saveImportedDebtWithSchedule(updatedDebt, newScheduleRows, attachmentSources)
+
+    val now = ManilaTime.nowMillis()
+    val targetVersion = updatedDebt.scheduleVersion.coerceAtLeast(existing.scheduleVersion)
+    val firstUnpaidDated = newScheduleRows
+      .filter { it.status.isPayableInstallment }
+      .firstOrNull { !it.dueDate.isNullOrBlank() }
+
+    val resolvedNextDue = updatedDebt.nextDueDate ?: firstUnpaidDated?.dueDate ?: existing.nextDueDate
+    val resolvedStatus = when {
+      updatedDebt.status == DebtStatus.ARCHIVED -> DebtStatus.ARCHIVED
+      updatedDebt.remainingBalanceCents <= 0L -> DebtStatus.PAID
+      else -> DebtStatus.ACTIVE
+    }
+
+    val mergedDebt = updatedDebt.copy(
+      id = existing.id,
+      trackedPaidCents = maxOf(existing.trackedPaidCents, updatedDebt.trackedPaidCents),
+      nextDueDate = resolvedNextDue,
+      status = resolvedStatus,
+      scheduleVersion = targetVersion,
+      isManuallyEntered = true,
+      createdAtEpochMillis = existing.createdAtEpochMillis,
+      updatedAtEpochMillis = now
+    )
+
+    val copiedFiles = mutableListOf<Pair<File, RetainedAttachmentSource>>()
+    return try {
+      db.withTransaction {
+        debtDao.update(mergedDebt)
+
+        if (newScheduleRows.isNotEmpty()) {
+          val existingRows = installmentDao.getByDebtId(existingDebtId)
+          if (targetVersion > existing.scheduleVersion) {
+            // Retain prior schedule versions (< targetVersion) as historical records
+            installmentDao.deleteByDebtIdFromVersion(existingDebtId, targetVersion)
+            val normalizedRows = newScheduleRows.mapIndexed { idx, row ->
+              row.copy(
+                id = 0L,
+                debtId = existingDebtId,
+                installmentNumber = row.installmentNumber.takeIf { it > 0 } ?: (idx + 1),
+                scheduleVersion = row.scheduleVersion.coerceAtLeast(targetVersion),
+                linkedTransactionId = null,
+                isManuallyEntered = true
+              )
+            }
+            installmentDao.insertAll(normalizedRows)
+          } else {
+            // Same schedule version: preserve any BaonPlan-linked transaction rows while refreshing schedule details
+            val preservedByNum = existingRows
+              .filter { it.scheduleVersion == targetVersion && it.linkedTransactionId != null }
+              .associateBy { it.installmentNumber }
+            installmentDao.deleteByDebtIdFromVersion(existingDebtId, targetVersion)
+            val normalizedRows = newScheduleRows.mapIndexed { idx, row ->
+              val num = row.installmentNumber.takeIf { it > 0 } ?: (idx + 1)
+              val preserved = preservedByNum[num]
+              if (preserved != null) {
+                row.copy(
+                  id = 0L,
+                  debtId = existingDebtId,
+                  installmentNumber = num,
+                  scheduleVersion = targetVersion,
+                  status = preserved.status,
+                  paidAmountCents = maxOf(row.paidAmountCents, preserved.paidAmountCents),
+                  paidDate = preserved.paidDate ?: row.paidDate,
+                  linkedTransactionId = preserved.linkedTransactionId,
+                  isManuallyEntered = true
+                )
+              } else {
+                row.copy(
+                  id = 0L,
+                  debtId = existingDebtId,
+                  installmentNumber = num,
+                  scheduleVersion = targetVersion,
+                  linkedTransactionId = null,
+                  isManuallyEntered = true
+                )
+              }
+            }
+            installmentDao.insertAll(normalizedRows)
+          }
+        }
+
+        val dir = attachmentStorageDir
+        if (attachmentSources.isNotEmpty() && dir != null) {
+          val existingCount = attachmentDao.getByDebtId(existingDebtId).size
+          val entities = withContext(Dispatchers.IO) {
+            if (!dir.exists()) dir.mkdirs()
+            val validSources = attachmentSources.filter { it.sourceFile.exists() && it.sourceFile.isFile }
+            validSources.mapIndexed { idx, src ->
+              val isPdfSource = src.isPdf || src.sourceFile.extension.equals("pdf", ignoreCase = true)
+              val normalizedRotation = if (isPdfSource) 0 else ((src.rotationDegrees % 360) + 360) % 360
+              val origExt = if (isPdfSource) {
+                "pdf"
+              } else {
+                src.sourceFile.extension.lowercase().takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
+              }
+              val ext = if (!isPdfSource && normalizedRotation != 0) "jpg" else origExt
+              val destName = "debt_${existingDebtId}_s${src.screenshotIndex}_${now}_${existingCount + idx}.$ext"
+              val destFile = File(dir, destName)
+              val savedRotated = if (!isPdfSource && normalizedRotation != 0) {
+                ImageScanPreprocessor.writeRotatedAttachmentJpeg(
+                  sourceFile = src.sourceFile,
+                  destFile = destFile,
+                  extraRotationDegrees = normalizedRotation
+                )
+              } else {
+                false
+              }
+              if (!savedRotated) {
+                src.sourceFile.copyTo(destFile, overwrite = true)
+              }
+              copiedFiles.add(destFile to src)
+              DebtAttachmentEntity(
+                debtId = existingDebtId,
+                fileName = destName,
+                displayLabel = src.displayLabel,
+                screenshotIndex = src.screenshotIndex,
+                createdAtEpochMillis = now
+              )
+            }
+          }
+          if (entities.isNotEmpty()) {
+            attachmentDao.insertAll(entities)
+          }
+        }
+      }
+      existingDebtId
     } catch (t: Throwable) {
       withContext(Dispatchers.IO) {
         copiedFiles.forEach { (f, _) -> runCatching { f.delete() } }

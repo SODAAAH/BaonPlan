@@ -79,6 +79,7 @@ import com.baonplan.finance.domain.ocr.ExtractionConfidence
 import com.baonplan.finance.domain.ocr.FieldAlternative
 import com.baonplan.finance.domain.ocr.FieldOrigin
 import com.baonplan.finance.domain.ocr.ImportSeverity
+import com.baonplan.finance.domain.ocr.PersistedLoanAnalysisRecord
 import com.baonplan.finance.domain.ocr.TextCorrectionAudit
 import com.baonplan.finance.ui.theme.LocalBaonColors
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
@@ -87,11 +88,16 @@ import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.ExpensePreset
+import com.baonplan.finance.domain.model.InterestCalculationMethod
+import com.baonplan.finance.domain.model.PrepaymentRuleType
+import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveType
+import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
 import com.baonplan.finance.domain.model.TransactionType
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
+import kotlinx.serialization.json.Json
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -997,7 +1003,8 @@ fun DebtEditorDialog(
   existingInstallments: List<InstallmentEntity> = emptyList(),
   partialScanWarnings: List<String> = emptyList(),
   isSavingImport: Boolean = false,
-  onSaveImported: ((debt: DebtEntity, scheduleRows: List<InstallmentEntity>, attachScreenshots: Boolean) -> Unit)? = null
+  onSaveImported: ((debt: DebtEntity, scheduleRows: List<InstallmentEntity>, attachScreenshots: Boolean) -> Unit)? = null,
+  onUpdateExistingImported: ((existingDebtId: Long, debt: DebtEntity, scheduleRows: List<InstallmentEntity>, attachScreenshots: Boolean) -> Unit)? = null
 ) {
   val scanDraft = if (existing == null) prefillDraft else null
   val isScanReview = scanDraft != null
@@ -1027,8 +1034,14 @@ fun DebtEditorDialog(
   var applicationProvider by remember(stateKey) {
     mutableStateOf(existing?.applicationProvider ?: prefillDraft?.applicationProvider?.value.orEmpty())
   }
+  var lendingCompany by remember(stateKey) {
+    mutableStateOf(existing?.lendingCompany ?: prefillDraft?.lendingCompany?.value.orEmpty())
+  }
   var actualCreditor by remember(stateKey) {
     mutableStateOf(existing?.actualCreditor ?: prefillDraft?.actualCreditor?.value.orEmpty())
+  }
+  var productName by remember(stateKey) {
+    mutableStateOf(existing?.productName ?: prefillDraft?.productName?.value.orEmpty())
   }
   var loanReferenceId by remember(stateKey) {
     mutableStateOf(existing?.loanReferenceId ?: prefillDraft?.loanReferenceId?.value.orEmpty())
@@ -1254,6 +1267,7 @@ fun DebtEditorDialog(
   var editingScheduleDateRowId by remember(stateKey) { mutableStateOf<String?>(null) }
   var explanationTarget by remember(stateKey) { mutableStateOf<ExplanationSheetTarget?>(null) }
   var allowDuplicateOverride by remember(stateKey) { mutableStateOf(false) }
+  var selectedExistingDebtIdForUpdate by remember(stateKey) { mutableStateOf<Long?>(null) }
   var attachScreenshots by remember(stateKey) { mutableStateOf(false) }
   val isSaving = isSavingImport
 
@@ -1418,15 +1432,38 @@ fun DebtEditorDialog(
           }
           InfoCallout(
             icon = Icons.Outlined.WarningAmber,
-            title = "Possible duplicate debt detected",
-            body = "$matchSummary\n\nCancel if you already added this loan, or confirm below if this is a separate debt.",
+            title = "Matching loan already tracked",
+            body = "$matchSummary\n\nUpdate the existing loan to keep schedule version history, or save as a separate loan.",
             tone = BadgeTone.WARNING
           )
+          if (onUpdateExistingImported != null) {
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+              liveDuplicates.forEach { dup ->
+                FilterChip(
+                  selected = selectedExistingDebtIdForUpdate == dup.existingDebtId,
+                  onClick = {
+                    selectedExistingDebtIdForUpdate = if (selectedExistingDebtIdForUpdate == dup.existingDebtId) {
+                      null
+                    } else {
+                      allowDuplicateOverride = false
+                      dup.existingDebtId
+                    }
+                    errorText = null
+                  },
+                  label = { Text("Update ${dup.debtName}", style = MaterialTheme.typography.labelSmall) }
+                )
+              }
+            }
+          }
           Row(
             modifier = Modifier
               .fillMaxWidth()
               .clickable {
                 allowDuplicateOverride = !allowDuplicateOverride
+                if (allowDuplicateOverride) selectedExistingDebtIdForUpdate = null
                 errorText = null
               },
             verticalAlignment = Alignment.CenterVertically
@@ -1435,16 +1472,18 @@ fun DebtEditorDialog(
               checked = allowDuplicateOverride,
               onCheckedChange = {
                 allowDuplicateOverride = it
+                if (it) selectedExistingDebtIdForUpdate = null
                 errorText = null
               }
             )
             Text(
-              text = "This is a separate loan — allow saving anyway",
+              text = "This is a separate loan — save as new debt",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurface
             )
           }
         }
+        RepaymentAnalysisReviewCard(draft = scanDraft)
       } else {
         Text(
           text = if (existing == null) "Add debt" else "Edit ${existing.name}",
@@ -2474,8 +2513,8 @@ fun DebtEditorDialog(
               errorText = "${blockingError.title}: ${blockingError.message}"
               return@SheetButtonRow
             }
-            if (liveDuplicates.isNotEmpty() && !allowDuplicateOverride) {
-              errorText = "Confirm \"This is a separate loan\" above duplicate warning, or cancel."
+            if (liveDuplicates.isNotEmpty() && !allowDuplicateOverride && selectedExistingDebtIdForUpdate == null) {
+              errorText = "Select an existing loan to update or confirm \"This is a separate loan\" above."
               return@SheetButtonRow
             }
           }
@@ -2523,6 +2562,25 @@ fun DebtEditorDialog(
             else -> ObligationRole.STANDALONE
           }
 
+          val resolvedAnalysisJson = if (scanDraft != null) {
+            runCatching {
+              val timeline = scanDraft.payoffTimeline.copy(
+                contractualMaturityDateIso = scanDraft.payoffTimeline.contractualMaturityDateIso ?: finalDueDate,
+                currentScheduledPayoffDateIso = finalDueDate ?: scanDraft.payoffTimeline.currentScheduledPayoffDateIso
+              )
+              val record = PersistedLoanAnalysisRecord(
+                contractualTerms = scanDraft.contractualTerms,
+                payoffTimeline = timeline,
+                scheduleVersions = scanDraft.scheduleVersions,
+                analyzedDocuments = scanDraft.analyzedDocuments,
+                evidenceTraces = scanDraft.evidenceTraces
+              )
+              Json { encodeDefaults = true }.encodeToString(PersistedLoanAnalysisRecord.serializer(), record)
+            }.getOrNull()
+          } else {
+            existing?.loanAnalysisJson
+          }
+
           val entity = (existing ?: DebtEntity(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
@@ -2534,7 +2592,9 @@ fun DebtEditorDialog(
             category = category.ifBlank { "Loan" },
             productClassification = productClassification,
             applicationProvider = applicationProvider.trim().ifBlank { null },
+            lendingCompany = lendingCompany.trim().ifBlank { null },
             actualCreditor = actualCreditor.trim().ifBlank { null },
+            productName = productName.trim().ifBlank { null },
             loanReferenceId = loanReferenceId.trim().ifBlank { null },
             loanBookingDateIso = loanBookingDateIso,
             originalPrincipalCents = origPrincipal,
@@ -2574,6 +2634,21 @@ fun DebtEditorDialog(
             status = resolvedStatus,
             scheduleVersion = scanDraft?.scheduleVersion ?: existing?.scheduleVersion ?: 1,
             scheduleEffectiveDateIso = scanDraft?.scheduleEffectiveDateIso ?: existing?.scheduleEffectiveDateIso,
+            contractualMaturityDateIso = scanDraft?.payoffTimeline?.contractualMaturityDateIso
+              ?: finalDueDate
+              ?: existing?.contractualMaturityDateIso,
+            projectedPayoffDateIso = scanDraft?.payoffTimeline?.projectedPayoffDateIso
+              ?: finalDueDate
+              ?: existing?.projectedPayoffDateIso,
+            actualFullyPaidDateIso = scanDraft?.payoffTimeline?.actualFullyPaidDateIso
+              ?: existing?.actualFullyPaidDateIso,
+            scheduleCompletenessStatus = scanDraft?.payoffTimeline?.completenessStatus
+              ?: existing?.scheduleCompletenessStatus
+              ?: ScheduleCompletenessStatus.NEEDS_USER_REVIEW,
+            projectionReliability = scanDraft?.payoffTimeline?.reliability
+              ?: existing?.projectionReliability
+              ?: ProjectionReliability.INSUFFICIENT_DATA,
+            loanAnalysisJson = resolvedAnalysisJson,
             obligationRole = resolvedObligationRole,
             parentDebtId = linkedParentDebtId,
             isManuallyEntered = true,
@@ -2612,8 +2687,13 @@ fun DebtEditorDialog(
                 paidDate = if (isPaidRow) rowState.dueDateIso else null,
                 scheduleVersion = scanDraft?.scheduleVersion ?: 1,
                 rawStatusLabel = rowState.rawStatusLabel,
+                principalComponentCents = rowState.principalComponentCents,
+                interestComponentCents = rowState.interestComponentCents,
+                serviceFeeComponentCents = rowState.serviceFeeComponentCents,
+                remainingPrincipalAfterCents = rowState.remainingPrincipalAfterCents,
+                evidenceSourceLabel = rowState.evidenceSourceLabel,
                 isManuallyEntered = true,
-                notes = if (rowState.status == ExtractedInstallmentStatus.OVERDUE) {
+                notes = rowState.evidenceSourceLabel ?: if (rowState.status == ExtractedInstallmentStatus.OVERDUE) {
                   "Imported as overdue"
                 } else if (rowState.screenshotIndex >= 0) {
                   "Scanned from #${rowState.screenshotIndex + 1}"
@@ -2622,7 +2702,12 @@ fun DebtEditorDialog(
                 }
               )
             }
-            onSaveImported(entity, scheduleEntities, attachScreenshots)
+            val updateTargetId = selectedExistingDebtIdForUpdate
+            if (updateTargetId != null && onUpdateExistingImported != null) {
+              onUpdateExistingImported(updateTargetId, entity, scheduleEntities, attachScreenshots)
+            } else {
+              onSaveImported(entity, scheduleEntities, attachScreenshots)
+            }
           } else {
             onSave(entity)
             onDismiss()
@@ -2869,7 +2954,12 @@ private data class EditableScheduleRowState(
   val rawStatusLabel: String? = null,
   val sourceSnippet: String,
   val screenshotIndex: Int,
-  val verificationNote: String?
+  val verificationNote: String?,
+  val principalComponentCents: Long? = null,
+  val interestComponentCents: Long? = null,
+  val serviceFeeComponentCents: Long? = null,
+  val remainingPrincipalAfterCents: Long? = null,
+  val evidenceSourceLabel: String? = null
 ) {
   fun toExtractedRow(): ExtractedInstallmentRow = ExtractedInstallmentRow(
     id = id,
@@ -2879,9 +2969,14 @@ private data class EditableScheduleRowState(
     dateStatus = dateStatus,
     dateConfidence = dateConfidence,
     amountCents = MoneyFormatter.parsePesoToCents(amountText),
+    principalComponentCents = principalComponentCents,
+    interestComponentCents = interestComponentCents,
+    serviceFeeComponentCents = serviceFeeComponentCents,
+    remainingPrincipalAfterCents = remainingPrincipalAfterCents,
     status = status,
     sourceSnippet = sourceSnippet,
     screenshotIndex = screenshotIndex,
+    evidenceSourceLabel = evidenceSourceLabel,
     verificationNote = verificationNote
   )
 
@@ -2895,11 +2990,179 @@ private data class EditableScheduleRowState(
       dateConfidence = row.dateConfidence,
       amountText = MoneyFormatter.formatEditableAmount(row.amountCents),
       status = row.status,
-      rawStatusLabel = row.status.takeIf { it != ExtractedInstallmentStatus.UNKNOWN }?.label,
+      rawStatusLabel = row.rawStatusLabel ?: row.status.takeIf { it != ExtractedInstallmentStatus.UNKNOWN }?.label,
       sourceSnippet = row.sourceSnippet,
       screenshotIndex = row.screenshotIndex,
-      verificationNote = row.verificationNote
+      verificationNote = row.verificationNote,
+      principalComponentCents = row.principalComponentCents,
+      interestComponentCents = row.interestComponentCents,
+      serviceFeeComponentCents = row.serviceFeeComponentCents,
+      remainingPrincipalAfterCents = row.remainingPrincipalAfterCents,
+      evidenceSourceLabel = row.evidenceSourceLabel
     )
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RepaymentAnalysisReviewCard(draft: DebtImportDraft) {
+  val semantic = LocalBaonColors.current
+  val timeline = draft.payoffTimeline
+  val terms = draft.contractualTerms
+  val hasAnyContent = draft.analyzedDocuments.isNotEmpty() ||
+    timeline.projectedPayoffDateIso != null ||
+    timeline.contractualMaturityDateIso != null ||
+    timeline.missingInformationExplanation != null ||
+    draft.lendingCompany.value != null ||
+    draft.actualCreditor.value != null ||
+    draft.scheduleVersions.size > 1
+
+  if (!hasAnyContent) return
+
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider),
+    modifier = Modifier.fillMaxWidth()
+  ) {
+    Column(
+      modifier = Modifier.padding(12.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Text(
+          text = "Repayment & payoff analysis",
+          style = MaterialTheme.typography.labelLarge,
+          fontWeight = FontWeight.SemiBold,
+          color = MaterialTheme.colorScheme.onSurface
+        )
+        StatusBadge(
+          text = timeline.completenessStatus.label,
+          tone = when (timeline.completenessStatus) {
+            ScheduleCompletenessStatus.COMPLETE_SCHEDULE -> BadgeTone.POSITIVE
+            ScheduleCompletenessStatus.PARTIAL_SCHEDULE -> BadgeTone.PRIMARY
+            ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF -> BadgeTone.NEUTRAL
+            else -> BadgeTone.WARNING
+          }
+        )
+      }
+
+      if (draft.scheduleVersions.size > 1) {
+        StatusBadge(
+          text = "Restructured schedule v${draft.scheduleVersion} active (v1 history preserved)",
+          tone = BadgeTone.PRIMARY
+        )
+      }
+
+      draft.lendingCompany.value?.let { company ->
+        MetricRow(label = "Lending / financing company", value = company, boldValue = false)
+      }
+      draft.actualCreditor.value?.takeIf { it != draft.lendingCompany.value }?.let { creditor ->
+        MetricRow(label = "Actual creditor", value = creditor, boldValue = false)
+      }
+
+      if (draft.analyzedDocuments.isNotEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+          Text(
+            text = "Sources analyzed (${draft.analyzedDocuments.size})",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+          draft.analyzedDocuments.forEach { doc ->
+            val pageNote = if (doc.isPdf && doc.pageCount > 1) " · ${doc.pagesRead}/${doc.pageCount} pages" else ""
+            Text(
+              text = "• ${doc.displayTitle} (${doc.documentKind.label}$pageNote)",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurface
+            )
+          }
+        }
+      }
+
+      timeline.contractualMaturityDateIso?.let { matIso ->
+        MetricRow(
+          label = "Contractual maturity",
+          value = ManilaTime.formatDisplay(matIso),
+          boldValue = false
+        )
+      }
+      timeline.currentScheduledPayoffDateIso?.takeIf { it != timeline.contractualMaturityDateIso }?.let { curIso ->
+        MetricRow(
+          label = "Current scheduled payoff",
+          value = ManilaTime.formatDisplay(curIso),
+          boldValue = false
+        )
+      }
+      timeline.actualFullyPaidDateIso?.let { paidIso ->
+        MetricRow(
+          label = "Actual fully paid date",
+          value = ManilaTime.formatDisplay(paidIso),
+          valueColor = semantic.positive
+        )
+      } ?: timeline.projectedPayoffDateIso?.let { projIso ->
+        MetricRow(
+          label = if (timeline.reliability == ProjectionReliability.ESTIMATED_FROM_PARTIAL) {
+            "Projected payoff (estimated)"
+          } else {
+            "Projected full-payment date"
+          },
+          value = ManilaTime.formatDisplay(projIso),
+          valueColor = MaterialTheme.colorScheme.primary
+        )
+      }
+
+      timeline.missingInformationExplanation?.let { explanation ->
+        Text(
+          text = explanation,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+      }
+
+      val rateSummary = listOfNotNull(
+        terms.annualInterestRatePercent?.let { "$it% p.a." },
+        terms.monthlyInterestRatePercent?.let { "$it% monthly" },
+        terms.dailyInterestRatePercent?.let { "$it% daily" },
+        terms.effectiveInterestRatePercent?.let { "EIR $it%" }
+      ).joinToString(" · ")
+      if (rateSummary.isNotBlank() ||
+        terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN ||
+        terms.prepaymentRule != PrepaymentRuleType.UNKNOWN ||
+        draft.evidenceTraces.isNotEmpty()
+      ) {
+        ExpandableSection(
+          title = "Contractual terms & evidence hierarchy",
+          subtitle = "Interest rules, prepayment terms & source priority",
+          initiallyExpanded = false
+        ) {
+          Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (rateSummary.isNotBlank()) {
+              MetricRow(label = "Interest rate", value = rateSummary, boldValue = false)
+            }
+            if (terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN) {
+              MetricRow(label = "Interest method", value = terms.interestCalculationMethod.label, boldValue = false)
+            }
+            if (terms.prepaymentRule != PrepaymentRuleType.UNKNOWN) {
+              MetricRow(label = "Early settlement rule", value = terms.prepaymentRule.label, boldValue = false)
+            }
+            terms.latePaymentFeeRule?.let { lateRule ->
+              MetricRow(label = "Late fee rule", value = lateRule, boldValue = false)
+            }
+            draft.evidenceTraces.forEach { trace ->
+              Text(
+                text = "• ${trace.fieldLabel}: ${trace.resolvedValueDisplay} (${trace.sourceDocumentLabel})",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+            }
+          }
+        }
+      }
+    }
   }
 }
 

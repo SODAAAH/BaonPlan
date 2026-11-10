@@ -748,6 +748,16 @@ fun BaonPlanRoot(
           attachScreenshots = attach
         )
       },
+      onUpdateExistingImported = { existingDebtId, confirmedDebt, scheduleRows, attach ->
+        viewModel.saveScannedDebt(
+          context = context,
+          draft = draft,
+          confirmedDebt = confirmedDebt,
+          scheduleRows = scheduleRows,
+          attachScreenshots = attach,
+          targetExistingDebtIdForUpdate = existingDebtId
+        )
+      },
       onDismiss = { viewModel.dismissActiveDraftReview(context) }
     )
   }

@@ -35,7 +35,7 @@ import com.baonplan.finance.data.local.entity.UserSettingsEntity
     UserSettingsEntity::class,
     DebtAttachmentEntity::class
   ],
-  version = 3,
+  version = 4,
   exportSchema = true
 )
 @TypeConverters(RoomConverters::class)
@@ -97,6 +97,24 @@ abstract class BaonPlanDatabase : RoomDatabase() {
       }
     }
 
+    val MIGRATION_3_4 = object : Migration(3, 4) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `lendingCompany` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `contractualMaturityDateIso` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `projectedPayoffDateIso` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `actualFullyPaidDateIso` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `scheduleCompletenessStatus` TEXT NOT NULL DEFAULT 'NEEDS_USER_REVIEW'")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `projectionReliability` TEXT NOT NULL DEFAULT 'INSUFFICIENT_DATA'")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `loanAnalysisJson` TEXT")
+
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `principalComponentCents` INTEGER")
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `interestComponentCents` INTEGER")
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `serviceFeeComponentCents` INTEGER")
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `remainingPrincipalAfterCents` INTEGER")
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `evidenceSourceLabel` TEXT")
+      }
+    }
+
     @Volatile
     private var INSTANCE: BaonPlanDatabase? = null
 
@@ -107,7 +125,7 @@ abstract class BaonPlanDatabase : RoomDatabase() {
           BaonPlanDatabase::class.java,
           DATABASE_NAME
         )
-          .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+          .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
           .build()
           .also { INSTANCE = it }
       }

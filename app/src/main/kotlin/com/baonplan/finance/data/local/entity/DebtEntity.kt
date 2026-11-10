@@ -7,7 +7,9 @@ import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.ObligationRole
+import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -69,5 +71,15 @@ data class DebtEntity(
   val obligationRole: ObligationRole = ObligationRole.STANDALONE,
   @ColumnInfo(defaultValue = "1")
   val scheduleVersion: Int = 1,
-  val scheduleEffectiveDateIso: String? = null
+  val scheduleEffectiveDateIso: String? = null,
+  // Repayment schedule & loan document analysis fields (v4)
+  val lendingCompany: String? = null,
+  val contractualMaturityDateIso: String? = null,
+  val projectedPayoffDateIso: String? = null,
+  val actualFullyPaidDateIso: String? = null,
+  @ColumnInfo(defaultValue = "NEEDS_USER_REVIEW")
+  val scheduleCompletenessStatus: ScheduleCompletenessStatus = ScheduleCompletenessStatus.NEEDS_USER_REVIEW,
+  @ColumnInfo(defaultValue = "INSUFFICIENT_DATA")
+  val projectionReliability: ProjectionReliability = ProjectionReliability.INSUFFICIENT_DATA,
+  val loanAnalysisJson: String? = null
 )

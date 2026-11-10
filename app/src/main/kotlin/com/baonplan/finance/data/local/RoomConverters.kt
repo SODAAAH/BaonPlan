@@ -7,9 +7,11 @@ import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.ObligationRole
+import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
+import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
 import com.baonplan.finance.domain.model.TransactionType
 
 class RoomConverters {
@@ -46,4 +48,12 @@ class RoomConverters {
 
   @TypeConverter fun fromReserveStatus(v: ReserveStatus): String = v.name
   @TypeConverter fun toReserveStatus(v: String): ReserveStatus = ReserveStatus.valueOf(v)
+
+  @TypeConverter fun fromScheduleCompletenessStatus(v: ScheduleCompletenessStatus): String = v.name
+  @TypeConverter fun toScheduleCompletenessStatus(v: String): ScheduleCompletenessStatus =
+    runCatching { ScheduleCompletenessStatus.valueOf(v) }.getOrDefault(ScheduleCompletenessStatus.NEEDS_USER_REVIEW)
+
+  @TypeConverter fun fromProjectionReliability(v: ProjectionReliability): String = v.name
+  @TypeConverter fun toProjectionReliability(v: String): ProjectionReliability =
+    runCatching { ProjectionReliability.valueOf(v) }.getOrDefault(ProjectionReliability.INSUFFICIENT_DATA)
 }

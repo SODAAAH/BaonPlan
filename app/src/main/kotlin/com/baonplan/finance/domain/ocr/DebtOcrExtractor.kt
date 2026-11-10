@@ -2,8 +2,11 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.InterestCalculationMethod
 import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.PrepaymentRuleType
 import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.model.SourceDocumentKind
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import java.time.LocalDate
@@ -51,7 +54,7 @@ object DebtOcrExtractor {
   )
 
   private val refIdLabelRegex = Regex(
-    """(?:loan\s*(?:id|no\.?|number|#)|reference\s*(?:id|no\.?|number|#)?|ref\.?\s*(?:id|no\.?|number|#)|order\s*(?:id|no\.?|number|#)|contract\s*(?:id|no\.?|number|#)|account\s*(?:id|no\.?|number|#)|transaction\s*(?:id|no\.?|number|#))\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-_/#]{2,28})""",
+    """(?:loan\s*(?:id|no\.?|number|#)|reference\s*(?:id|no\.?|number|#)?|ref\.?\s*(?:id|no\.?|number|#)|order\s*(?:id|no\.?|number|#)|contract\s*(?:id|no\.?|number|#)|account\s*(?:id|no\.?|number|#)|transaction\s*(?:id|no\.?|number|#))\s*[:\-]?\s*#?([A-Za-z0-9][A-Za-z0-9\-_/#]{2,28})""",
     RegexOption.IGNORE_CASE
   )
 
@@ -159,6 +162,8 @@ object DebtOcrExtractor {
     var serviceFee = ExtractedField.notDetected<Long>()
     var processingFee = ExtractedField.notDetected<Long>()
     var otherFees = ExtractedField.notDetected<Long>()
+    var documentaryStampTax = ExtractedField.notDetected<Long>()
+    var insuranceCharge = ExtractedField.notDetected<Long>()
     var otherFeeTotalAccumulator = 0L
     val otherFeeSnippets = mutableListOf<String>()
 
@@ -286,6 +291,10 @@ object DebtOcrExtractor {
       }
 
       val isLikelyScheduleRow = looksLikeScheduleRow(row, effectiveNumericOrder, contextYear, referenceDate, providerProfile)
+      val isScheduleTableHeaderRow = (row.cells.size >= 3 || rowText.count { it == '|' } >= 2) &&
+        listOf("due date", "principal", "interest", "installment", "balance", "amount", "status").count { rowLower.contains(it) } >= 2 &&
+        extractBestMoneyFromCleanText(rowText, allowBare = true) == null
+      if (isScheduleTableHeaderRow) continue
       val cells = row.cells.ifEmpty {
         listOf(OcrCell(row.text, row.left, row.top, row.right, row.bottom, row.averageConfidence))
       }
@@ -365,11 +374,12 @@ object DebtOcrExtractor {
 
         // Integer counts per cell
         if (explicitOriginalCount.value == null &&
-          containsAny(cellLower, "original installments", "total installments", "number of installments", "total payments", "installment count", "loan term", "tenor")
+          (containsAny(cellLower, "original installments", "total installments", "number of installments", "total payments", "installment count", "loan term", "tenor") ||
+            (extractLabelPortion(cellLower) == "term"))
         ) {
           val countMatch = resolveIntegerForCell(rows, rowIdx, cellIdx, claimedValueCells)
           if (countMatch != null && countMatch.first in 1..120) {
-            val isTenorMonths = containsAny(cellLower, "tenor", "loan term") &&
+            val isTenorMonths = containsAny(cellLower, "tenor", "loan term", "term") &&
               (cellLower.contains("month") || rowLower.contains("month"))
             val cueLabel = extractLabelPortion(cellLower)
             labelCues.add(DetectedLabelValueCue(cueLabel, LoanFieldKey.ORIGINAL_COUNT, intValue = countMatch.first, screenshotIndex = idx))
@@ -649,6 +659,24 @@ object DebtOcrExtractor {
               verificationReason = moneyMatch.note ?: "Read from processing fee label in screenshot #${idx + 1}."
             )
           }
+          LoanFieldKey.DOCUMENTARY_STAMP_TAX -> if (documentaryStampTax.value == null) {
+            documentaryStampTax = ExtractedField.extracted(
+              value = moneyMatch.cents,
+              sourceSnippet = srcSnippet,
+              screenshotIndex = idx,
+              confidence = combinedConf,
+              verificationReason = moneyMatch.note ?: "Read from documentary stamp tax label in source #${idx + 1}."
+            )
+          }
+          LoanFieldKey.INSURANCE_CHARGE -> if (insuranceCharge.value == null) {
+            insuranceCharge = ExtractedField.extracted(
+              value = moneyMatch.cents,
+              sourceSnippet = srcSnippet,
+              screenshotIndex = idx,
+              confidence = combinedConf,
+              verificationReason = moneyMatch.note ?: "Read from insurance / credit life charge label in source #${idx + 1}."
+            )
+          }
           LoanFieldKey.OTHER_FEES -> {
             otherFeeTotalAccumulator += moneyMatch.cents
             otherFeeSnippets.add(srcSnippet)
@@ -659,9 +687,9 @@ object DebtOcrExtractor {
               confidence = if (otherFeeSnippets.size > 1) ExtractionConfidence.MEDIUM else combinedConf,
               verificationReason = moneyMatch.note
                 ?: if (otherFeeSnippets.size > 1) {
-                  "Summed ${otherFeeSnippets.size} additional fee items in screenshot #${idx + 1}."
+                  "Summed ${otherFeeSnippets.size} additional fee items in source #${idx + 1}."
                 } else {
-                  "Read from fee label in screenshot #${idx + 1}."
+                  "Read from fee label in source #${idx + 1}."
                 }
             )
           }
@@ -670,13 +698,30 @@ object DebtOcrExtractor {
       }
     }
 
-    // 3. Extract repayment schedule rows in order
+    val contractualTerms = extractContractualTerms(
+      rows = rows,
+      combinedText = rawCombined,
+      numericOrder = effectiveNumericOrder,
+      contextYear = contextYear,
+      referenceDate = referenceDate
+    )
+
+    val sourceEvidenceLabel = buildString {
+      append(page.documentTitle?.takeIf { it.isNotBlank() } ?: "Source #${idx + 1}")
+      if (page.isPdfPage && page.totalPagesInDocument > 1) {
+        append(" (p. ${page.pageNumber}/${page.totalPagesInDocument})")
+      }
+    }
+
+    // 3. Extract repayment schedule rows in order (including multi-column amortization breakdowns)
     val extractedRows = extractScheduleRows(
       rows = rows,
       numericOrder = effectiveNumericOrder,
       contextYear = contextYear,
       referenceDate = referenceDate,
       screenshotIndex = idx,
+      pageNumber = page.pageNumber,
+      evidenceSourceLabel = sourceEvidenceLabel,
       providerProfile = providerProfile
     )
 
@@ -741,10 +786,18 @@ object DebtOcrExtractor {
     val rawExtraction = SingleScreenshotExtraction(
       screenshotIndex = idx,
       documentKind = kind,
+      sourceDocumentKind = adapterResult.sourceDocumentKind,
+      sourceDocumentId = page.sourceDocumentId,
+      documentTitle = page.documentTitle,
+      pageNumber = page.pageNumber,
+      totalPagesInDocument = page.totalPagesInDocument,
+      isPdfPage = page.isPdfPage,
       providerProfileId = providerProfile?.id,
       productClassification = adapterResult.productClassification,
       applicationProvider = adapterResult.applicationProvider,
+      lendingCompany = adapterResult.lendingCompany,
       actualCreditor = adapterResult.actualCreditor,
+      productName = adapterResult.productName,
       lender = lenderField,
       loanName = loanNameField,
       loanType = loanTypeField,
@@ -781,10 +834,14 @@ object DebtOcrExtractor {
       serviceFeeCents = serviceFee,
       processingFeeCents = processingFee,
       otherFeesCents = otherFees,
+      documentaryStampTaxCents = documentaryStampTax,
+      insuranceChargeCents = insuranceCharge,
+      contractualTerms = contractualTerms,
       loanStatus = loanStatus,
       isSchedulePartial = isSchedulePartial,
       scheduleVersion = if (adapterResult.isRestructuredOrFlexi) 2 else 1,
       scheduleEffectiveDateIso = scheduleEffectiveDateIso,
+      modificationReason = if (adapterResult.isRestructuredOrFlexi) "Restructured / revised repayment schedule detected" else null,
       obligationRole = adapterResult.obligationRole,
       installmentRows = extractedRows,
       textCorrections = textAudits,
@@ -881,11 +938,12 @@ object DebtOcrExtractor {
   }
 
   private fun isInstallmentLabel(cellLower: String): Boolean {
-    val norm = cellLower.trim().trimEnd(':', '-')
+    val norm = extractLabelPortion(cellLower)
     return norm in setOf(
       "installment", "installments", "installment amount", "monthly installment",
       "weekly installment", "biweekly installment", "bi-weekly installment",
-      "per installment", "scheduled installment"
+      "per installment", "scheduled installment",
+      "revised installment", "new installment", "updated installment", "adjusted installment"
     )
   }
 
@@ -1051,6 +1109,7 @@ object DebtOcrExtractor {
         cellLower,
         "installment amount", "monthly installment", "weekly installment",
         "biweekly installment", "bi-weekly installment", "next installment",
+        "revised installment", "new installment", "updated installment", "adjusted installment",
         "installment due", "amortization", "per installment", "per payment",
         "each payment", "monthly due", "weekly due", "monthly payment",
         "weekly payment", "repayment amount", "scheduled installment"
@@ -1071,11 +1130,21 @@ object DebtOcrExtractor {
       containsAny(cellLower, "processing fee", "origination fee", "disbursement fee") ->
         LoanFieldKey.PROCESSING_FEE
 
+      // Documentary Stamp Tax (DST)
+      containsAny(cellLower, "doc stamp", "documentary stamp", "dst") &&
+        !containsAny(cellLower, "if paid late", "up to ", "when late") ->
+        LoanFieldKey.DOCUMENTARY_STAMP_TAX
+
+      // Insurance Charge
+      containsAny(cellLower, "insurance fee", "insurance charge", "credit life", "mri fee", "insurance premium") &&
+        !containsAny(cellLower, "if paid late", "up to ", "when late") ->
+        LoanFieldKey.INSURANCE_CHARGE
+
       // Other Fees
       containsAny(
         cellLower,
         "other fee", "other fees", "admin fee",
-        "convenience fee", "doc stamp", "documentary stamp", "dst", "insurance fee", "notarial fee"
+        "convenience fee", "notarial fee"
       ) && !containsAny(cellLower, "if paid late", "up to ", "when late") ->
         LoanFieldKey.OTHER_FEES
 
@@ -1585,15 +1654,197 @@ object DebtOcrExtractor {
     }
   }
 
+  private data class RowScheduleComponents(
+    val totalCents: Long?,
+    val principalCents: Long? = null,
+    val interestCents: Long? = null,
+    val serviceFeeCents: Long? = null,
+    val remainingPrincipalAfterCents: Long? = null,
+    val note: String? = null
+  )
+
+  private enum class ScheduleColumnRole {
+    PRINCIPAL, INTEREST, FEE, TOTAL_PAYMENT, REMAINING_BALANCE
+  }
+
+  private fun detectScheduleTableColumnHeaders(rows: List<NormalizedOcrRow>): Map<Int, ScheduleColumnRole> {
+    for (row in rows) {
+      if (row.columns.size < 3) continue
+      val roles = mutableMapOf<Int, ScheduleColumnRole>()
+      row.columns.forEachIndexed { colIdx, colText ->
+        val c = canonicalizeKeywords(colText)
+        when {
+          containsAny(c, "principal", "amortized principal") -> roles[colIdx] = ScheduleColumnRole.PRINCIPAL
+          containsAny(c, "interest") -> roles[colIdx] = ScheduleColumnRole.INTEREST
+          containsAny(c, "fee", "service charge", "admin") -> roles[colIdx] = ScheduleColumnRole.FEE
+          containsAny(c, "installment", "payment", "total due", "total payment", "amortization", "amount") ->
+            roles[colIdx] = ScheduleColumnRole.TOTAL_PAYMENT
+          containsAny(c, "balance", "remaining", "ending") -> roles[colIdx] = ScheduleColumnRole.REMAINING_BALANCE
+        }
+      }
+      if (roles.size >= 2 && (ScheduleColumnRole.PRINCIPAL in roles.values || ScheduleColumnRole.TOTAL_PAYMENT in roles.values)) {
+        return roles
+      }
+    }
+    return emptyMap()
+  }
+
+  private fun parseRowScheduleComponents(
+    row: NormalizedOcrRow,
+    dateRawText: String,
+    headerRoles: Map<Int, ScheduleColumnRole>
+  ): RowScheduleComponents {
+    // 1. If a table header row mapped column roles, read by column index first
+    if (headerRoles.isNotEmpty() && row.columns.size >= 3) {
+      var principal: Long? = null
+      var interest: Long? = null
+      var fee: Long? = null
+      var total: Long? = null
+      var remaining: Long? = null
+      row.columns.forEachIndexed { colIdx, colText ->
+        val cleaned = colText.replace(dateRawText, " ").trim()
+        val m = extractBestMoneyFromCleanText(cleaned, allowBare = true) ?: return@forEachIndexed
+        when (headerRoles[colIdx]) {
+          ScheduleColumnRole.PRINCIPAL -> principal = m.cents
+          ScheduleColumnRole.INTEREST -> interest = m.cents
+          ScheduleColumnRole.FEE -> fee = m.cents
+          ScheduleColumnRole.TOTAL_PAYMENT -> total = m.cents
+          ScheduleColumnRole.REMAINING_BALANCE -> remaining = m.cents
+          null -> {}
+        }
+      }
+      val resolvedTotal = total ?: listOfNotNull(principal, interest, fee)
+        .takeIf { it.size >= 2 }
+        ?.sum()
+      if (resolvedTotal != null || principal != null || interest != null) {
+        return RowScheduleComponents(
+          totalCents = resolvedTotal,
+          principalCents = principal,
+          interestCents = interest,
+          serviceFeeCents = fee,
+          remainingPrincipalAfterCents = remaining
+        )
+      }
+    }
+
+    // 2. Strip date and leading ordinal, then inspect all money tokens across the row
+    val rowWithoutDate = row.text
+      .replace(dateRawText, " ")
+      .replace(Regex("""^\s*(?:#?\d{1,2}(?:st|nd|rd|th)?\s*(?:\||\.|-|:)\s*|#?\d{1,2}\s+)""", RegexOption.IGNORE_CASE), " ")
+
+    val allMatches = extractAllMoneyMatches(rowWithoutDate, allowBare = true)
+    if (allMatches.isEmpty()) {
+      return RowScheduleComponents(totalCents = null)
+    }
+    if (allMatches.size == 1) {
+      return RowScheduleComponents(
+        totalCents = allMatches.single().cents,
+        note = allMatches.single().note
+      )
+    }
+
+    val amts = allMatches.map { it.cents }
+    // Check 4-column pattern: [Total, Principal, Interest, RemainingBalance] or [Principal, Interest, Total, RemainingBalance]
+    if (amts.size >= 4) {
+      if (abs((amts[1] + amts[2]) - amts[0]) <= 2L) {
+        return RowScheduleComponents(
+          totalCents = amts[0],
+          principalCents = amts[1],
+          interestCents = amts[2],
+          remainingPrincipalAfterCents = amts[3]
+        )
+      }
+      if (abs((amts[0] + amts[1]) - amts[2]) <= 2L) {
+        return RowScheduleComponents(
+          totalCents = amts[2],
+          principalCents = amts[0],
+          interestCents = amts[1],
+          remainingPrincipalAfterCents = amts[3]
+        )
+      }
+      if (amts.size >= 5 && abs((amts[1] + amts[2] + amts[3]) - amts[0]) <= 2L) {
+        return RowScheduleComponents(
+          totalCents = amts[0],
+          principalCents = amts[1],
+          interestCents = amts[2],
+          serviceFeeCents = amts[3],
+          remainingPrincipalAfterCents = amts[4]
+        )
+      }
+    }
+    if (amts.size == 3) {
+      if (abs((amts[1] + amts[2]) - amts[0]) <= 2L) {
+        return RowScheduleComponents(
+          totalCents = amts[0],
+          principalCents = amts[1],
+          interestCents = amts[2]
+        )
+      }
+      if (abs((amts[0] + amts[1]) - amts[2]) <= 2L) {
+        return RowScheduleComponents(
+          totalCents = amts[2],
+          principalCents = amts[0],
+          interestCents = amts[1]
+        )
+      }
+    }
+
+    return RowScheduleComponents(
+      totalCents = allMatches.first().cents,
+      note = allMatches.first().note
+    )
+  }
+
+  private fun extractAllMoneyMatches(text: String, allowBare: Boolean): List<MoneyMatch> {
+    val cleaned = percentageRegex.replace(text, " ")
+    val results = mutableListOf<MoneyMatch>()
+    val usedRanges = mutableListOf<IntRange>()
+
+    for (m in prefixedPesoRegex.findAll(cleaned)) {
+      val hadTypoPrefix = Regex("""^(?:F|£|Ph\.?|P\.)\s*$""", RegexOption.IGNORE_CASE).containsMatchIn(
+        m.value.substring(0, m.value.indexOf(m.groupValues[1])).trim()
+      )
+      parsePesoTokenSafely(m.groupValues[1], hasCurrencyPrefix = true, glyphNormalized = hadTypoPrefix)?.let {
+        results.add(it)
+        usedRanges.add(m.range)
+      }
+    }
+    if (allowBare) {
+      val stripped = paidFractionRegex.replace(cleaned, " ")
+      for (m in bareDecimalMoneyRegex.findAll(stripped)) {
+        if (usedRanges.any { r -> m.range.first <= r.last && m.range.last >= r.first }) continue
+        parsePesoTokenSafely(m.groupValues[1], hasCurrencyPrefix = false, glyphNormalized = false)?.let {
+          results.add(it)
+          usedRanges.add(m.range)
+        }
+      }
+      if (results.isEmpty()) {
+        for (m in bareLabeledMoneyRegex.findAll(stripped)) {
+          val token = m.groupValues[1]
+          val intVal = token.toLongOrNull()
+          if (intVal != null && intVal in 2020L..2035L && !token.contains('.') && !token.contains(',')) continue
+          parsePesoTokenSafely(token, hasCurrencyPrefix = false, glyphNormalized = false)?.let {
+            results.add(it)
+            break
+          }
+        }
+      }
+    }
+    return results
+  }
+
   private fun extractScheduleRows(
     rows: List<NormalizedOcrRow>,
     numericOrder: NumericDateOrder,
     contextYear: Int?,
     referenceDate: LocalDate,
     screenshotIndex: Int,
+    pageNumber: Int,
+    evidenceSourceLabel: String,
     providerProfile: ProviderProfile?
   ): List<ExtractedInstallmentRow> {
     val result = mutableListOf<ExtractedInstallmentRow>()
+    val headerRoles = detectScheduleTableColumnHeaders(rows)
     var i = 0
     while (i < rows.size) {
       val row = rows[i]
@@ -1635,15 +1886,12 @@ object DebtOcrExtractor {
           nextRowHasStatus
 
         if (!isNonScheduleMetadata && hasScheduleSignal) {
-          val rowWithoutDate = row.text
-            .replace(dateMatch.rawText, " ")
-            .replace(Regex("""^\s*(?:#?\d{1,2}(?:st|nd|rd|th)?\s*(?:\||\.|-|:)\s*|#?\d{1,2}\s+)""", RegexOption.IGNORE_CASE), " ")
-          var moneyMatch = extractBestMoneyFromCleanText(rowWithoutDate, allowBare = true)
+          var components = parseRowScheduleComponents(row, dateMatch.rawText, headerRoles)
           var snippet = row.text
           var combinedStatusText = lower
 
-          if (moneyMatch == null && nextRowUsableForCard && (nextRowMoney != null || nextRowHasStatus)) {
-            moneyMatch = nextRowMoney
+          if (components.totalCents == null && nextRowUsableForCard && (nextRowMoney != null || nextRowHasStatus)) {
+            components = RowScheduleComponents(totalCents = nextRowMoney?.cents, note = nextRowMoney?.note)
             snippet = "${row.text} | ${nextRow.text}"
             combinedStatusText = "$combinedStatusText ${nextRow.text.lowercase(Locale.US)}"
             i++
@@ -1653,7 +1901,7 @@ object DebtOcrExtractor {
           val numberHint = extractInstallmentOrdinal(row.text)
           val rowId = "row_${screenshotIndex}_${result.size}_${dateMatch.isoDate}"
 
-          if (moneyMatch != null || hasExplicitScheduleStatus(combinedStatusText) || numberHint != null) {
+          if (components.totalCents != null || hasExplicitScheduleStatus(combinedStatusText) || numberHint != null) {
             val dateConf = adjustConfidenceWithLineQuality(dateMatch.confidence, row.averageConfidence)
             val dueStatus = when {
               dateConf == ExtractionConfidence.HIGH -> DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
@@ -1667,11 +1915,17 @@ object DebtOcrExtractor {
                 rawDateText = dateMatch.rawText,
                 dateStatus = dueStatus,
                 dateConfidence = dateConf,
-                amountCents = moneyMatch?.cents,
+                amountCents = components.totalCents,
+                principalComponentCents = components.principalCents,
+                interestComponentCents = components.interestCents,
+                serviceFeeComponentCents = components.serviceFeeCents,
+                remainingPrincipalAfterCents = components.remainingPrincipalAfterCents,
                 status = status,
                 sourceSnippet = snippet,
                 screenshotIndex = screenshotIndex,
-                verificationNote = listOfNotNull(dateMatch.note, moneyMatch?.note).joinToString("; ").ifBlank { null }
+                pageNumber = pageNumber,
+                evidenceSourceLabel = evidenceSourceLabel,
+                verificationNote = listOfNotNull(dateMatch.note, components.note).joinToString("; ").ifBlank { null }
               )
             )
           }
@@ -1692,7 +1946,9 @@ object DebtOcrExtractor {
               status = parseInstallmentStatus(lower),
               sourceSnippet = row.text,
               screenshotIndex = screenshotIndex,
-              verificationNote = "Due date missing in screenshot — confirm before relying on schedule."
+              pageNumber = pageNumber,
+              evidenceSourceLabel = evidenceSourceLabel,
+              verificationNote = "Due date missing in source — confirm before relying on schedule."
             )
           )
         }
@@ -1701,6 +1957,132 @@ object DebtOcrExtractor {
     }
 
     return result.distinctBy { Triple(it.dueDateIso ?: it.rawDateText, it.amountCents, it.installmentNumberHint) }
+  }
+
+  private fun extractContractualTerms(
+    rows: List<NormalizedOcrRow>,
+    combinedText: String,
+    numericOrder: NumericDateOrder,
+    contextYear: Int?,
+    referenceDate: LocalDate
+  ): ContractualTermsSummary {
+    val lower = combinedText.lowercase(Locale.US)
+
+    fun extractPercentNear(pattern: Regex): Double? {
+      for (row in rows) {
+        val m = pattern.find(row.text) ?: continue
+        val raw = m.groupValues.drop(1).firstOrNull { it.isNotBlank() } ?: continue
+        val parsed = raw.toDoubleOrNull()
+        if (parsed != null && parsed in 0.0..500.0) return parsed
+      }
+      return null
+    }
+
+    val annualRate = extractPercentNear(
+      Regex("""(?:annual\s+interest\s+rate|interest\s+rate\s*(?:\(p\.?a\.?\))?|apr|contractual\s+rate)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*%""", RegexOption.IGNORE_CASE)
+    ) ?: extractPercentNear(
+      Regex("""(\d+(?:\.\d+)?)\s*%\s*(?:p\.?a\.?|per\s+annum|annual)""", RegexOption.IGNORE_CASE)
+    )
+
+    val monthlyRate = extractPercentNear(
+      Regex("""(?:monthly\s+(?:interest|add-?on)\s+rate|monthly\s+rate)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*%""", RegexOption.IGNORE_CASE)
+    ) ?: extractPercentNear(
+      Regex("""(\d+(?:\.\d+)?)\s*%\s*(?:per\s+month|monthly)""", RegexOption.IGNORE_CASE)
+    )
+
+    val dailyRate = extractPercentNear(
+      Regex("""(?:daily\s+interest\s+rate|daily\s+rate)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*%""", RegexOption.IGNORE_CASE)
+    ) ?: extractPercentNear(
+      Regex("""(\d+(?:\.\d+)?)\s*%\s*(?:per\s+day|daily)""", RegexOption.IGNORE_CASE)
+    )
+
+    val eirRate = extractPercentNear(
+      Regex("""(?:effective\s+interest\s+rate|eir)\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*%""", RegexOption.IGNORE_CASE)
+    )
+
+    val method = when {
+      Regex("""\b(?:flat\s+add[- ]?on|flat\s+(?:interest|rate)|add[- ]?on\s+(?:interest|rate)|precomputed\s+interest)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+        InterestCalculationMethod.FLAT_ADD_ON
+      Regex("""\b(?:reducing\s+balance|diminishing\s+balance|declining\s+balance|on\s+outstanding\s+principal)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+        InterestCalculationMethod.REDUCING_BALANCE
+      Regex("""\b(?:equal\s+principal|straight[- ]?line\s+principal)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+        InterestCalculationMethod.EQUAL_PRINCIPAL
+      dailyRate != null || Regex("""\b(?:daily\s+interest|daily\s+accrual|per\s+diem\s+interest)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+        InterestCalculationMethod.DAILY_INTEREST
+      Regex("""\b(?:interest[- ]?only|balloon\s+payment)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+        InterestCalculationMethod.INTEREST_ONLY_BALLOON
+      else -> InterestCalculationMethod.UNKNOWN
+    }
+
+    val feesDeductedUpfront = when {
+      Regex("""\b(?:deducted\s+upfront|deducted\s+from\s+(?:loan\s+)?proceeds|less\s+(?:processing|origination|dst|doc\s+stamp))\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) -> true
+      Regex("""\b(?:included\s+in\s+(?:each\s+)?installment|amortized\s+fees|inclusive\s+of\s+service\s+fee)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) -> false
+      else -> null
+    }
+    val feesIncludedInInstallment = when {
+      Regex("""\b(?:included\s+in\s+(?:each\s+)?installment|amortized\s+fees|inclusive\s+of\s+service\s+fee)\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) -> true
+      feesDeductedUpfront == true -> false
+      else -> null
+    }
+
+    val graceDays = Regex("""(?:grace\s+period\s*[:\-]?\s*(\d{1,2})\s*days?|(\d{1,2})[- ]day\s+grace\s+period)""", RegexOption.IGNORE_CASE)
+      .find(combinedText)
+      ?.let { m -> m.groupValues[1].ifBlank { m.groupValues[2] }.toIntOrNull() }
+
+    val lateFeeRule = rows.firstOrNull { r ->
+      Regex("""\b(?:late\s+(?:payment\s+)?(?:fee|charge|penalty)|penalty\s+rate|default\s+interest)\b""", RegexOption.IGNORE_CASE)
+        .containsMatchIn(r.text)
+    }?.text?.take(120)
+
+    val prepaymentRow = rows.firstOrNull { r ->
+      Regex("""\b(?:prepayment|early\s+(?:repayment|settlement|termination|payoff)|rebate\s+of\s+unearned\s+interest|rule\s+of\s+78)\b""", RegexOption.IGNORE_CASE)
+        .containsMatchIn(r.text)
+    }
+    val prepaymentText = prepaymentRow?.text?.lowercase(Locale.US).orEmpty()
+    val prepaymentRule = when {
+      prepaymentText.isBlank() -> PrepaymentRuleType.UNKNOWN
+      containsAny(prepaymentText, "rebate", "unearned interest", "rule of 78") ->
+        PrepaymentRuleType.REBATE_UNEARNED_INTEREST
+      containsAny(prepaymentText, "no penalty", "no early settlement fee", "no prepayment fee", "without penalty", "remaining principal only") ->
+        PrepaymentRuleType.NO_PENALTY_REMAINING_PRINCIPAL
+      containsAny(prepaymentText, "penalty", "termination fee", "pre-termination", "early settlement fee") ->
+        PrepaymentRuleType.EARLY_TERMINATION_FEE
+      containsAny(prepaymentText, "full interest", "no interest rebate", "entire contract") ->
+        PrepaymentRuleType.FULL_CONTRACT_INTEREST_DUE
+      else -> PrepaymentRuleType.UNKNOWN
+    }
+
+    val allocationOrder = rows.firstOrNull { r ->
+      Regex("""\b(?:payment\s+allocation|order\s+of\s+application|applied\s+first\s+to)\b""", RegexOption.IGNORE_CASE)
+        .containsMatchIn(r.text)
+    }?.text?.take(120)
+
+    val dayCount = Regex("""\b(30/360|365/365|360/360|Actual/365|Actual/360)\b""", RegexOption.IGNORE_CASE)
+      .find(combinedText)?.groupValues?.getOrNull(1)
+
+    val accrualStartIso = rows.firstOrNull { r ->
+      Regex("""\b(?:interest\s+accrual|accrual\s+start|commencement\s+date)\b""", RegexOption.IGNORE_CASE)
+        .containsMatchIn(r.text)
+    }?.let { r ->
+      FlexibleDateParser.parseSingleDate(r.text, numericOrder, contextYear, referenceDate)?.isoDate
+    }
+
+    return ContractualTermsSummary(
+      annualInterestRatePercent = annualRate,
+      monthlyInterestRatePercent = monthlyRate,
+      dailyInterestRatePercent = dailyRate,
+      effectiveInterestRatePercent = eirRate,
+      interestCalculationMethod = method,
+      feesIncludedInInstallment = feesIncludedInInstallment,
+      feesDeductedUpfront = feesDeductedUpfront,
+      gracePeriodDays = graceDays,
+      latePaymentFeeRule = lateFeeRule,
+      prepaymentRule = prepaymentRule,
+      prepaymentRuleDetail = prepaymentRow?.text?.take(140),
+      paymentAllocationOrder = allocationOrder,
+      dayCountConvention = dayCount,
+      interestAccrualStartDateIso = accrualStartIso
+    )
   }
 
   internal data class MoneyMatch(

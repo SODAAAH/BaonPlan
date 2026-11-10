@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.outlined.AccountBalance
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhotoCamera
@@ -64,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.data.ocr.ImageScanPreprocessor
+import com.baonplan.finance.data.ocr.PdfDocumentProcessor
 import com.baonplan.finance.domain.ocr.DebtImportDraft
 import com.baonplan.finance.domain.ocr.ImportSeverity
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -108,6 +110,14 @@ fun ScanDebtSheet(
     onCameraCaptureResult(success)
   }
 
+  val documentPickerLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenMultipleDocuments()
+  ) { uris ->
+    if (uris.isNotEmpty()) {
+      onAddPickedUris(uris)
+    }
+  }
+
   val canAddMore = scanState.stagedItems.size < BaonPlanViewModel.MAX_SCAN_SCREENSHOTS &&
     !scanState.isAnalyzing &&
     !scanState.isImportingImages
@@ -129,12 +139,12 @@ fun ScanDebtSheet(
     ) {
       Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
-          text = "Scan debt",
+          text = "Scan debt or loan document",
           style = MaterialTheme.typography.headlineSmall,
           color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-          text = "Select loan details or schedule screenshots to prefill a review form.",
+          text = "Select screenshots, repayment schedules, or loan PDFs (agreements, disclosures, statements) to analyze and prefill a review form.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -203,6 +213,31 @@ fun ScanDebtSheet(
             overflow = TextOverflow.Ellipsis
           )
         }
+      }
+
+      OutlinedButton(
+        onClick = {
+          onSuppressNextRelock()
+          runCatching {
+            documentPickerLauncher.launch(arrayOf("application/pdf", "image/*"))
+          }
+        },
+        enabled = canAddMore,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 11.dp)
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.Description,
+          contentDescription = null,
+          modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+          text = "Upload PDF / loan document",
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis
+        )
       }
 
       if (scanState.isImportingImages) {
@@ -325,10 +360,15 @@ fun ScanDebtSheet(
                 ?: "Page"
               val amtPreview = snippetBal?.let { " · ${MoneyFormatter.formatPeso(it)}" }.orEmpty()
               val rowCountPreview = page.installmentRows.size.takeIf { it > 0 }?.let { " · $it rows" }.orEmpty()
+              val sourceTag = if (page.isPdfPage) {
+                "${page.documentTitle ?: "PDF"} p.${page.pageNumber}"
+              } else {
+                "#${page.screenshotIndex + 1}"
+              }
 
               Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                  text = "#${page.screenshotIndex + 1} · $labelPreview$amtPreview$rowCountPreview",
+                  text = "$sourceTag · $labelPreview$amtPreview$rowCountPreview",
                   style = MaterialTheme.typography.bodySmall,
                   fontWeight = FontWeight.Medium,
                   color = MaterialTheme.colorScheme.onSurface,
@@ -520,12 +560,17 @@ private fun StagedScreenshotTile(
   val previewBitmap by produceState<ImageBitmap?>(
     initialValue = null,
     key1 = item.tempFile.absolutePath,
-    key2 = item.rotationDegrees
+    key2 = item.rotationDegrees,
+    key3 = item.isPdf
   ) {
-    val decoded = ImageScanPreprocessor.decodeThumbnail(
-      file = item.tempFile,
-      rotationDegrees = item.rotationDegrees
-    )
+    val decoded = if (item.isPdf) {
+      PdfDocumentProcessor.renderPdfPageThumbnail(item.tempFile, pageIndex = 0)
+    } else {
+      ImageScanPreprocessor.decodeThumbnail(
+        file = item.tempFile,
+        rotationDegrees = item.rotationDegrees
+      )
+    }
     value = decoded?.asImageBitmap()
   }
 
@@ -552,6 +597,13 @@ private fun StagedScreenshotTile(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
           )
+        } else if (item.isPdf) {
+          Icon(
+            imageVector = Icons.Outlined.Description,
+            contentDescription = item.displayLabel,
+            modifier = Modifier.size(34.dp),
+            tint = MaterialTheme.colorScheme.primary
+          )
         } else {
           CircularProgressIndicator(
             modifier = Modifier.size(20.dp),
@@ -567,7 +619,7 @@ private fun StagedScreenshotTile(
           color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
         ) {
           Text(
-            text = "#${item.index + 1}",
+            text = if (item.isPdf) "PDF · ${item.pageCount}p" else "#${item.index + 1}",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurface,
@@ -583,16 +635,25 @@ private fun StagedScreenshotTile(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
       ) {
-        IconButton(
-          onClick = onRotate,
-          enabled = enabled,
-          modifier = Modifier.size(34.dp)
-        ) {
-          Icon(
-            imageVector = Icons.AutoMirrored.Outlined.RotateRight,
-            contentDescription = "Rotate #${item.index + 1} right",
-            modifier = Modifier.size(18.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        if (!item.isPdf) {
+          IconButton(
+            onClick = onRotate,
+            enabled = enabled,
+            modifier = Modifier.size(34.dp)
+          ) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Outlined.RotateRight,
+              contentDescription = "Rotate #${item.index + 1} right",
+              modifier = Modifier.size(18.dp),
+              tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+          }
+        } else {
+          Text(
+            text = if (item.hasSelectableText) "Text PDF" else "Scanned",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 6.dp)
           )
         }
         IconButton(

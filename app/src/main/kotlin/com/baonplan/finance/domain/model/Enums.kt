@@ -123,3 +123,66 @@ enum class PaymentUrgency(val label: String) {
   UNCONFIRMED("Unconfirmed"),
   UNKNOWN("Unknown")
 }
+
+@Serializable
+enum class SourceDocumentKind(val label: String, val contractualRank: Int, val paymentStatusRank: Int) {
+  LOAN_AGREEMENT("Loan agreement", contractualRank = 1, paymentStatusRank = 5),
+  DISCLOSURE_STATEMENT("Disclosure statement", contractualRank = 1, paymentStatusRank = 5),
+  AMORTIZATION_SCHEDULE("Amortization schedule", contractualRank = 2, paymentStatusRank = 3),
+  RESTRUCTURING_NOTICE("Revised / restructuring notice", contractualRank = 1, paymentStatusRank = 3),
+  BILLING_STATEMENT("Billing / loan statement", contractualRank = 4, paymentStatusRank = 1),
+  PAYMENT_RECEIPT("Payment receipt / confirmation", contractualRank = 6, paymentStatusRank = 2),
+  APP_SCHEDULE_SCREENSHOT("App schedule screenshot", contractualRank = 5, paymentStatusRank = 4),
+  APP_SUMMARY_SCREENSHOT("App summary screenshot", contractualRank = 5, paymentStatusRank = 4),
+  UNKNOWN_DOCUMENT("Uploaded document", contractualRank = 7, paymentStatusRank = 6)
+}
+
+@Serializable
+enum class ScheduleCompletenessStatus(val label: String) {
+  COMPLETE_SCHEDULE("Complete schedule"),
+  COMPLETE_CONTRACTUAL("Complete contractual schedule"),
+  RECONSTRUCTED_MULTI_SOURCE("Reconstructed from multiple sources"),
+  PARTIAL_SCHEDULE("Partial schedule"),
+  PARTIALLY_RECONSTRUCTED("Partially reconstructed"),
+  SUMMARY_ONLY_NO_SCHEDULE("Summary only"),
+  PROJECTION_ONLY("Projection only"),
+  REVOLVING_NO_FIXED_PAYOFF("Revolving (no fixed payoff)"),
+  NEEDS_USER_REVIEW("Needs user review")
+}
+
+@Serializable
+enum class ProjectionReliability(val label: String) {
+  CONFIRMED_BY_SCHEDULE("Confirmed by schedule"),
+  HIGH("High reliability"),
+  MODERATE("Moderate reliability"),
+  ESTIMATED_FROM_PARTIAL("Estimated from partial schedule"),
+  LOW("Low reliability"),
+  NOT_APPLICABLE_REVOLVING("Not applicable (revolving)"),
+  INSUFFICIENT_DATA("Insufficient schedule data")
+}
+
+@Serializable
+enum class InterestCalculationMethod(val label: String) {
+  FIXED_AMORTIZED("Declining balance / amortized"),
+  REDUCING_BALANCE("Reducing / declining balance"),
+  EQUAL_PRINCIPAL("Equal principal"),
+  FLAT_RATE("Flat / add-on interest"),
+  FLAT_ADD_ON("Flat / add-on interest"),
+  DAILY_SIMPLE("Daily simple interest"),
+  DAILY_INTEREST("Daily simple interest"),
+  LUMP_SUM_FEE_BASED("Lump-sum fee-based"),
+  INTEREST_ONLY_BALLOON("Interest-only / balloon"),
+  ZERO_INTEREST("0% interest"),
+  UNKNOWN("Not specified")
+}
+
+@Serializable
+enum class PrepaymentRuleType(val label: String) {
+  REBATE_UNEARNED_INTEREST("Unearned interest rebate"),
+  NO_PENALTY_REMAINING_PRINCIPAL("No prepayment penalty"),
+  NO_EARLY_SETTLEMENT_REBATE("Full scheduled amount due"),
+  FULL_CONTRACT_INTEREST_DUE("Full scheduled interest due"),
+  PREPAYMENT_PENALTY("Prepayment fee applies"),
+  EARLY_TERMINATION_FEE("Early termination fee applies"),
+  UNKNOWN("Not specified in contract")
+}

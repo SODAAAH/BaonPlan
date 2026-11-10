@@ -18,7 +18,9 @@ data class StagedScanInput(
   val screenshotIndex: Int,
   val tempFile: File,
   val rotationDegrees: Int,
-  val displayLabel: String
+  val displayLabel: String,
+  val isPdf: Boolean = false,
+  val documentId: String = "doc_$screenshotIndex"
 )
 
 data class ScanCoordinatorReport(
@@ -66,32 +68,65 @@ object DebtScanCoordinator {
     }
 
     val perPageExtractions = mutableListOf<SingleScreenshotExtraction>()
-    val perPageFailures = mutableMapOf<Int, String>()
+    val perPageFailures = mutableListOf<Pair<String, String>>()
+    var nextSyntheticIndex = 0
 
     for (item in inputs) {
-      val ocrResult = recognizePageWithAdaptiveRetry(item)
-      val page = ocrResult.getOrNull()
-      if (page == null) {
-        perPageFailures[item.screenshotIndex] = ocrResult.exceptionOrNull()?.message
-          ?: "Couldn't read text from ${item.displayLabel}."
-        continue
-      }
+      if (item.isPdf) {
+        val pdfPagesResult = PdfDocumentProcessor.extractPagesFromPdfFile(
+          pdfFile = item.tempFile,
+          startScreenshotIndex = nextSyntheticIndex,
+          sourceDocumentId = item.documentId,
+          documentTitle = item.displayLabel
+        )
+        val pdfPages = pdfPagesResult.getOrNull()
+        if (pdfPages.isNullOrEmpty()) {
+          perPageFailures.add(
+            item.displayLabel to (pdfPagesResult.exceptionOrNull()?.message
+              ?: "Couldn't read pages from ${item.displayLabel}.")
+          )
+          continue
+        }
+        nextSyntheticIndex += pdfPages.size
+        for (page in pdfPages) {
+          val extraction = DebtOcrExtractor.extract(
+            page = page,
+            referenceDate = referenceDate,
+            learnedPrefs = learnedPrefs
+          )
+          perPageExtractions.add(extraction)
+        }
+      } else {
+        val syntheticIdx = nextSyntheticIndex++
+        val ocrResult = recognizePageWithAdaptiveRetry(item.copy(screenshotIndex = syntheticIdx))
+        val page = ocrResult.getOrNull()?.copy(
+          sourceDocumentId = item.documentId,
+          documentTitle = item.displayLabel
+        )
+        if (page == null) {
+          perPageFailures.add(
+            item.displayLabel to (ocrResult.exceptionOrNull()?.message
+              ?: "Couldn't read text from ${item.displayLabel}.")
+          )
+          continue
+        }
 
-      val extraction = DebtOcrExtractor.extract(
-        page = page,
-        referenceDate = referenceDate,
-        learnedPrefs = learnedPrefs
-      )
-      perPageExtractions.add(extraction)
+        val extraction = DebtOcrExtractor.extract(
+          page = page,
+          referenceDate = referenceDate,
+          learnedPrefs = learnedPrefs
+        )
+        perPageExtractions.add(extraction)
+      }
     }
 
     if (perPageExtractions.isEmpty()) {
-      val combinedError = perPageFailures.values.firstOrNull()
-        ?: "Couldn't extract readable loan text from the selected screenshot(s)."
+      val combinedError = perPageFailures.firstOrNull()?.second
+        ?: "Couldn't extract readable loan text from the selected document(s) or screenshot(s)."
       return ScanCoordinatorReport(
         outcome = ScanAnalysisOutcome.Failed(
           userMessage = combinedError,
-          failedScreenshotIndices = perPageFailures.keys.toList()
+          failedScreenshotIndices = perPageFailures.indices.toList()
         )
       )
     }
@@ -108,8 +143,8 @@ object DebtScanCoordinator {
       }
     )
 
-    val partialWarnings = perPageFailures.entries.sortedBy { it.key }.map { (idx, msg) ->
-      "Image #${idx + 1}: $msg"
+    val partialWarnings = perPageFailures.map { (label, msg) ->
+      "$label: $msg"
     }
 
     return ScanCoordinatorReport(

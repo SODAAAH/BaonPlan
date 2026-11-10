@@ -19,6 +19,7 @@ import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.data.ocr.DebtScanCoordinator
 import com.baonplan.finance.data.ocr.ImageScanPreprocessor
+import com.baonplan.finance.data.ocr.PdfDocumentProcessor
 import com.baonplan.finance.data.ocr.StagedScanInput
 import com.baonplan.finance.data.repository.BaonPlanRepository
 import com.baonplan.finance.data.repository.RetainedAttachmentSource
@@ -68,7 +69,10 @@ data class StagedScreenshotUiItem(
   val index: Int,
   val tempFile: File,
   val rotationDegrees: Int = 0,
-  val displayLabel: String
+  val displayLabel: String,
+  val isPdf: Boolean = false,
+  val pageCount: Int = 1,
+  val hasSelectableText: Boolean = false
 )
 
 data class ScanDebtUiState(
@@ -750,32 +754,68 @@ class BaonPlanViewModel(
       val toImport = uris.take(remainingSlots)
       val newlyStaged = mutableListOf<StagedScreenshotUiItem>()
       var failedCount = 0
+      var firstFailureReason: String? = null
 
       for ((offset, uri) in toImport.withIndex()) {
-        val res = ImageScanPreprocessor.importUriToPrivateTempFile(appCtx, uri)
-        val file = res.getOrNull()
-        if (file != null) {
-          val index = currentCount + newlyStaged.size
-          newlyStaged.add(
-            StagedScreenshotUiItem(
-              id = "scan_${System.nanoTime()}_$offset",
-              index = index,
-              tempFile = file,
-              rotationDegrees = 0,
-              displayLabel = "Screenshot #${index + 1}"
+        val mimeType = runCatching { appCtx.contentResolver.getType(uri) }.getOrNull()
+        val isPdfUri = mimeType.equals("application/pdf", ignoreCase = true) ||
+          uri.lastPathSegment?.endsWith(".pdf", ignoreCase = true) == true
+
+        if (isPdfUri) {
+          val pdfRes = PdfDocumentProcessor.importPdfUriToPrivateTempFile(appCtx, uri)
+          val info = pdfRes.getOrNull()
+          if (info != null) {
+            val index = currentCount + newlyStaged.size
+            newlyStaged.add(
+              StagedScreenshotUiItem(
+                id = "pdf_${System.nanoTime()}_$offset",
+                index = index,
+                tempFile = info.tempFile,
+                rotationDegrees = 0,
+                displayLabel = "PDF #${index + 1} (${info.pageCount}p)",
+                isPdf = true,
+                pageCount = info.pageCount,
+                hasSelectableText = info.hasSelectableText
+              )
             )
-          )
+          } else {
+            failedCount++
+            if (firstFailureReason == null) {
+              firstFailureReason = pdfRes.exceptionOrNull()?.message
+            }
+          }
         } else {
-          failedCount++
+          val res = ImageScanPreprocessor.importUriToPrivateTempFile(appCtx, uri)
+          val file = res.getOrNull()
+          if (file != null) {
+            val index = currentCount + newlyStaged.size
+            newlyStaged.add(
+              StagedScreenshotUiItem(
+                id = "scan_${System.nanoTime()}_$offset",
+                index = index,
+                tempFile = file,
+                rotationDegrees = 0,
+                displayLabel = "Screenshot #${index + 1}"
+              )
+            )
+          } else {
+            failedCount++
+            if (firstFailureReason == null) {
+              firstFailureReason = res.exceptionOrNull()?.message
+            }
+          }
         }
       }
 
       _scanState.update { state ->
         val merged = reindexStaged(state.stagedItems + newlyStaged)
         val warnMsg = when {
-          failedCount > 0 && newlyStaged.isEmpty() -> "Could not read selected image(s). Try PNG or JPG screenshots."
-          failedCount > 0 -> "$failedCount selected image(s) couldn't be opened."
-          uris.size > remainingSlots -> "Maximum $MAX_SCAN_SCREENSHOTS screenshots per scan. Extra images were skipped."
+          failedCount > 0 && newlyStaged.isEmpty() ->
+            firstFailureReason ?: "Could not read selected file(s). Try PNG/JPG screenshots or an unencrypted PDF."
+          failedCount > 0 ->
+            firstFailureReason ?: "$failedCount selected file(s) couldn't be opened."
+          uris.size > remainingSlots ->
+            "Maximum $MAX_SCAN_SCREENSHOTS files per scan. Extra files were skipped."
           else -> null
         }
         state.copy(
@@ -913,7 +953,9 @@ class BaonPlanViewModel(
           screenshotIndex = item.index,
           tempFile = item.tempFile,
           rotationDegrees = item.rotationDegrees,
-          displayLabel = item.displayLabel
+          displayLabel = item.displayLabel,
+          isPdf = item.isPdf,
+          documentId = item.id
         )
       }
       val ledgerState = uiState.value
@@ -1143,22 +1185,32 @@ class BaonPlanViewModel(
     draft: DebtImportDraft,
     confirmedDebt: DebtEntity,
     scheduleRows: List<InstallmentEntity>,
-    attachScreenshots: Boolean
+    attachScreenshots: Boolean,
+    targetExistingDebtIdForUpdate: Long? = null
   ) {
     val stateSnapshot = _scanState.value
     if (stateSnapshot.isSavingDraft) return
     _scanState.update { it.copy(isSavingDraft = true) }
 
     val retainedSources = if (attachScreenshots) {
-      stateSnapshot.stagedItems
-        .filter { it.index in draft.sourceScreenshotIndices }
+      val matchedDocIds = stateSnapshot.extractedPages
+        .filter { it.screenshotIndex in draft.sourceScreenshotIndices }
+        .mapNotNull { it.sourceDocumentId }
+        .toSet()
+      val matchedItems = if (matchedDocIds.isNotEmpty()) {
+        stateSnapshot.stagedItems.filter { it.id in matchedDocIds }
+      } else {
+        stateSnapshot.stagedItems.filter { it.index in draft.sourceScreenshotIndices }
+      }
+      matchedItems
         .ifEmpty { stateSnapshot.stagedItems }
         .map { item ->
           RetainedAttachmentSource(
             sourceFile = item.tempFile,
             displayLabel = item.displayLabel,
             screenshotIndex = item.index,
-            rotationDegrees = item.rotationDegrees
+            rotationDegrees = item.rotationDegrees,
+            isPdf = item.isPdf
           )
         }
     } else {
@@ -1167,11 +1219,20 @@ class BaonPlanViewModel(
 
     viewModelScope.launch {
       runCatching {
-        repository.saveImportedDebtWithSchedule(
-          debt = confirmedDebt,
-          scheduleRows = scheduleRows,
-          attachmentSources = retainedSources
-        )
+        if (targetExistingDebtIdForUpdate != null) {
+          repository.updateExistingDebtWithImportedSchedule(
+            existingDebtId = targetExistingDebtIdForUpdate,
+            updatedDebt = confirmedDebt,
+            newScheduleRows = scheduleRows,
+            attachmentSources = retainedSources
+          )
+        } else {
+          repository.saveImportedDebtWithSchedule(
+            debt = confirmedDebt,
+            scheduleRows = scheduleRows,
+            attachmentSources = retainedSources
+          )
+        }
       }.onSuccess {
         val currentLearned = uiState.value.preferences.learnedScannerPreferences
         val (updatedLearned, didLearn) = ScannerCorrectionLearner.learnFromSave(
@@ -1215,8 +1276,12 @@ class BaonPlanViewModel(
 
   private fun reindexStaged(items: List<StagedScreenshotUiItem>): List<StagedScreenshotUiItem> =
     items.mapIndexed { idx, item ->
-      val prefix = if (item.id.startsWith("cam_")) "Photo" else "Screenshot"
-      item.copy(index = idx, displayLabel = "$prefix #${idx + 1}")
+      val label = when {
+        item.isPdf -> "PDF #${idx + 1} (${item.pageCount}p)"
+        item.id.startsWith("cam_") -> "Photo #${idx + 1}"
+        else -> "Screenshot #${idx + 1}"
+      }
+      item.copy(index = idx, displayLabel = label)
     }
 
   companion object {

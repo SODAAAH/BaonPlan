@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.AlertDialog
@@ -36,8 +37,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -68,14 +71,22 @@ import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.data.ocr.ImageScanPreprocessor
+import com.baonplan.finance.data.ocr.PdfDocumentProcessor
 import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.InterestCalculationMethod
 import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.PrepaymentRuleType
+import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
+import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
+import com.baonplan.finance.domain.ocr.PersistedLoanAnalysisRecord
+import com.baonplan.finance.domain.ocr.RepaymentScheduleAnalyzer
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
+import kotlinx.serialization.json.Json
 import com.baonplan.finance.ui.components.BadgeTone
 import com.baonplan.finance.ui.components.BaonCard
 import com.baonplan.finance.ui.components.CalmDivider
@@ -169,6 +180,27 @@ fun DebtDetailScreen(
     }
 
     val breakdown = FinancialCalculator.calculateLoanCostBreakdown(debt)
+    val analysisRecord = remember(debt.loanAnalysisJson) {
+      debt.loanAnalysisJson?.let { raw ->
+        runCatching {
+          Json { ignoreUnknownKeys = true }.decodeFromString(PersistedLoanAnalysisRecord.serializer(), raw)
+        }.getOrNull()
+      }
+    }
+    val availableVersions = remember(installments, debt.scheduleVersion) {
+      val fromRows = installments.map { it.scheduleVersion }.distinct().sorted()
+      if (fromRows.isNotEmpty()) fromRows else listOf(debt.scheduleVersion)
+    }
+    var selectedScheduleVersion by remember(debt.id, debt.scheduleVersion) {
+      androidx.compose.runtime.mutableIntStateOf(availableVersions.maxOrNull() ?: debt.scheduleVersion)
+    }
+    val visibleInstallments = remember(installments, selectedScheduleVersion, availableVersions) {
+      if (availableVersions.size > 1) {
+        installments.filter { it.scheduleVersion == selectedScheduleVersion }
+      } else {
+        installments
+      }
+    }
 
     LazyColumn(
       modifier = Modifier.fillMaxSize().padding(padding),
@@ -310,6 +342,15 @@ fun DebtDetailScreen(
         }
       }
 
+      // 2b. Repayment Analysis & Payoff Timeline
+      item {
+        RepaymentAnalysisSection(
+          debt = debt,
+          installments = visibleInstallments,
+          analysisRecord = analysisRecord
+        )
+      }
+
       // 3. Expandable "Loan details" (all 8 cost breakdown lines preserved)
       item {
         ExpandableSection(
@@ -415,14 +456,35 @@ fun DebtDetailScreen(
         val canManageSchedule = debt.status == DebtStatus.ACTIVE && debt.remainingBalanceCents > 0L
         val isIrregular = debt.frequency == RepaymentFrequency.IRREGULAR
         SectionHeader(
-          title = "Payment schedule (${installments.size})",
+          title = "Payment schedule (${visibleInstallments.size})",
           actionLabel = if (canManageSchedule) "Update" else null,
           onAction = if (canManageSchedule) {
             { onGenerateSchedule(debt) }
           } else null
         )
+        if (availableVersions.size > 1) {
+          Spacer(modifier = Modifier.height(6.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+          ) {
+            availableVersions.forEach { ver ->
+              val isCurrentVer = ver == (availableVersions.maxOrNull() ?: debt.scheduleVersion)
+              FilterChip(
+                selected = selectedScheduleVersion == ver,
+                onClick = { selectedScheduleVersion = ver },
+                label = {
+                  Text(
+                    text = if (isCurrentVer) "Schedule v$ver (Current)" else "Schedule v$ver (Original)",
+                    style = MaterialTheme.typography.labelSmall
+                  )
+                }
+              )
+            }
+          }
+        }
         Spacer(modifier = Modifier.height(6.dp))
-        if (isIrregular && installments.isNotEmpty()) {
+        if (isIrregular && visibleInstallments.isNotEmpty()) {
           Text(
             text = "Irregular payment dates preserved as imported.",
             style = MaterialTheme.typography.bodySmall,
@@ -430,7 +492,7 @@ fun DebtDetailScreen(
             modifier = Modifier.padding(bottom = 6.dp)
           )
         }
-        if (installments.isEmpty()) {
+        if (visibleInstallments.isEmpty()) {
           BaonCard {
             Text(
               text = if (isIrregular) {
@@ -444,7 +506,7 @@ fun DebtDetailScreen(
           }
         } else {
           BaonCard(contentPadding = 0.dp) {
-            installments.forEachIndexed { idx, inst ->
+            visibleInstallments.forEachIndexed { idx, inst ->
               Row(
                 modifier = Modifier
                   .fillMaxWidth()
@@ -458,17 +520,38 @@ fun DebtDetailScreen(
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface
                   )
+                  val componentParts = listOfNotNull(
+                    inst.principalComponentCents?.let { "Principal ${MoneyFormatter.formatPeso(it)}" },
+                    inst.interestComponentCents?.let { "Interest ${MoneyFormatter.formatPeso(it)}" },
+                    inst.serviceFeeComponentCents?.let { "Fee ${MoneyFormatter.formatPeso(it)}" }
+                  )
+                  if (componentParts.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                      text = componentParts.joinToString(" · "),
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
                   Spacer(modifier = Modifier.height(4.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     DueDateStatusBadge(status = inst.dateStatus)
                     StatusBadge(
-                      text = inst.status.label,
+                      text = inst.rawStatusLabel?.takeIf { it.isNotBlank() } ?: inst.status.label,
                       tone = when (inst.status) {
                         InstallmentStatus.PAID -> BadgeTone.POSITIVE
                         InstallmentStatus.OVERDUE -> BadgeTone.DANGER
                         InstallmentStatus.PARTIAL, InstallmentStatus.DISPUTED -> BadgeTone.WARNING
                         else -> BadgeTone.NEUTRAL
                       }
+                    )
+                  }
+                  inst.evidenceSourceLabel?.takeIf { it.isNotBlank() }?.let { srcLabel ->
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                      text = srcLabel,
+                      style = MaterialTheme.typography.labelSmall,
+                      color = semantic.muted
                     )
                   }
                 }
@@ -504,7 +587,7 @@ fun DebtDetailScreen(
                   }
                 }
               }
-              if (idx < installments.lastIndex) {
+              if (idx < visibleInstallments.lastIndex) {
                 CalmDivider()
               }
             }
@@ -639,6 +722,266 @@ fun DebtDetailScreen(
   }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RepaymentAnalysisSection(
+  debt: DebtEntity,
+  installments: List<InstallmentEntity>,
+  analysisRecord: PersistedLoanAnalysisRecord?
+) {
+  val semantic = LocalBaonColors.current
+  val timeline = analysisRecord?.payoffTimeline
+  val terms = analysisRecord?.contractualTerms
+  val isRevolving = debt.productClassification == LoanProductClassification.REVOLVING_CREDIT ||
+    debt.scheduleCompletenessStatus == ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF
+  val isSettled = debt.status == DebtStatus.PAID || debt.remainingBalanceCents <= 0L
+
+  val totalCount = debt.originalInstallmentsCount
+    ?: timeline?.totalInstallmentsCount
+    ?: installments.size.takeIf { it > 0 && debt.scheduleCompletenessStatus == ScheduleCompletenessStatus.COMPLETE_SCHEDULE }
+  val paidCount = installments.count { it.status == InstallmentStatus.PAID }.takeIf { it > 0 }
+    ?: debt.paidInstallmentsCount
+    ?: timeline?.paidInstallmentsCount
+  val remainingCount = installments.count { it.status.isPayableInstallment }.takeIf { it > 0 }
+    ?: debt.remainingInstallmentsCount.takeIf { it > 0 }
+    ?: timeline?.remainingInstallmentsCount
+
+  val contractualMaturity = debt.contractualMaturityDateIso ?: timeline?.contractualMaturityDateIso
+  val currentScheduledPayoff = timeline?.currentScheduledPayoffDateIso
+    ?: installments.lastOrNull { !it.dueDate.isNullOrBlank() }?.dueDate
+  val projectedPayoff = debt.projectedPayoffDateIso ?: timeline?.projectedPayoffDateIso
+  val actualPaidDate = debt.actualFullyPaidDateIso ?: timeline?.actualFullyPaidDateIso
+
+  val hypotheticalScenarios = remember(debt, terms) {
+    if (!isSettled && !isRevolving && debt.remainingBalanceCents > 0L) {
+      RepaymentScheduleAnalyzer.computeHypotheticalScenarios(
+        remainingBalanceCents = debt.remainingBalanceCents,
+        installmentAmountCents = debt.installmentAmountCents,
+        remainingInstallmentsCount = remainingCount ?: 1,
+        nextDueDateIso = debt.nextDueDate,
+        frequency = debt.frequency,
+        customIntervalDays = debt.customIntervalDays,
+        contractualTerms = terms ?: com.baonplan.finance.domain.ocr.ContractualTermsSummary()
+      )
+    } else {
+      emptyList()
+    }
+  }
+
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    SectionHeader(title = "Repayment analysis")
+    BaonCard {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Text(
+            text = "Payoff timeline & schedule status",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+          StatusBadge(
+            text = debt.scheduleCompletenessStatus.label,
+            tone = when (debt.scheduleCompletenessStatus) {
+              ScheduleCompletenessStatus.COMPLETE_SCHEDULE -> BadgeTone.POSITIVE
+              ScheduleCompletenessStatus.PARTIAL_SCHEDULE -> BadgeTone.PRIMARY
+              ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF -> BadgeTone.NEUTRAL
+              else -> BadgeTone.WARNING
+            }
+          )
+        }
+
+        if (!isRevolving && totalCount != null && totalCount > 0 && paidCount != null) {
+          val fraction = (paidCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f)
+          Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+              Text(
+                text = "Installment progress",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+              )
+              Text(
+                text = "$paidCount of $totalCount paid" + (remainingCount?.let { " · $it left" } ?: ""),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+              )
+            }
+            LinearProgressIndicator(
+              progress = { fraction },
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp))
+            )
+          }
+        }
+
+        debt.applicationProvider?.takeIf { it.isNotBlank() && it != debt.lender }?.let { app ->
+          MetricRow(label = "App / platform", value = app, boldValue = false)
+        }
+        debt.lendingCompany?.takeIf { it.isNotBlank() }?.let { company ->
+          MetricRow(label = "Lending / financing company", value = company, boldValue = false)
+        }
+        debt.actualCreditor?.takeIf { it.isNotBlank() && it != debt.lendingCompany }?.let { creditor ->
+          MetricRow(label = "Actual creditor", value = creditor, boldValue = false)
+        }
+        debt.loanReferenceId?.takeIf { it.isNotBlank() }?.let { ref ->
+          MetricRow(label = "Reference / contract ID", value = ref, boldValue = false)
+        }
+
+        (timeline?.originalLoanDateIso ?: debt.loanBookingDateIso)?.let { origIso ->
+          MetricRow(label = "Original loan date", value = ManilaTime.formatDisplay(origIso), boldValue = false)
+        }
+        timeline?.firstInstallmentDateIso?.let { firstIso ->
+          MetricRow(label = "First installment", value = ManilaTime.formatDisplay(firstIso), boldValue = false)
+        }
+        if (isSettled) {
+          actualPaidDate?.let { paidIso ->
+            MetricRow(
+              label = "Actual fully paid date",
+              value = ManilaTime.formatDisplay(paidIso),
+              valueColor = semantic.positive
+            )
+          }
+        } else if (!isRevolving) {
+          contractualMaturity?.let { matIso ->
+            MetricRow(
+              label = "Contractual maturity",
+              value = ManilaTime.formatDisplay(matIso),
+              boldValue = false
+            )
+          }
+          currentScheduledPayoff?.takeIf { it != contractualMaturity }?.let { curIso ->
+            MetricRow(
+              label = "Current scheduled payoff",
+              value = ManilaTime.formatDisplay(curIso),
+              boldValue = false
+            )
+          }
+          projectedPayoff?.let { projIso ->
+            MetricRow(
+              label = if (debt.projectionReliability == ProjectionReliability.ESTIMATED_FROM_PARTIAL) {
+                "Projected full-payment date (est.)"
+              } else {
+                "Projected full-payment date"
+              },
+              value = ManilaTime.formatDisplay(projIso),
+              valueColor = MaterialTheme.colorScheme.primary
+            )
+          }
+        }
+
+        val explanation = timeline?.missingInformationExplanation
+          ?: if (isRevolving) {
+            "Revolving credit lines do not have a fixed full-payment date because balances change with new usage and minimum payments."
+          } else if (!isSettled && projectedPayoff == null) {
+            "Upload a complete repayment schedule or confirm next payment date and interval to determine the expected full-payment date."
+          } else {
+            null
+          }
+        explanation?.let { msg ->
+          Text(
+            text = msg,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+          )
+        }
+
+        if (terms != null) {
+          val rateSummary = listOfNotNull(
+            terms.annualInterestRatePercent?.let { "$it% p.a." },
+            terms.monthlyInterestRatePercent?.let { "$it% monthly" },
+            terms.dailyInterestRatePercent?.let { "$it% daily" },
+            terms.effectiveInterestRatePercent?.let { "EIR $it%" }
+          ).joinToString(" · ")
+          if (rateSummary.isNotBlank() ||
+            terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN ||
+            terms.prepaymentRule != PrepaymentRuleType.UNKNOWN ||
+            !analysisRecord?.analyzedDocuments.isNullOrEmpty()
+          ) {
+            CalmDivider()
+            ExpandableSection(
+              title = "Contractual terms & source evidence",
+              subtitle = "Interest rules, prepayment terms & document provenance",
+              initiallyExpanded = false
+            ) {
+              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (rateSummary.isNotBlank()) {
+                  MetricRow(label = "Interest rate", value = rateSummary, boldValue = false)
+                }
+                if (terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN) {
+                  MetricRow(label = "Calculation method", value = terms.interestCalculationMethod.label, boldValue = false)
+                }
+                if (terms.prepaymentRule != PrepaymentRuleType.UNKNOWN) {
+                  MetricRow(label = "Prepayment rule", value = terms.prepaymentRule.label, boldValue = false)
+                }
+                terms.latePaymentFeeRule?.let { lateRule ->
+                  MetricRow(label = "Late fee rule", value = lateRule, boldValue = false)
+                }
+                analysisRecord?.analyzedDocuments.orEmpty().forEach { doc ->
+                  Text(
+                    text = "• ${doc.displayTitle} (${doc.documentKind.label})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+                }
+                analysisRecord?.evidenceTraces.orEmpty().forEach { trace ->
+                  Text(
+                    text = "• ${trace.fieldLabel}: ${trace.resolvedValueDisplay} (${trace.sourceDocumentLabel})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = semantic.muted
+                  )
+                }
+              }
+            }
+          }
+        }
+
+        if (hypotheticalScenarios.isNotEmpty()) {
+          CalmDivider()
+          ExpandableSection(
+            title = "What-if payoff explorer",
+            subtitle = "Hypothetical simulations only — stored loan values are unchanged",
+            initiallyExpanded = false
+          ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              hypotheticalScenarios.forEach { scenario ->
+                Surface(
+                  shape = RoundedCornerShape(10.dp),
+                  color = MaterialTheme.colorScheme.surfaceContainerLow,
+                  modifier = Modifier.fillMaxWidth()
+                ) {
+                  Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                  ) {
+                    Text(
+                      text = scenario.scenarioTitle,
+                      style = MaterialTheme.typography.labelLarge,
+                      color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                      text = scenario.explanation,
+                      style = MaterialTheme.typography.bodySmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 @Composable
 private fun AttachmentThumbTile(
   attachment: DebtAttachmentEntity,
@@ -646,11 +989,16 @@ private fun AttachmentThumbTile(
   onClick: () -> Unit
 ) {
   val semantic = LocalBaonColors.current
+  val isPdf = file.extension.equals("pdf", ignoreCase = true)
   val thumb by produceState<ImageBitmap?>(
     initialValue = null,
     key1 = file.absolutePath
   ) {
-    value = ImageScanPreprocessor.decodeThumbnail(file)?.asImageBitmap()
+    value = if (isPdf) {
+      PdfDocumentProcessor.renderPdfPageThumbnail(file, pageIndex = 0)?.asImageBitmap()
+    } else {
+      ImageScanPreprocessor.decodeThumbnail(file)?.asImageBitmap()
+    }
   }
 
   Surface(
@@ -703,11 +1051,16 @@ private fun AttachmentPreviewDialog(
   file: File,
   onDismiss: () -> Unit
 ) {
+  val isPdf = file.extension.equals("pdf", ignoreCase = true)
   val fullBitmap by produceState<ImageBitmap?>(
     initialValue = null,
     key1 = file.absolutePath
   ) {
-    value = ImageScanPreprocessor.decodeAttachmentPreview(file)?.asImageBitmap()
+    value = if (isPdf) {
+      PdfDocumentProcessor.renderPdfPageThumbnail(file, pageIndex = 0)?.asImageBitmap()
+    } else {
+      ImageScanPreprocessor.decodeAttachmentPreview(file)?.asImageBitmap()
+    }
   }
 
   Dialog(

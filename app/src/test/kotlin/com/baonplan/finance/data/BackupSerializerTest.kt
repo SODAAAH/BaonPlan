@@ -195,7 +195,7 @@ class BackupSerializerTest {
       debtReserves = emptyList()
     )
     val decodedV3 = BackupSerializer.decodeBackupJson(BackupSerializer.encodeBackupJson(payloadV3)).getOrThrow()
-    assertEquals(3, decodedV3.schemaVersion)
+    assertEquals(4, decodedV3.schemaVersion)
     assertEquals(
       com.baonplan.finance.domain.model.LoanProductClassification.REVOLVING_CREDIT,
       decodedV3.debts.single().productClassification
