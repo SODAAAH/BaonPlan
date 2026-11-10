@@ -34,7 +34,6 @@ import androidx.compose.material.icons.outlined.AccountBalance
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.WarningAmber
@@ -144,18 +143,11 @@ fun ScanDebtSheet(
           color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-          text = "Select screenshots, repayment schedules, or loan PDFs (agreements, disclosures, statements) to analyze and prefill a review form.",
+          text = "Upload screenshots or loan PDFs to prefill your debt details.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant
         )
       }
-
-      InfoCallout(
-        icon = Icons.Outlined.Lock,
-        title = "On-device only · Offline",
-        body = "Read locally on your phone with zero internet uploads. Temporary scan copies are removed unless you choose to attach them.",
-        tone = BadgeTone.NEUTRAL
-      )
 
       Row(
         modifier = Modifier.fillMaxWidth(),
@@ -414,7 +406,7 @@ fun ScanDebtSheet(
           InfoCallout(
             icon = Icons.Outlined.AccountBalance,
             title = "Combined screenshots $mergedPages into 1 loan",
-            body = "Tap Review & save to inspect extracted, calculated, and estimated values before saving.",
+            body = "Tap Review & save to check details and save.",
             tone = BadgeTone.POSITIVE
           )
         }

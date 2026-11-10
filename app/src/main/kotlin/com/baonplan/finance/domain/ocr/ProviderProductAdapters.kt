@@ -170,18 +170,29 @@ object ProviderProductAdapters {
       )
 
       profile?.id == "shopee_spaylater" -> {
-        val classification = if (isBillingStatement && !lower.contains("order #") && !lower.contains("order id")) {
-          LoanProductClassification.BNPL_PAY_LATER
-        } else {
-          LoanProductClassification.BNPL_INSTALLMENT
+        val hasSingleOrderDetails = (lower.contains("order #") || lower.contains("order id")) &&
+          !hasRevolvingCues &&
+          !lower.contains("recent transactions")
+        val hasSchedRowsCue = Regex("""#\d{1,2}\s*\|.*?(?:paid|upcoming|unpaid|overdue|refunded)""").containsMatchIn(lower)
+        val isRevolvingDashboardOrBills = (hasRevolvingCues ||
+          lower.contains("next bill") ||
+          lower.contains("upcoming bill") ||
+          lower.contains("my bills") ||
+          lower.contains("my bill")) &&
+          !hasSingleOrderDetails &&
+          !hasSchedRowsCue
+        val classification = when {
+          isRevolvingDashboardOrBills -> LoanProductClassification.REVOLVING_CREDIT
+          isBillingStatement && !hasSingleOrderDetails && !hasSchedRowsCue -> LoanProductClassification.BNPL_PAY_LATER
+          else -> LoanProductClassification.BNPL_INSTALLMENT
         }
         ExtractedField.extracted(
           value = classification,
           sourceSnippet = findMatchingSnippet(rows, profile.detectPatterns.first()),
           screenshotIndex = screenshotIndex,
           confidence = ExtractionConfidence.HIGH,
-          verificationReason = if (classification == LoanProductClassification.BNPL_PAY_LATER) {
-            "SPayLater monthly billing statement detected."
+          verificationReason = if (classification == LoanProductClassification.REVOLVING_CREDIT) {
+            "SPayLater revolving credit / monthly billing summary detected."
           } else {
             "SPayLater BNPL merchant purchase plan detected."
           }
@@ -284,13 +295,14 @@ object ProviderProductAdapters {
   ): ExtractedField<LoanProductClassification> {
     val snippet = findMatchingSnippet(rows, Regex("""\bbill\s*ease\b""", RegexOption.IGNORE_CASE))
     return when {
-      Regex("""\bcash\s+loan\b|\bdisburs|\bnet\s+proceeds\b""").containsMatchIn(lower) ->
+      Regex("""\bcash\s+loan\b|\be-?wallet\b|\bdisburs|\bnet\s+proceeds\b""").containsMatchIn(lower) ||
+        (lower.contains("installment") && !hasRevolvingCues && !isBillingStatement) ->
         ExtractedField.extracted(
           value = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
           sourceSnippet = snippet,
           screenshotIndex = idx,
           confidence = ExtractionConfidence.HIGH,
-          verificationReason = "BillEase Cash Loan transaction detected."
+          verificationReason = "BillEase installment loan transaction detected."
         )
       hasRevolvingCues || isBillingStatement ->
         ExtractedField.extracted(
@@ -448,8 +460,7 @@ object ProviderProductAdapters {
   }
 
   private val secCorporateEntityRegex = Regex(
-    """\b([A-Z][A-Za-z0-9&.,'()\- ]{2,55}?\b(?:Lending|Financing|Finance|Credit|Digital\s+Bank|Rural\s+Bank|Savings\s+Bank|Bank)\s+(?:Corp\.?|Corporation|Inc\.?|Incorporated|Co\.?|Company(?:\s+Inc\.?)?))""",
-    RegexOption.IGNORE_CASE
+    """(?:\b|(?=\())((?:\(?[A-Z][A-Za-z0-9&.,'()\-]+[ \t]+){1,5}?(?:Lending|Financing|Finance|Credit|Digital[ \t]+Bank|Rural[ \t]+Bank|Savings[ \t]+Bank|Bank)(?:[ \t]+Philippines,?)?[ \t]+(?:Corp\.?|Corporation|Inc\.?|Incorporated|Co\.?|Company(?:[ \t]+Inc\.?)?))"""
   )
 
   private fun resolveApplicationProvider(

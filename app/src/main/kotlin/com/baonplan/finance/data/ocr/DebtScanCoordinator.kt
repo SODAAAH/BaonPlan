@@ -8,11 +8,15 @@ import com.baonplan.finance.domain.ocr.DebtOcrExtractor
 import com.baonplan.finance.domain.ocr.LearnedScannerPreferences
 import com.baonplan.finance.domain.ocr.MultiScreenshotDebtMerger
 import com.baonplan.finance.domain.ocr.OcrDocumentPage
+import com.baonplan.finance.domain.ocr.OcrLine
+import com.baonplan.finance.domain.ocr.OcrPageQuality
 import com.baonplan.finance.domain.ocr.ScanAnalysisOutcome
 import com.baonplan.finance.domain.ocr.SingleScreenshotExtraction
 import com.baonplan.finance.domain.util.ManilaTime
 import java.io.File
 import java.time.LocalDate
+import kotlin.math.max
+import kotlin.math.min
 
 data class StagedScanInput(
   val screenshotIndex: Int,
@@ -47,6 +51,10 @@ object DebtScanCoordinator {
 
   private val moneyHintRegex = Regex("""₱|\b(?:php|bal|due|loan|total)\b|\d[,\d]*\.\d{2}""", RegexOption.IGNORE_CASE)
   private val dateHintRegex = Regex("""\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|\d{1,2}[/\-.]\d{1,2}""", RegexOption.IGNORE_CASE)
+  private val summaryLabelHintRegex = Regex(
+    """\b(?:remaining|installment|principal|loan\s+amount|due\s+date|next\s+bill|statement\s+balance|minimum\s+due|credit\s+limit|paid\s*:?\s*\d+/\d+)\b""",
+    RegexOption.IGNORE_CASE
+  )
 
   fun clearSessionCache() {
     synchronized(ocrPageCache) {
@@ -203,15 +211,32 @@ object DebtScanCoordinator {
     var bestScore = cleanPage?.let { scorePageUsability(it) } ?: -1f
     var lastFailure = cleanResult.exceptionOrNull()
 
-    // Retry with gentle monochrome contrast boost ONLY when initial crisp OCR looks weak
+    // Retry with adaptive contrast boost when crisp OCR looks weak or missed faint gray labels
     if (cleanPage == null || pageNeedsContrastRetry(cleanPage)) {
       val contrastResult = runContrastOcrOnStrips(item.screenshotIndex, item.tempFile, item.rotationDegrees)
       val contrastPage = contrastResult.getOrNull()
       if (contrastPage != null) {
         val contrastScore = scorePageUsability(contrastPage)
-        if (bestPage == null || contrastScore > bestScore + 3f) {
-          bestPage = contrastPage
-          bestScore = contrastScore
+        bestPage = when {
+          cleanPage == null -> {
+            bestScore = contrastScore
+            contrastPage
+          }
+          contrastScore > bestScore + 12f -> {
+            val merged = mergeComplementaryOcrPages(primary = contrastPage, secondary = cleanPage)
+            bestScore = scorePageUsability(merged)
+            merged
+          }
+          else -> {
+            val merged = mergeComplementaryOcrPages(primary = cleanPage, secondary = contrastPage)
+            val mergedScore = scorePageUsability(merged)
+            if (mergedScore >= bestScore) {
+              bestScore = mergedScore
+              merged
+            } else {
+              cleanPage
+            }
+          }
         }
       } else if (lastFailure == null) {
         lastFailure = contrastResult.exceptionOrNull()
@@ -308,9 +333,62 @@ object DebtScanCoordinator {
     ) {
       return true
     }
-    val hasMoneyOrDate = moneyHintRegex.containsMatchIn(page.rawFullText) ||
-      dateHintRegex.containsMatchIn(page.rawFullText)
-    return !hasMoneyOrDate && page.lines.size < 5
+    val hasMoney = moneyHintRegex.containsMatchIn(page.rawFullText)
+    val hasDate = dateHintRegex.containsMatchIn(page.rawFullText)
+    if ((hasMoney || hasDate) && !summaryLabelHintRegex.containsMatchIn(page.rawFullText)) {
+      // Crisp schedule rows may read well while faint gray labels ("Remaining", "Installment",
+      // "Paid: 3/24") were skipped on clean OCR.
+      return true
+    }
+    return !(hasMoney || hasDate) && page.lines.size < 5
+  }
+
+  private fun mergeComplementaryOcrPages(
+    primary: OcrDocumentPage,
+    secondary: OcrDocumentPage
+  ): OcrDocumentPage {
+    val mergedLines = primary.lines.toMutableList()
+    for (secLine in secondary.lines) {
+      val secTextNorm = secLine.text.trim().lowercase()
+      if (secTextNorm.isBlank()) continue
+      val hasOverlap = mergedLines.any { primLine ->
+        val b1 = primLine.box
+        val b2 = secLine.box
+        if (b1 != null && b2 != null) {
+          val interW = max(0, min(b1.right, b2.right) - max(b1.left, b2.left))
+          val interH = max(0, min(b1.bottom, b2.bottom) - max(b1.top, b2.top))
+          val interArea = interW.toFloat() * interH.toFloat()
+          val minArea = min(
+            b1.width.toFloat() * b1.height.toFloat(),
+            b2.width.toFloat() * b2.height.toFloat()
+          ).coerceAtLeast(1f)
+          (interArea / minArea) >= 0.45f
+        } else {
+          primLine.text.trim().lowercase() == secTextNorm
+        }
+      }
+      if (!hasOverlap) {
+        mergedLines.add(secLine)
+      }
+    }
+
+    val sortedLines = mergedLines.sortedWith(
+      compareBy<OcrLine> { it.box?.top ?: Int.MAX_VALUE }
+        .thenBy { it.box?.left ?: Int.MAX_VALUE }
+    )
+    val confs = sortedLines.mapNotNull { it.confidence }
+    val avgConf = if (confs.isNotEmpty()) confs.average().toFloat() else primary.quality.averageConfidence
+    val lowConfCount = confs.count { it < 0.72f }
+
+    return primary.copy(
+      lines = sortedLines,
+      rawFullText = sortedLines.joinToString("\n") { it.text },
+      quality = primary.quality.copy(
+        averageConfidence = avgConf,
+        lowConfidenceLineCount = lowConfCount,
+        usedContrastEnhancement = primary.quality.usedContrastEnhancement
+      )
+    )
   }
 
   private fun scorePageUsability(page: OcrDocumentPage): Float {
@@ -320,6 +398,7 @@ object DebtScanCoordinator {
     val confBonus = (page.quality.averageConfidence ?: 0.72f) * 20f
     val moneyBonus = if (moneyHintRegex.containsMatchIn(text)) 12f else 0f
     val dateBonus = if (dateHintRegex.containsMatchIn(text)) 8f else 0f
-    return alnum + lineBonus + confBonus + moneyBonus + dateBonus
+    val summaryBonus = if (summaryLabelHintRegex.containsMatchIn(text)) 10f else 0f
+    return alnum + lineBonus + confBonus + moneyBonus + dateBonus + summaryBonus
   }
 }

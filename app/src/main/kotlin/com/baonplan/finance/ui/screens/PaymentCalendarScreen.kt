@@ -286,6 +286,7 @@ fun PaymentCalendarScreen(
               PaymentGroupCard(
                 items = paymentsOnSelectedDate,
                 debts = state.debts,
+                today = state.today,
                 onOpenDebtDetail = onOpenDebtDetail,
                 onRecordPayment = onRecordPaymentForDebt,
                 onConfirmDebtDate = onConfirmDebtDate
@@ -361,6 +362,7 @@ fun PaymentCalendarScreen(
             PaymentGroupCard(
               items = overview.overduePayments,
               debts = state.debts,
+              today = state.today,
               onOpenDebtDetail = onOpenDebtDetail,
               onRecordPayment = onRecordPaymentForDebt,
               onConfirmDebtDate = onConfirmDebtDate
@@ -377,6 +379,7 @@ fun PaymentCalendarScreen(
             PaymentGroupCard(
               items = dueSoon,
               debts = state.debts,
+              today = state.today,
               onOpenDebtDetail = onOpenDebtDetail,
               onRecordPayment = onRecordPaymentForDebt,
               onConfirmDebtDate = onConfirmDebtDate
@@ -392,6 +395,7 @@ fun PaymentCalendarScreen(
             PaymentGroupCard(
               items = overview.upcomingDatedPayments,
               debts = state.debts,
+              today = state.today,
               onOpenDebtDetail = onOpenDebtDetail,
               onRecordPayment = onRecordPaymentForDebt,
               onConfirmDebtDate = onConfirmDebtDate
@@ -407,6 +411,7 @@ fun PaymentCalendarScreen(
             PaymentGroupCard(
               items = overview.unconfirmedOrUnknownDebts,
               debts = state.debts,
+              today = state.today,
               onOpenDebtDetail = onOpenDebtDetail,
               onRecordPayment = onRecordPaymentForDebt,
               onConfirmDebtDate = onConfirmDebtDate
@@ -477,6 +482,7 @@ private fun CalendarLegendDot(color: Color, label: String) {
 private fun PaymentGroupCard(
   items: List<NextPaymentItem>,
   debts: List<DebtEntity>,
+  today: LocalDate,
   onOpenDebtDetail: (Long) -> Unit,
   onRecordPayment: (Long) -> Unit,
   onConfirmDebtDate: (DebtEntity) -> Unit
@@ -502,19 +508,33 @@ private fun PaymentGroupCard(
               overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(2.dp))
+            val countdown = ManilaTime.formatDaysUntilDue(item.dueDateIso, today)
             Text(
-              text = "${ManilaTime.formatDisplay(item.dueDateIso)} · ${item.frequency.label}",
+              text = buildString {
+                append("${ManilaTime.formatDisplay(item.dueDateIso)} · ${item.frequency.label}")
+                if (countdown != null &&
+                  item.urgency != PaymentUrgency.DUE_TODAY &&
+                  item.urgency != PaymentUrgency.DUE_TOMORROW
+                ) {
+                  append(" · $countdown")
+                }
+              },
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-              DueDateStatusBadge(status = item.dateStatus)
-              if (item.urgency == PaymentUrgency.OVERDUE ||
-                item.urgency == PaymentUrgency.DUE_TODAY ||
-                item.urgency == PaymentUrgency.DUE_TOMORROW
-              ) {
-                UrgencyBadge(urgency = item.urgency)
+            val showDateBadge = item.dateStatus != DueDateStatus.CONFIRMED
+            val showUrgencyBadge = item.urgency == PaymentUrgency.OVERDUE ||
+              item.urgency == PaymentUrgency.DUE_TODAY ||
+              item.urgency == PaymentUrgency.DUE_TOMORROW
+            if (showDateBadge || showUrgencyBadge) {
+              Spacer(modifier = Modifier.height(6.dp))
+              Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (showDateBadge) {
+                  DueDateStatusBadge(status = item.dateStatus)
+                }
+                if (showUrgencyBadge) {
+                  UrgencyBadge(urgency = item.urgency)
+                }
               }
             }
           }

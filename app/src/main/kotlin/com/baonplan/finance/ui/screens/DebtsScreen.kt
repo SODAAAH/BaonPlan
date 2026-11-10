@@ -49,6 +49,7 @@ import com.baonplan.finance.ui.components.CalmSegmentedToggle
 import com.baonplan.finance.ui.components.EmptyStateCard
 import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
+import java.time.LocalDate
 
 @Composable
 fun DebtsScreen(
@@ -183,6 +184,7 @@ fun DebtsScreen(
           filteredDebts.forEachIndexed { index, debt ->
             DebtRow(
               debt = debt,
+              today = state.today,
               onClick = { onOpenDebtDetail(debt.id) }
             )
             if (index < filteredDebts.lastIndex) {
@@ -198,13 +200,18 @@ fun DebtsScreen(
 @Composable
 private fun DebtRow(
   debt: DebtEntity,
+  today: LocalDate,
   onClick: () -> Unit
 ) {
   val semantic = LocalBaonColors.current
   val subtitleText = when {
     debt.status == DebtStatus.PAID -> "Paid in full"
     debt.status == DebtStatus.ARCHIVED -> "Archived"
-    debt.nextDueDate != null -> "${debt.frequency.label} · Due ${ManilaTime.formatShort(debt.nextDueDate)}"
+    debt.nextDueDate != null -> {
+      val countdown = ManilaTime.formatDaysUntilDue(debt.nextDueDate, today)
+      val base = "${debt.frequency.label} · Due ${ManilaTime.formatShort(debt.nextDueDate)}"
+      if (countdown != null) "$base · $countdown" else base
+    }
     else -> "${debt.lender} · ${debt.frequency.label}"
   }
 

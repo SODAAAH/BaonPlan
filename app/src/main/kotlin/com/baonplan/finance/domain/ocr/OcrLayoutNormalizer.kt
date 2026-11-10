@@ -64,9 +64,13 @@ object OcrLayoutNormalizer {
     RegexOption.IGNORE_CASE
   )
 
-  // Leading circular logo / icon OCR noise such as "G))", "(G)", "[G]", "G)", "©", "®", "◉", "•"
+  // Leading circular logo / icon OCR noise such as "G))", "(G)", "[G]", "6))", "M))", "©", "®", "◉", "•"
   private val leadingEmblemNoiseRegex = Regex(
-    """^(?:G\){1,3}|[({\[]\s*[A-Za-z0-9•●◉©®]\s*[)}\]]|[©®•●◉▪▫◆◇▶►]+)\s+(?=(?:₱|PHP|Php|P\d|[A-Z]))"""
+    """^(?:[GM6C]\s*[)\]}»›>]{1,4}|[({\[]\s*[A-Za-z0-9•●◉©®]{1,2}\s*[)}\]]|[©®•●◉▪▫◆◇▶►]+)\s*(?=(?:₱|PHP|Php|PhP|Ph?\.?\d|[A-Z]))"""
+  )
+
+  private val standaloneEmblemTokenRegex = Regex(
+    """^(?:[GM6C]\s*[)\]}»›>]{1,4}|[({\[]\s*[A-Za-z0-9•●◉©®]{1,2}\s*[)}\]]?|[©®•●◉▪▫◆◇▶►]+|[G6])$"""
   )
 
   // Trailing UI copy/chevron glyph noise after reference codes or rows
@@ -222,8 +226,14 @@ object OcrLayoutNormalizer {
         )
       }
 
-      // First merge standalone currency tokens like ["₱", "1,087.38"] on the same visual band
-      val currencyMergedCells = mergeAdjacentCurrencyCells(rawCells, medianHeight)
+      // First drop leading standalone circular emblem cells ("G))", "(G)") when real text follows on the row,
+      // then merge standalone currency tokens like ["₱", "1,087.38"] on the same visual band
+      val emblemStrippedCells = stripLeadingStandaloneEmblemCells(
+        cells = rawCells,
+        screenshotIndex = page.screenshotIndex,
+        audits = audits
+      )
+      val currencyMergedCells = mergeAdjacentCurrencyCells(emblemStrippedCells, medianHeight)
 
       // Then build logical columns split at wider horizontal gaps
       val columns = mutableListOf<String>()
@@ -237,13 +247,15 @@ object OcrLayoutNormalizer {
         } else {
           val gap = cell.left - prev.right
           if (gap > medianHeight * 0.9f) {
-            columns.add(prev.text)
-            finalCells.add(prev)
+            val cleanedPrev = cleanAndAuditText(prev.text, page.screenshotIndex, audits)
+            columns.add(cleanedPrev)
+            finalCells.add(prev.copy(text = cleanedPrev))
             currentBuilder = cell
           } else {
             val combinedConf = averageConfidences(listOfNotNull(prev.confidence, cell.confidence))
+            val combinedRaw = "${prev.text} ${cell.text}".trim()
             currentBuilder = OcrCell(
-              text = "${prev.text} ${cell.text}".trim(),
+              text = combinedRaw,
               left = min(prev.left, cell.left),
               top = min(prev.top, cell.top),
               right = max(prev.right, cell.right),
@@ -255,8 +267,9 @@ object OcrLayoutNormalizer {
         }
       }
       if (currentBuilder != null) {
-        columns.add(currentBuilder.text)
-        finalCells.add(currentBuilder)
+        val cleanedLast = cleanAndAuditText(currentBuilder.text, page.screenshotIndex, audits)
+        columns.add(cleanedLast)
+        finalCells.add(currentBuilder.copy(text = cleanedLast))
       }
 
       val rowText = columns.joinToString(" | ")
@@ -495,6 +508,32 @@ object OcrLayoutNormalizer {
       }
     }
     return result
+  }
+
+  private fun stripLeadingStandaloneEmblemCells(
+    cells: List<OcrCell>,
+    screenshotIndex: Int,
+    audits: MutableList<TextCorrectionAudit>
+  ): List<OcrCell> {
+    if (cells.size < 2) return cells
+    val firstText = cells.first().text.trim()
+    val secondText = cells[1].text.trim()
+    val looksFollowedByTitleOrMoney = secondText.startsWith("₱") ||
+      secondText.startsWith("P", ignoreCase = true) ||
+      secondText.any { it.isLetter() }
+    if (standaloneEmblemTokenRegex.matches(firstText) && looksFollowedByTitleOrMoney) {
+      val remainingJoined = cells.drop(1).joinToString(" ") { it.text.trim() }.trim()
+      audits.add(
+        TextCorrectionAudit(
+          rawText = cells.joinToString(" ") { it.text.trim() },
+          normalizedText = remainingJoined,
+          reason = "Removed circular app-icon OCR noise",
+          screenshotIndex = screenshotIndex
+        )
+      )
+      return cells.drop(1)
+    }
+    return cells
   }
 
   private fun mergeAdjacentCurrencyCells(cells: List<OcrCell>, medianHeight: Int): List<OcrCell> {

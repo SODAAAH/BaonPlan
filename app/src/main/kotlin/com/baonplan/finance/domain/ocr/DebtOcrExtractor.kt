@@ -136,7 +136,7 @@ object DebtOcrExtractor {
     val lenderField = lenderResult.first
     var loanTypeField = lenderResult.second
     val refIdField = extractReferenceId(rows, idx)
-    var loanNameField = extractLoanName(rows, idx, lenderField.value, refIdField.value)
+    var loanNameField = extractLoanName(rows, idx, lenderField.value, refIdField.value, providerProfile)
 
     // 2. Monetary & credit-line key-value fields (Strict semantic separation)
     var originalPrincipal = ExtractedField.notDetected<Long>()
@@ -194,8 +194,15 @@ object DebtOcrExtractor {
       val rowText = row.text
       val rowLower = canonicalizeKeywords(rowText)
 
-      // Check fraction badges ("2/6 paid", "Paid: 3/24", "Paid: | 3/24", "4/6 remaining")
-      val fractionInput = rowText.replace(Regex("""\s*\|\s*"""), " ")
+      // Check fraction badges ("2/6 paid", "Paid: 3/24", "Paid: | 3/24", "4/6 remaining", or split line "Paid:" above "3/24")
+      val prevRowText = rows.getOrNull(rowIdx - 1)?.text?.lowercase(Locale.US).orEmpty()
+      val isStandaloneFracUnderPaid = Regex("""^\d{1,2}\s*(?:/|of)\s*\d{1,2}$""").matches(rowText.trim()) &&
+        containsAny(prevRowText, "paid", "progress", "schedule")
+      val fractionInput = if (isStandaloneFracUnderPaid) {
+        "Paid: ${rowText.trim()}"
+      } else {
+        rowText.replace(Regex("""\s*\|\s*"""), " ")
+      }
       extractCountFractions(
         text = fractionInput,
         screenshotIndex = idx,
@@ -767,19 +774,24 @@ object DebtOcrExtractor {
 
     if (loanNameField.value.isNullOrBlank() && !lenderField.value.isNullOrBlank()) {
       val suggestion = buildString {
-        append(lenderField.value)
-        if (!refIdField.value.isNullOrBlank()) {
-          append(" #").append(refIdField.value)
-        } else if (!loanTypeField.value.isNullOrBlank()) {
-          append(" ").append(loanTypeField.value)
+        when {
+          !refIdField.value.isNullOrBlank() -> append(lenderField.value).append(" #").append(refIdField.value)
+          providerProfile?.id == "shopee_spaylater" -> append("SPayLater")
+          providerProfile?.id == "shopee_sloan" -> append("SLoan")
+          else -> {
+            append(lenderField.value)
+            if (!loanTypeField.value.isNullOrBlank() && !lenderField.value.contains(loanTypeField.value, ignoreCase = true)) {
+              append(" ").append(loanTypeField.value)
+            }
+          }
         }
       }
       loanNameField = ExtractedField.estimated(
         value = suggestion,
         sourceSnippet = lenderField.sourceSnippet,
         screenshotIndex = idx,
-        confidence = ExtractionConfidence.MEDIUM,
-        verificationReason = "Suggested from detected lender — rename if you track multiple loans from ${lenderField.value}."
+        confidence = if (lenderField.confidence == ExtractionConfidence.HIGH) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+        verificationReason = "Named from detected provider — rename anytime if you track multiple loans."
       )
     }
 
@@ -858,17 +870,18 @@ object DebtOcrExtractor {
     rows: List<NormalizedOcrRow>,
     idx: Int
   ): ExtractedField<Long>? {
-    for (row in rows.take(4)) {
+    for (row in rows.take(5)) {
       val firstCol = row.columns.firstOrNull()
+        ?.replace(Regex("""^[(]?\s*[GM6CO@]\s*[)\]}»›>]+\s*"""), "")
         ?.replace(standaloneHeaderHashCodeRegex, "")
         ?.trim()
         .orEmpty()
       val heroMatch = Regex(
-        """^(?:₱|PHP|Php)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})\s+([A-Za-z][A-Za-z0-9\s\-]{2,40})$"""
+        """^(?:₱|PHP|Php|Ph\.?|P\.?)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)\s+([A-Za-z][A-Za-z0-9\s\-]{2,40})$"""
       ).find(firstCol) ?: continue
       val titlePart = heroMatch.groupValues[2].trim()
       val titleLower = titlePart.lowercase(Locale.US)
-      if (!containsAny(titleLower, "loan", "credit", "cash", "gives", "later", "installment", "order", "skyro", "tala", "atome", "billease", "maya", "gcash")) {
+      if (!containsAny(titleLower, "loan", "credit", "cash", "wallet", "ewallet", "gives", "later", "installment", "order", "skyro", "tala", "atome", "billease", "maya", "gcash")) {
         continue
       }
       val cents = MoneyFormatter.parsePesoToCents(heroMatch.groupValues[1]) ?: continue
@@ -980,7 +993,8 @@ object DebtOcrExtractor {
     // 3. Universal & Product-Aware semantic label interpretation
     return when {
       // Credit Line specific fields (never conflate available credit with debt!)
-      containsAny(cellLower, "total credit limit", "credit limit", "approved limit", "revolving limit") ->
+      containsAny(cellLower, "total credit limit", "credit limit", "approved limit", "revolving limit") ||
+        (cellLower.contains("total credit") && !containsAny(cellLower, "used", "available")) ->
         LoanFieldKey.CREDIT_LIMIT
 
       containsAny(cellLower, "available credit", "remaining credit", "spendable limit", "available limit") ->
@@ -1025,6 +1039,9 @@ object DebtOcrExtractor {
         "current due",
         "due this cycle",
         "amount to pay",
+        "next bill to pay",
+        "next bill",
+        "bill to pay",
         "current bill",
         "this month bill",
         "this month due",
@@ -1189,14 +1206,17 @@ object DebtOcrExtractor {
       }
     }
 
-    // 3. Horizontally aligned cell DIRECTLY BELOW (supports 2-column metric grids & card stacks)
-    for (offset in 1..2) {
+    // 3. Horizontally aligned cell DIRECTLY BELOW (supports 2-column metric grids & stacked bill cards)
+    val labelLower = canonicalizeKeywords(labelCell.text)
+    val isStackedBillCard = containsAny(labelLower, "upcoming bill", "next bill to pay", "next bill", "bill to pay")
+    val maxOffset = if (isStackedBillCard) 4 else 2
+    for (offset in 1..maxOffset) {
       val targetRowIdx = rowIdx + offset
       val belowRow = rows.getOrNull(targetRowIdx) ?: break
       val belowCells = belowRow.cells.ifEmpty {
         listOf(OcrCell(belowRow.text, belowRow.left, belowRow.top, belowRow.right, belowRow.bottom, belowRow.averageConfidence))
       }
-      if (offset == 1 && belowRow.columns.any { looksLikeFinancialLabel(canonicalizeKeywords(it), providerProfile) }) {
+      if (offset == 1 && !isStackedBillCard && belowRow.columns.any { looksLikeFinancialLabel(canonicalizeKeywords(it), providerProfile) }) {
         val alignedBelow = findHorizontallyAlignedCell(labelCell, belowCells)
         if (alignedBelow != null) {
           val (bIdx, bCell) = alignedBelow
@@ -1224,12 +1244,28 @@ object DebtOcrExtractor {
           val m = extractBestMoneyFromCleanText(bCell.text, allowBare = true)
           if (m != null) {
             claimedValueCells.add(targetRowIdx to bIdx)
-            val conf = if (offset == 1) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM
+            val conf = if (offset == 1 || isStackedBillCard) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM
             return Triple(m, "${labelCell.text} -> ${bCell.text}", conf)
           }
         }
       }
-      if (belowRow.text.isNotBlank()) break
+
+      if (isStackedBillCard) {
+        // Right-aligned peso figure on a stacked "Upcoming Bill" card ("Due Date 15 Dec 2026 | ₱235.63")
+        for (bIdx in belowCells.indices.reversed()) {
+          val bCell = belowCells[bIdx]
+          if ((targetRowIdx to bIdx) in claimedValueCells) continue
+          val bLower = canonicalizeKeywords(bCell.text)
+          if (containsNoisePhrase(bLower, providerProfile, null)) continue
+          val m = extractBestMoneyFromCleanText(bCell.text, allowBare = false)
+          if (m != null) {
+            claimedValueCells.add(targetRowIdx to bIdx)
+            return Triple(m, "${labelCell.text} -> ${bCell.text}", ExtractionConfidence.HIGH)
+          }
+        }
+      } else if (belowRow.text.isNotBlank()) {
+        break
+      }
     }
 
     // 4. Hero numeric display DIRECTLY ABOVE the label
@@ -1470,6 +1506,10 @@ object DebtOcrExtractor {
 
   private fun extractReferenceId(rows: List<NormalizedOcrRow>, idx: Int): ExtractedField<String> {
     for (row in rows) {
+      val rowLower = canonicalizeKeywords(row.text)
+      if (containsAny(rowLower, "recent transactions", "transaction history", "recent activity", "pre-approved")) {
+        break
+      }
       val match = refIdLabelRegex.find(row.text)
       if (match != null) {
         val code = match.groupValues[1].trim().trimEnd('.', ',', ';')
@@ -1520,7 +1560,8 @@ object DebtOcrExtractor {
     rows: List<NormalizedOcrRow>,
     idx: Int,
     detectedLender: String?,
-    detectedRefId: String?
+    detectedRefId: String?,
+    providerProfile: ProviderProfile? = null
   ): ExtractedField<String> {
     for (row in rows) {
       val lower = canonicalizeKeywords(row.text)
@@ -1537,24 +1578,58 @@ object DebtOcrExtractor {
         }
       }
     }
-    for (row in rows.take(4)) {
+    val pureProviderTitleRegex = Regex(
+      """^(?:(?:gcash|maya|shopee|lazada|billease|cimb|atome|home\s*credit|skyro|tala|juanhand|seabank|tonik)\s+)?(?:g-?loan|g-?gives|g-?credit|spay\s*later|s-?loan|revi\s*credit|easy\s*credit|personal\s*loan)$""",
+      RegexOption.IGNORE_CASE
+    )
+    for (row in rows.take(5)) {
       val rawCol = row.columns.firstOrNull()?.trim().orEmpty()
-      // Strip leading hero peso amount ("₱1,000.00 GCash Cash Loan" -> "GCash Cash Loan") and trailing #refId
+      // Strip residual circular emblem noise and leading hero peso amount ("₱1,000.00 GCash Cash Loan" -> "GCash Cash Loan") and trailing #refId
       val cleaned = rawCol
-        .replace(Regex("""^(?:₱|PHP|Php)\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?\s+"""), "")
+        .replace(Regex("""^[(]?\s*[GM6CO@]\s*[)\]}»›>]+\s*"""), "")
+        .replace(Regex("""^(?:₱|PHP|Php|Ph\.?|P\.?)\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?\s+"""), "")
         .replace(standaloneHeaderHashCodeRegex, "")
         .trim()
       val lower = cleaned.lowercase(Locale.US)
+      val canonicalLower = canonicalizeKeywords(cleaned)
       if (cleaned.length in 4..45 &&
         cleaned.any { it.isLetter() } &&
         !looksOnlyCurrencyOrDate(cleaned) &&
-        !containsAny(lower, "balance", "payment schedule", "repayment schedule", "loan details", "installment plan", "summary", "transaction", "status", "details", "sent to") &&
+        !looksLikeFinancialLabel(canonicalLower, providerProfile) &&
+        !containsNoisePhrase(canonicalLower, providerProfile, null) &&
+        !containsAny(
+          lower,
+          "balance", "payment schedule", "repayment schedule", "payment history",
+          "loan details", "installment plan", "summary", "transaction", "status",
+          "details", "sent to", "available credit", "total credit", "credit limit",
+          "used credit", "next bill", "upcoming bill", "current bill", "bill to pay",
+          "amount due", "minimum due", "statement", "my bills", "my bill",
+          "unpaid", "paid", "pay early"
+        ) &&
         (detectedLender == null || !cleaned.equals(detectedLender, ignoreCase = true)) &&
-        cleaned.contains(Regex("""\b(loan|order|installment|credit|cash|phone|laptop|tuition|bag|shoes|bill|gives|later)\b""", RegexOption.IGNORE_CASE))
+        cleaned.contains(
+          Regex(
+            """\b(loan|order|installment|credit|cash|e-?wallet|wallet|phone|laptop|tuition|bag|shoes|bill|gives|later|spay\s*later|s-?loan|g-?loan|g-?gives|g-?credit|revi\s*credit)\b""",
+            RegexOption.IGNORE_CASE
+          )
+        )
       ) {
         val suffix = detectedRefId?.let { if (!cleaned.contains(it, ignoreCase = true)) " #$it" else "" } ?: ""
+        val finalName = (cleaned + suffix).take(50)
+        // A bare provider/product header (e.g. "GCash GLoan" or "SPayLater") without a reference #
+        // is treated as an estimated suggestion so it never falsely splits multi-screenshot merges
+        // against a screenshot that specifies an explicit "Loan Name:" / "Item Name:".
+        if (detectedRefId.isNullOrBlank() && pureProviderTitleRegex.matches(cleaned)) {
+          return ExtractedField.estimated(
+            value = finalName,
+            sourceSnippet = row.text,
+            screenshotIndex = idx,
+            confidence = ExtractionConfidence.HIGH,
+            verificationReason = "Product title read from header — rename anytime if you track multiple loans."
+          )
+        }
         return ExtractedField.extracted(
-          value = (cleaned + suffix).take(50),
+          value = finalName,
           sourceSnippet = row.text,
           screenshotIndex = idx,
           confidence = ExtractionConfidence.HIGH,
@@ -1854,7 +1929,10 @@ object DebtOcrExtractor {
       if (dateMatch != null) {
         val prevRowLower = rows.getOrNull(i - 1)?.text?.let { canonicalizeKeywords(it) }.orEmpty()
         val isBookingFollowupRow = containsAny(prevRowLower, "sent to", "credited to", "disbursed to", "loan date", "booking date")
+        val hasBareDueDateHeader = Regex("""\bdue\s+date\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+          !hasInstallmentOrdinal(row.text)
         val isNonScheduleMetadata = isBookingFollowupRow ||
+          hasBareDueDateHeader ||
           nonScheduleDateHeaderKeywords.any { lower.contains(it) } ||
           containsAny(
             lower,
@@ -1904,7 +1982,7 @@ object DebtOcrExtractor {
           if (components.totalCents != null || hasExplicitScheduleStatus(combinedStatusText) || numberHint != null) {
             val dateConf = adjustConfidenceWithLineQuality(dateMatch.confidence, row.averageConfidence)
             val dueStatus = when {
-              dateConf == ExtractionConfidence.HIGH -> DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+              dateConf == ExtractionConfidence.HIGH -> DueDateStatus.CONFIRMED
               else -> DueDateStatus.UNCONFIRMED
             }
             result.add(
@@ -2240,6 +2318,7 @@ object DebtOcrExtractor {
         "interest", "service fee", "processing", "other fee", "amount received",
         "net proceeds", "next due", "next payment", "final payment", "maturity",
         "lender", "tenor", "term", "status", "amount due", "minimum due", "current bill",
+        "next bill", "upcoming bill", "total credit", "due date",
         "total payable", "amount to pay", "total due", "credit limit", "available credit",
         "used credit", "statement balance", "past due", "unpaid charges"
       ) || isStandaloneRemainingLabel(lower)
@@ -2261,7 +2340,8 @@ object DebtOcrExtractor {
     val hasDate = FlexibleDateParser.parseSingleDate(row.text, numericOrder, contextYear, referenceDate) != null
     val hasOrdinal = hasInstallmentOrdinal(row.text)
     val hasMoney = extractBestMoneyFromCleanText(row.text, allowBare = false) != null
-    val hasNonSchedLabel = containsAny(
+    val hasBareDueDateHeader = Regex("""\bdue\s+date\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) && !hasOrdinal
+    val hasNonSchedLabel = hasBareDueDateHeader || containsAny(
       lower,
       "balance", "principal", "next due", "next payment", "final payment",
       "statement date", "as of", "loan date", "booking date", "disbursed", "sent to"

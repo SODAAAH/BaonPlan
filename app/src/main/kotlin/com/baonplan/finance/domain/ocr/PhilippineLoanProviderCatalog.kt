@@ -31,17 +31,21 @@ object PhilippineLoanProviderCatalog {
       id = "shopee_spaylater",
       canonicalLender = "Shopee (SPayLater)",
       applicationProviderName = "Shopee",
-      defaultActualCreditor = "SeaMoney (Credit) Finance Philippines, Inc.",
+      defaultActualCreditor = "Monee (Credit) Finance Philippines, Inc.",
       defaultLoanType = "BNPL",
       defaultProductClassification = LoanProductClassification.BNPL_INSTALLMENT,
       detectPatterns = listOf(Regex("""\bspay\s*later\b""", RegexOption.IGNORE_CASE)),
       extraNoisePhrases = listOf(
-        "spaylater limit", "total credit limit", "remaining limit",
+        "spaylater limit", "remaining limit",
         "shopee coins", "voucher", "checkout"
       ),
       fieldSynonyms = mapOf(
         LoanFieldKey.AMOUNT_CURRENTLY_DUE to listOf(
+          "next bill to pay", "next bill", "bill to pay",
           "current bill", "bill for", "amount to pay", "total bill due", "this month bill", "upcoming bill"
+        ),
+        LoanFieldKey.CREDIT_LIMIT to listOf(
+          "total credit", "total credit limit"
         ),
         LoanFieldKey.STATEMENT_BALANCE to listOf(
           "statement balance", "billed amount", "monthly bill"
@@ -58,7 +62,7 @@ object PhilippineLoanProviderCatalog {
       id = "shopee_sloan",
       canonicalLender = "Shopee (SLoan)",
       applicationProviderName = "Shopee",
-      defaultActualCreditor = "SeaMoney (Credit) Finance Philippines, Inc.",
+      defaultActualCreditor = "Monee (Credit) Finance Philippines, Inc.",
       defaultLoanType = "Cash Loan",
       defaultProductClassification = LoanProductClassification.FIXED_INSTALLMENT_LOAN,
       detectPatterns = listOf(Regex("""\bsloan\b|\bs-?loan\b""", RegexOption.IGNORE_CASE)),
@@ -501,16 +505,49 @@ object PhilippineLoanProviderCatalog {
     )
   )
 
+  private val promoBannerFilterRegex = Regex(
+    """\bsloan\s+up\s+to\s*(?:₱|php|p)?\s*[\d,.]+[kKmM]?\b|\bget\s+up\s+to\s+[\d,.]+\s+(?:shopee\s+)?coins\b""",
+    RegexOption.IGNORE_CASE
+  )
+
   fun detectProfile(fullText: String): ProviderProfile? {
-    val lower = fullText.lowercase(Locale.US)
+    val sanitized = promoBannerFilterRegex.replace(fullText, " ")
+    val lower = sanitized.lowercase(Locale.US)
+
+    // 1. BillEase structural UI fingerprint ("Schedule | Transactions | Documents" tabs and/or
+    //    "Sent to +63..." disbursement badge with Installment/Remaining) takes priority over
+    //    destination e-wallet names like "GCash Cash Loan", "GCash E-Wallet", or "Maya Cash Loan".
+    val hasBilleaseTabs = lower.contains("schedule") &&
+      lower.contains("transactions") &&
+      lower.contains("documents")
+    val hasBilleaseSentTo = Regex("""\bsent\s+to\s+(?:\+?63|0?9)\d{7,}""").containsMatchIn(lower) &&
+      (lower.contains("installment") || (lower.contains("remaining") && Regex("""\bpaid\s*:?\s*\d+\s*/\s*\d+""").containsMatchIn(lower)))
+    if (hasBilleaseTabs || hasBilleaseSentTo || Regex("""\bbill\s*ease\b""", RegexOption.IGNORE_CASE).containsMatchIn(sanitized)) {
+      return byId("billease")
+    }
+
+    // 2. Native GCash Cash Loan (only when not a BillEase disbursement screen)
     if (lower.contains("gcash") && Regex("""\bcash\s+loan\b""").containsMatchIn(lower) &&
       !Regex("""\bg\s*loan\b|\bgloan\b|\bg\s*gives\b|\bggives\b""").containsMatchIn(lower)
     ) {
       return byId("gcash_cash_loan")
     }
-    return profiles.firstOrNull { profile ->
-      profile.detectPatterns.any { it.containsMatchIn(fullText) }
+
+    // 3. Standard keyword matching across all catalog profiles (using promo-stripped text)
+    profiles.firstOrNull { profile ->
+      profile.detectPatterns.any { it.containsMatchIn(sanitized) }
+    }?.let { return it }
+
+    // 4. Shopee SPayLater "My Bills" screen often omits the brand name ("My Bills | Unpaid | Paid" + "Upcoming Bill")
+    val hasShopeeMyBills = lower.contains("my bills") &&
+      lower.contains("unpaid") &&
+      lower.contains("paid") &&
+      (lower.contains("upcoming bill") || lower.contains("due date") || lower.contains("pay now"))
+    if (hasShopeeMyBills) {
+      return byId("shopee_spaylater")
     }
+
+    return null
   }
 
   fun byId(id: String?): ProviderProfile? =

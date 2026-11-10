@@ -132,6 +132,16 @@ object FinancialReasoningEngine {
         confidence = raw.statementBalanceCents.confidence,
         verificationReason = "Derived from statement balance (${MoneyFormatter.formatPeso(raw.statementBalanceCents.value)})."
       )
+      isRevolving && raw.amountCurrentlyDueCents.value != null && raw.amountCurrentlyDueCents.value > 0L &&
+        raw.minimumDueCents.value == null &&
+        (solvedUsedCredit.value == null || raw.amountCurrentlyDueCents.value >= solvedUsedCredit.value - 100L) ->
+        ExtractedField.calculated(
+          value = raw.amountCurrentlyDueCents.value,
+          sourceSnippet = raw.amountCurrentlyDueCents.sourceSnippet,
+          screenshotIndex = idx,
+          confidence = raw.amountCurrentlyDueCents.confidence,
+          verificationReason = "Derived from current bill due (${MoneyFormatter.formatPeso(raw.amountCurrentlyDueCents.value)})."
+        )
       isRevolving && solvedUsedCredit.value != null -> ExtractedField.calculated(
         value = solvedUsedCredit.value,
         sourceSnippet = solvedUsedCredit.sourceSnippet,
@@ -145,6 +155,15 @@ object FinancialReasoningEngine {
         screenshotIndex = idx,
         confidence = solvedRemTotal.confidence,
         verificationReason = "Derived from remaining installment total (${MoneyFormatter.formatPeso(solvedRemTotal.value)}) because no separate principal balance was shown."
+      )
+      !isRevolving && raw.statementBalanceCents.value == null &&
+        unpaidRows.isEmpty() &&
+        raw.amountCurrentlyDueCents.value != null && raw.amountCurrentlyDueCents.value > 0L -> ExtractedField.calculated(
+        value = raw.amountCurrentlyDueCents.value,
+        sourceSnippet = raw.amountCurrentlyDueCents.sourceSnippet,
+        screenshotIndex = idx,
+        confidence = raw.amountCurrentlyDueCents.confidence,
+        verificationReason = "Derived from current bill amount due (${MoneyFormatter.formatPeso(raw.amountCurrentlyDueCents.value)})."
       )
       else -> initialBalance
     }
@@ -184,6 +203,9 @@ object FinancialReasoningEngine {
         lastPaidDate = lastPaid,
         frequency = solvedFreq,
         customIntervalDays = solvedCustomDays.value,
+        rows = rows,
+        paidCount = solvedPaid.value,
+        bookingDateIso = raw.loanBookingDateIso.value,
         screenshotIndex = idx
       )?.let { estimatedDate ->
         solvedNextDue = estimatedDate
@@ -429,10 +451,10 @@ object FinancialReasoningEngine {
           verificationReason = firstUnpaidDated.verificationNote
             ?: "First upcoming/overdue payment date from merged schedule."
         )
-        updatedDueStatus = if (firstUnpaidDated.dateConfidence == ExtractionConfidence.HIGH) {
-          DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
-        } else {
-          DueDateStatus.UNCONFIRMED
+        updatedDueStatus = when {
+          firstUnpaidDated.dateConfidence == ExtractionConfidence.HIGH && !solvedNextDue.hasConflict -> DueDateStatus.CONFIRMED
+          firstUnpaidDated.dateConfidence == ExtractionConfidence.HIGH -> DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+          else -> DueDateStatus.UNCONFIRMED
         }
       } else if (draft.lastPaidDateIso.value != null &&
         solvedStatus.value != DebtStatus.PAID &&
@@ -442,12 +464,24 @@ object FinancialReasoningEngine {
           lastPaidDate = draft.lastPaidDateIso,
           frequency = solvedFreq,
           customIntervalDays = solvedCustomDays.value,
+          rows = rows,
+          paidCount = solvedPaid.value,
+          bookingDateIso = draft.loanBookingDateIso.value,
           screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
         )?.let { estimated ->
           solvedNextDue = estimated
-          updatedDueStatus = DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+          updatedDueStatus = if (estimated.confidence == ExtractionConfidence.HIGH) {
+            DueDateStatus.CONFIRMED
+          } else {
+            DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
+          }
         }
       }
+    } else if (updatedDueStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION &&
+      solvedNextDue.confidence == ExtractionConfidence.HIGH &&
+      !solvedNextDue.hasConflict
+    ) {
+      updatedDueStatus = DueDateStatus.CONFIRMED
     }
 
     val mergedFreqConsistent = solvedFreq.value != null &&
@@ -534,7 +568,7 @@ object FinancialReasoningEngine {
       ) to ExtractedField.notDetected()
     }
 
-    // 1. Weekly (exact 7d, or 6–8d holiday/weekend shift with bounded cumulative anchor drift)
+    // 1. Weekly (exact 7d, holiday-adjusted anchor, or 6–8d jitter with bounded cumulative anchor drift)
     if (gaps.all { it == 7 }) {
       return ExtractedField.estimated(
         value = RepaymentFrequency.WEEKLY,
@@ -544,19 +578,31 @@ object FinancialReasoningEngine {
         verificationReason = "${dates.size} repayment dates were detected at consistent 7-day intervals."
       ) to ExtractedField.notDetected()
     }
-    if (gaps.all { it in 6..8 } && maxAnchorDriftDays(dates, 7L) <= 2L) {
-      val minG = gaps.minOrNull() ?: 7
-      val maxG = gaps.maxOrNull() ?: 7
-      return ExtractedField.estimated(
-        value = RepaymentFrequency.WEEKLY,
-        sourceSnippet = snippet,
-        screenshotIndex = srcIdx,
-        confidence = ExtractionConfidence.MEDIUM,
-        verificationReason = "${dates.size} repayment dates were detected with intervals of approximately $minG to $maxG days."
-      ) to ExtractedField.notDetected()
+    if (gaps.all { it in 6..8 }) {
+      val holidayAnchor = findHolidayAdjustedAnchor(dates, 7L)
+      if (holidayAnchor != null) {
+        return ExtractedField.calculated(
+          value = RepaymentFrequency.WEEKLY,
+          sourceSnippet = snippet,
+          screenshotIndex = srcIdx,
+          confidence = if (allRowDatesHighConf) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+          verificationReason = "${dates.size} weekly repayment dates verified (adjusted for Philippine regular holiday)."
+        ) to ExtractedField.notDetected()
+      }
+      if (maxAnchorDriftDays(dates, 7L) <= 2L) {
+        val minG = gaps.minOrNull() ?: 7
+        val maxG = gaps.maxOrNull() ?: 7
+        return ExtractedField.estimated(
+          value = RepaymentFrequency.WEEKLY,
+          sourceSnippet = snippet,
+          screenshotIndex = srcIdx,
+          confidence = ExtractionConfidence.MEDIUM,
+          verificationReason = "${dates.size} repayment dates were detected with intervals of approximately $minG to $maxG days."
+        ) to ExtractedField.notDetected()
+      }
     }
 
-    // 2. Biweekly / Every 14 days (exact 14d, or 13–15d jitter without semi-monthly 15th/30th alternation)
+    // 2. Biweekly / Every 14 days (exact 14d, holiday-adjusted anchor, or 13–15d jitter without semi-monthly 15th/30th alternation)
     if (gaps.all { it == 14 }) {
       return ExtractedField.estimated(
         value = RepaymentFrequency.EVERY_14_DAYS,
@@ -570,16 +616,28 @@ object FinancialReasoningEngine {
     val looksSemiMonthly = semiMonthlyHits >= maxOf(3, dates.size - 1) &&
       dates.any { it.dayOfMonth in 14..16 } &&
       dates.any { it.dayOfMonth >= 28 }
-    if (!looksSemiMonthly && gaps.all { it in 13..15 } && maxAnchorDriftDays(dates, 14L) <= 2L) {
-      val minG = gaps.minOrNull() ?: 14
-      val maxG = gaps.maxOrNull() ?: 14
-      return ExtractedField.estimated(
-        value = RepaymentFrequency.EVERY_14_DAYS,
-        sourceSnippet = snippet,
-        screenshotIndex = srcIdx,
-        confidence = ExtractionConfidence.MEDIUM,
-        verificationReason = "${dates.size} repayment dates were detected with intervals of approximately $minG to $maxG days."
-      ) to ExtractedField.notDetected()
+    if (!looksSemiMonthly && gaps.all { it in 13..15 }) {
+      val holidayAnchor = findHolidayAdjustedAnchor(dates, 14L)
+      if (holidayAnchor != null) {
+        return ExtractedField.calculated(
+          value = RepaymentFrequency.EVERY_14_DAYS,
+          sourceSnippet = snippet,
+          screenshotIndex = srcIdx,
+          confidence = if (allRowDatesHighConf) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+          verificationReason = "${dates.size} biweekly (14-day) repayment dates verified (adjusted for Philippine regular holiday)."
+        ) to ExtractedField.notDetected()
+      }
+      if (maxAnchorDriftDays(dates, 14L) <= 2L) {
+        val minG = gaps.minOrNull() ?: 14
+        val maxG = gaps.maxOrNull() ?: 14
+        return ExtractedField.estimated(
+          value = RepaymentFrequency.EVERY_14_DAYS,
+          sourceSnippet = snippet,
+          screenshotIndex = srcIdx,
+          confidence = ExtractionConfidence.MEDIUM,
+          verificationReason = "${dates.size} repayment dates were detected with intervals of approximately $minG to $maxG days."
+        ) to ExtractedField.notDetected()
+      }
     }
 
     // 2b. Twice-monthly / Semi-monthly (e.g. 15th & 30th/end-of-month)
@@ -659,6 +717,28 @@ object FinancialReasoningEngine {
       confidence = ExtractionConfidence.HIGH,
       verificationReason = "Intervals vary (${gaps.joinToString("d, ")}d), so custom dates are kept instead of forcing a fixed cycle."
     ) to ExtractedField.notDetected()
+  }
+
+  private fun findHolidayAdjustedAnchor(dates: List<LocalDate>, periodDays: Long): LocalDate? {
+    if (dates.size < 3) return null
+    val candidateAnchors = dates.indices
+      .map { idx -> dates[idx].minusDays(periodDays * idx.toLong()) }
+      .groupingBy { it }
+      .eachCount()
+    val bestAnchor = candidateAnchors.maxByOrNull { it.value }?.key ?: return null
+    var adjustedCount = 0
+    for (idx in dates.indices) {
+      val expected = bestAnchor.plusDays(periodDays * idx.toLong())
+      val actual = dates[idx]
+      if (actual != expected) {
+        val holidayShifted = ManilaTime.adjustForPhilippineHoliday(expected)
+        if (actual != holidayShifted || !ManilaTime.isPhilippineRegularHoliday(expected)) {
+          return null
+        }
+        adjustedCount++
+      }
+    }
+    return if (adjustedCount > 0) bestAnchor else null
   }
 
   private fun maxAnchorDriftDays(dates: List<LocalDate>, periodDays: Long): Long {
@@ -1065,24 +1145,105 @@ object FinancialReasoningEngine {
     lastPaidDate: ExtractedField<String>,
     frequency: ExtractedField<RepaymentFrequency>,
     customIntervalDays: Int?,
+    rows: List<ExtractedInstallmentRow> = emptyList(),
+    paidCount: Int? = null,
+    bookingDateIso: String? = null,
     screenshotIndex: Int?
   ): ExtractedField<String>? {
     val lastPaid = ManilaTime.parseDate(lastPaidDate.value) ?: return null
     val freq = frequency.value ?: return null
-    val nextLocal: LocalDate? = when (freq) {
-      RepaymentFrequency.DAILY -> lastPaid.plusDays(1)
-      RepaymentFrequency.WEEKLY -> lastPaid.plusDays(7)
-      RepaymentFrequency.EVERY_14_DAYS -> lastPaid.plusDays(14)
-      RepaymentFrequency.MONTHLY -> lastPaid.plusMonths(1)
-      RepaymentFrequency.QUARTERLY -> lastPaid.plusMonths(3)
-      RepaymentFrequency.CUSTOM_DAYS -> customIntervalDays?.takeIf { it in 1..365 }?.let { lastPaid.plusDays(it.toLong()) }
-      RepaymentFrequency.TWICE_MONTHLY,
-      RepaymentFrequency.ONE_TIME,
-      RepaymentFrequency.IRREGULAR,
-      RepaymentFrequency.UNKNOWN -> null
+    if (freq == RepaymentFrequency.TWICE_MONTHLY ||
+      freq == RepaymentFrequency.ONE_TIME ||
+      freq == RepaymentFrequency.IRREGULAR ||
+      freq == RepaymentFrequency.UNKNOWN
+    ) {
+      return null
     }
-    if (nextLocal == null) return null
+    if (freq == RepaymentFrequency.CUSTOM_DAYS && (customIntervalDays == null || customIntervalDays !in 1..365)) {
+      return null
+    }
+
+    val datedPaidRows = rows.filter { it.status.isSettledPaid && it.dueDateIso != null }
+      .mapNotNull { r -> ManilaTime.parseDate(r.dueDateIso)?.let { r to it } }
+      .distinctBy { it.second }
+      .sortedBy { it.second }
+
+    var stepsAhead = 1
+    var verifiedByPaidProgress = false
+    if (datedPaidRows.isNotEmpty() && paidCount != null && paidCount >= datedPaidRows.size) {
+      val firstRow = datedPaidRows.first().first
+      val firstDate = datedPaidRows.first().second
+      val hintOrdinal = firstRow.installmentNumberHint
+      val bookingDate = ManilaTime.parseDate(bookingDateIso)
+      val maxFirstCycleDays = when (freq) {
+        RepaymentFrequency.DAILY -> 3L
+        RepaymentFrequency.WEEKLY -> 16L
+        RepaymentFrequency.EVERY_14_DAYS -> 28L
+        RepaymentFrequency.MONTHLY -> 48L
+        RepaymentFrequency.QUARTERLY -> 110L
+        RepaymentFrequency.CUSTOM_DAYS -> (customIntervalDays ?: 14) * 2L + 4L
+      }
+      val startsAtFirstByBooking = if (bookingDate != null) {
+        val gapDays = ChronoUnit.DAYS.between(bookingDate, firstDate)
+        gapDays in 0L..maxFirstCycleDays
+      } else {
+        false
+      }
+      val inferredAsLatestPaidBlock = if (bookingDate != null && !startsAtFirstByBooking && paidCount > datedPaidRows.size) {
+        val precedingCount = paidCount - datedPaidRows.size
+        val periodDaysLong = when (freq) {
+          RepaymentFrequency.DAILY -> 1L
+          RepaymentFrequency.WEEKLY -> 7L
+          RepaymentFrequency.EVERY_14_DAYS -> 14L
+          RepaymentFrequency.MONTHLY -> 30L
+          RepaymentFrequency.QUARTERLY -> 91L
+          RepaymentFrequency.CUSTOM_DAYS -> (customIntervalDays ?: 14).toLong()
+        }
+        val candidateFirst = if (freq == RepaymentFrequency.MONTHLY) {
+          firstDate.minusMonths(precedingCount.toLong())
+        } else {
+          firstDate.minusDays(precedingCount.toLong() * periodDaysLong)
+        }
+        ChronoUnit.DAYS.between(bookingDate, candidateFirst) in 0L..maxFirstCycleDays
+      } else {
+        false
+      }
+      val startOrdinal = when {
+        hintOrdinal != null && hintOrdinal >= 1 -> hintOrdinal
+        startsAtFirstByBooking -> 1
+        inferredAsLatestPaidBlock -> paidCount - datedPaidRows.size + 1
+        else -> null
+      }
+      if (startOrdinal != null) {
+        val lastVisibleOrdinal = startOrdinal + datedPaidRows.size - 1
+        val missingPaidAfterLastVisible = (paidCount - lastVisibleOrdinal).coerceAtLeast(0)
+        stepsAhead = missingPaidAfterLastVisible + 1
+        verifiedByPaidProgress = datedPaidRows.size >= 3
+      }
+    }
+
+    val anchorStart = ManilaTime.inferUnshiftedAnchorDate(lastPaid)
+    val projected = ManilaTime.generateProjectedScheduleDates(
+      nextDueDate = lastPaid,
+      count = stepsAhead + 1,
+      frequency = freq,
+      customIntervalDays = customIntervalDays,
+      adjustHolidays = true,
+      anchorStart = anchorStart
+    )
+    val nextLocal = projected.getOrNull(stepsAhead) ?: return null
     val iso = ManilaTime.formatIso(nextLocal)
+
+    if (verifiedByPaidProgress && paidCount != null) {
+      return ExtractedField.calculated(
+        value = iso,
+        sourceSnippet = "Paid: $paidCount · ${ManilaTime.formatShort(lastPaidDate.value!!)}",
+        screenshotIndex = screenshotIndex ?: lastPaidDate.sourceScreenshotIndex,
+        confidence = ExtractionConfidence.HIGH,
+        verificationReason = "Calculated installment #${paidCount + 1} due date after $paidCount paid installments."
+      )
+    }
+
     val patternDesc = when (freq) {
       RepaymentFrequency.DAILY -> "daily (+1 day)"
       RepaymentFrequency.WEEKLY -> "weekly (+7 days)"
@@ -1090,7 +1251,6 @@ object FinancialReasoningEngine {
       RepaymentFrequency.MONTHLY -> "monthly (+1 month)"
       RepaymentFrequency.QUARTERLY -> "quarterly (+3 months)"
       RepaymentFrequency.CUSTOM_DAYS -> "every $customIntervalDays days"
-      else -> freq.label
     }
     return ExtractedField.estimated(
       value = iso,
@@ -1121,8 +1281,8 @@ object FinancialReasoningEngine {
     if (quality == null || withReason.origin != FieldOrigin.EXTRACTED) return withReason
 
     val avg = quality.averageConfidence
-    val poorOcr = (avg != null && avg < 0.72f) ||
-      (quality.usedContrastEnhancement && avg != null && avg < 0.78f)
+    val poorOcr = (avg != null && avg < 0.68f) ||
+      (quality.usedContrastEnhancement && avg != null && avg < 0.70f)
     return if (poorOcr && withReason.confidence == ExtractionConfidence.HIGH) {
       withReason.copy(
         confidence = ExtractionConfidence.MEDIUM,

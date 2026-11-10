@@ -73,8 +73,8 @@ class GcashCashLoanRegressionTest {
     assertTrue(outcome is ScanAnalysisOutcome.SingleLoan)
     val draft = (outcome as ScanAnalysisOutcome.SingleLoan).draft
 
-    // 1. Provider, product, clean title (no "G))" emblem noise), and bare reference ID
-    assertEquals("GCash (Cash Loan)", draft.lender.value)
+    // 1. Provider (BillEase via Schedule|Transactions|Documents + Cash Loan #id header), clean title, ref ID
+    assertEquals("BillEase", draft.lender.value)
     assertEquals(LoanProductClassification.FIXED_INSTALLMENT_LOAN, draft.productClassification.value)
     assertEquals("46008372", draft.loanReferenceId.value)
     assertFalse("Loan name must not include circular G)) emblem", draft.loanName.value!!.contains("G))"))
@@ -156,5 +156,25 @@ class GcashCashLoanRegressionTest {
     )
     assertEquals(ExtractedInstallmentStatus.UNKNOWN, irregularEx.installmentRows[1].status)
     assertEquals(21, ex.remainingInstallmentsCount.value)
+  }
+
+  @Test
+  fun nativeGcashGloanStillResolvesToGcashAndFuseLending() {
+    val page = OcrDocumentPage(
+      screenshotIndex = 0,
+      lines = listOf(
+        OcrLine("GLoan Dashboard"),
+        OcrLine("Fuse Lending Inc."),
+        OcrLine("Loan Account No: GL-998811"),
+        OcrLine("Loan Amount: ₱5,000.00"),
+        OcrLine("Remaining Balance: ₱3,000.00"),
+        OcrLine("Next Due Date: Dec 10, 2026")
+      )
+    )
+    val outcome = MultiScreenshotDebtMerger.merge(listOf(DebtOcrExtractor.extract(page, refDate)))
+    assertTrue(outcome is ScanAnalysisOutcome.SingleLoan)
+    val draft = (outcome as ScanAnalysisOutcome.SingleLoan).draft
+    assertEquals("GCash (GLoan)", draft.lender.value)
+    assertEquals("Fuse Lending Inc.", draft.lendingCompany.value)
   }
 }

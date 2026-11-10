@@ -32,11 +32,12 @@ data class OcrBitmapStrip(
 object ImageScanPreprocessor {
 
   private const val TEMP_DIR_NAME = "ocr_scan_tmp"
-  private const val OCR_MAX_LONG_EDGE_PX = 2400
+  private const val OCR_MAX_LONG_EDGE_PX = 2800
   private const val OCR_TALL_MAX_SHORT_EDGE_PX = 1440
   private const val OCR_TALL_MAX_TOTAL_HEIGHT_PX = 16000
   private const val OCR_STRIP_MAX_HEIGHT_PX = 2200
   private const val OCR_STRIP_OVERLAP_PX = 240
+  private const val TALL_SCROLL_ASPECT_RATIO = 2.65f
   private const val OCR_UPSCALE_MIN_SHORT_EDGE_PX = 720
   private const val OCR_UPSCALE_TARGET_SHORT_EDGE_PX = 1080
   private const val OCR_MAX_PIXELS = 18_000_000L
@@ -195,7 +196,7 @@ object ImageScanPreprocessor {
       val fullW = full.width
       val fullH = full.height
 
-      if (fullH <= 2600 || fullH <= (fullW * 2.1f).toInt()) {
+      if (fullH <= 3100 || fullH <= (fullW * TALL_SCROLL_ASPECT_RATIO).toInt()) {
         return@runCatching listOf(
           OcrBitmapStrip(
             bitmap = full,
@@ -234,16 +235,26 @@ object ImageScanPreprocessor {
   }
 
   /**
-   * Applies gentle contrast/brightness stretching + monochrome normalization to improve OCR
-   * on low-contrast, dark-mode, or faded screenshots. Caller must recycle returned Bitmap.
+   * Applies adaptive contrast/brightness stretching + monochrome normalization to improve OCR
+   * on faded gray labels (e.g. "Remaining", "Installment", "Paid: 3/24") as well as dark-mode
+   * or low-contrast screenshots. Caller must recycle returned Bitmap.
    */
   fun createContrastEnhancedCopy(source: Bitmap): Bitmap {
     val dest = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(dest)
 
-    // Convert to luminance grayscale and stretch contrast around midpoint (gain = 1.45, offset = -48)
-    val contrast = 1.45f
-    val translate = (-0.5f * contrast + 0.5f) * 255f
+    val lightBackground = isLikelyLightBackground(source)
+    val contrast: Float
+    val translate: Float
+    if (lightBackground) {
+      // Darken medium/faded grays (#7A8299) toward charcoal while clipping light-gray UI chrome to white
+      contrast = 1.9f
+      translate = -165f
+    } else {
+      contrast = 1.55f
+      translate = (-0.42f * contrast + 0.5f) * 255f
+    }
+
     val grayMatrix = ColorMatrix().apply { setSaturation(0f) }
     val contrastMatrix = ColorMatrix(
       floatArrayOf(
@@ -260,6 +271,26 @@ object ImageScanPreprocessor {
     }
     canvas.drawBitmap(source, 0f, 0f, paint)
     return dest
+  }
+
+  private fun isLikelyLightBackground(bitmap: Bitmap): Boolean {
+    val cols = 6
+    val rows = 8
+    var lumaSum = 0L
+    var count = 0
+    val stepX = (bitmap.width / (cols + 1)).coerceAtLeast(1)
+    val stepY = (bitmap.height / (rows + 1)).coerceAtLeast(1)
+    for (r in 1..rows) {
+      val y = (r * stepY).coerceIn(0, bitmap.height - 1)
+      for (c in 1..cols) {
+        val x = (c * stepX).coerceIn(0, bitmap.width - 1)
+        val px = bitmap.getPixel(x, y)
+        val luma = ((px shr 16 and 0xff) * 299 + (px shr 8 and 0xff) * 587 + (px and 0xff) * 114) / 1000
+        lumaSum += luma
+        count++
+      }
+    }
+    return count == 0 || (lumaSum / count) >= 128
   }
 
   suspend fun decodeThumbnail(
@@ -298,7 +329,7 @@ object ImageScanPreprocessor {
 
     val shortEdge = minOf(logicalW, logicalH)
     val longEdge = maxOf(logicalW, logicalH)
-    val isTallScroll = longEdge > shortEdge * 2.2f
+    val isTallScroll = longEdge > shortEdge * TALL_SCROLL_ASPECT_RATIO
 
     // Determine safe sample size preserving horizontal readability on tall scrolling screenshots
     val targetSampleLongEdge = if (isTallScroll) {
@@ -344,7 +375,7 @@ object ImageScanPreprocessor {
     val curH = bitmap.height
     val curShort = minOf(curW, curH)
     val curLong = maxOf(curW, curH)
-    val isNowTall = curLong > curShort * 2.2f
+    val isNowTall = curLong > curShort * TALL_SCROLL_ASPECT_RATIO
 
     val scaleFactor: Float? = when {
       isNowTall && curShort > OCR_TALL_MAX_SHORT_EDGE_PX ->

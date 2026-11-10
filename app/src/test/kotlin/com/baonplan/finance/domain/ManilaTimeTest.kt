@@ -66,4 +66,57 @@ class ManilaTimeTest {
     assertNull(ManilaTime.advanceDate(base, RepaymentFrequency.ONE_TIME))
     assertNull(ManilaTime.advanceDate(base, RepaymentFrequency.CUSTOM_DAYS, null))
   }
+
+  @Test
+  fun formatDaysUntilDue_formatsFutureTodayTomorrowAndOverdue() {
+    val today = LocalDate.of(2026, 11, 10)
+    assertEquals("Due today", ManilaTime.formatDaysUntilDue("2026-11-10", today))
+    assertEquals("Tomorrow", ManilaTime.formatDaysUntilDue("2026-11-11", today))
+    assertEquals("In 13 days", ManilaTime.formatDaysUntilDue("2026-11-23", today))
+    assertEquals("1 day overdue", ManilaTime.formatDaysUntilDue("2026-11-09", today))
+    assertEquals("5 days overdue", ManilaTime.formatDaysUntilDue("2026-11-05", today))
+    assertNull(ManilaTime.formatDaysUntilDue(null, today))
+  }
+
+  @Test
+  fun philippineHolidays_shiftBonifacioDayAndSnapBackToMondayAnchor() {
+    assertTrue(ManilaTime.isPhilippineRegularHoliday(LocalDate.of(2026, 11, 30)))
+    assertEquals(
+      LocalDate.of(2026, 12, 1),
+      ManilaTime.adjustForPhilippineHoliday(LocalDate.of(2026, 11, 30))
+    )
+    assertEquals(
+      LocalDate.of(2026, 11, 30),
+      ManilaTime.inferUnshiftedAnchorDate(LocalDate.of(2026, 12, 1))
+    )
+
+    // Weekly from Nov 23 (21 installments -> #24 is Apr 12, 2027), shifting Nov 30 -> Dec 01 then snapping back Dec 07
+    val weekly21 = ManilaTime.generateProjectedScheduleDates(
+      nextDueDate = LocalDate.of(2026, 11, 23),
+      count = 21,
+      frequency = RepaymentFrequency.WEEKLY,
+      adjustHolidays = true
+    )
+    assertEquals(21, weekly21.size)
+    assertEquals(LocalDate.of(2026, 11, 23), weekly21[0])
+    assertEquals(LocalDate.of(2026, 12, 1), weekly21[1])
+    assertEquals(LocalDate.of(2026, 12, 7), weekly21[2])
+    assertEquals(LocalDate.of(2027, 4, 12), weekly21.last())
+
+    // Every 14 days starting on shifted Dec 01 recovers Nov 30 anchor -> Dec 14 -> Dec 28
+    val biweekly3 = ManilaTime.generateProjectedScheduleDates(
+      nextDueDate = LocalDate.of(2026, 12, 1),
+      count = 3,
+      frequency = RepaymentFrequency.EVERY_14_DAYS,
+      adjustHolidays = true
+    )
+    assertEquals(
+      listOf(
+        LocalDate.of(2026, 12, 1),
+        LocalDate.of(2026, 12, 14),
+        LocalDate.of(2026, 12, 28)
+      ),
+      biweekly3
+    )
+  }
 }

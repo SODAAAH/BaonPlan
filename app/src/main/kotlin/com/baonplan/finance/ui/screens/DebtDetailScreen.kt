@@ -76,14 +76,10 @@ import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
-import com.baonplan.finance.domain.model.InterestCalculationMethod
 import com.baonplan.finance.domain.model.LoanProductClassification
-import com.baonplan.finance.domain.model.PrepaymentRuleType
-import com.baonplan.finance.domain.model.ProjectionReliability
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ScheduleCompletenessStatus
 import com.baonplan.finance.domain.ocr.PersistedLoanAnalysisRecord
-import com.baonplan.finance.domain.ocr.RepaymentScheduleAnalyzer
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
 import kotlinx.serialization.json.Json
@@ -98,6 +94,8 @@ import com.baonplan.finance.ui.components.SectionHeader
 import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
 import java.io.File
+
+private val loanAnalysisDecodeJson = Json { ignoreUnknownKeys = true }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -183,7 +181,7 @@ fun DebtDetailScreen(
     val analysisRecord = remember(debt.loanAnalysisJson) {
       debt.loanAnalysisJson?.let { raw ->
         runCatching {
-          Json { ignoreUnknownKeys = true }.decodeFromString(PersistedLoanAnalysisRecord.serializer(), raw)
+          loanAnalysisDecodeJson.decodeFromString(PersistedLoanAnalysisRecord.serializer(), raw)
         }.getOrNull()
       }
     }
@@ -199,6 +197,41 @@ fun DebtDetailScreen(
         installments.filter { it.scheduleVersion == selectedScheduleVersion }
       } else {
         installments
+      }
+    }
+    val today = remember { ManilaTime.today() }
+    val isRevolving = debt.productClassification == LoanProductClassification.REVOLVING_CREDIT ||
+      debt.scheduleCompletenessStatus == ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF
+    val isSettled = debt.status == DebtStatus.PAID || debt.remainingBalanceCents <= 0L
+    val liveProjectedPayoff = remember(debt, visibleInstallments, analysisRecord) {
+      if (isSettled || isRevolving) {
+        null
+      } else {
+        debt.projectedPayoffDateIso
+          ?: analysisRecord?.payoffTimeline?.projectedPayoffDateIso
+          ?: if (debt.scheduleCompletenessStatus == ScheduleCompletenessStatus.COMPLETE_SCHEDULE) {
+            visibleInstallments.lastOrNull { !it.dueDate.isNullOrBlank() }?.dueDate
+          } else {
+            null
+          }
+          ?: run {
+            val start = ManilaTime.parseDate(debt.nextDueDate)
+            val rem = debt.remainingInstallmentsCount
+            if (start != null && rem > 0 &&
+              debt.frequency != RepaymentFrequency.UNKNOWN &&
+              debt.frequency != RepaymentFrequency.IRREGULAR
+            ) {
+              ManilaTime.generateProjectedScheduleDates(
+                nextDueDate = start,
+                count = rem,
+                frequency = debt.frequency,
+                customIntervalDays = debt.customIntervalDays,
+                adjustHolidays = true
+              ).lastOrNull()?.let { ManilaTime.formatIso(it) }
+            } else {
+              null
+            }
+          }
       }
     }
 
@@ -254,7 +287,6 @@ fun DebtDetailScreen(
           CalmDivider(modifier = Modifier.padding(vertical = 14.dp))
 
           Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val isSettled = debt.status == DebtStatus.PAID || debt.remainingBalanceCents <= 0L
             if (!isSettled) {
               val installmentLabel = if (debt.installmentAmountCents > 0L) {
                 "${MoneyFormatter.formatPeso(debt.installmentAmountCents)} · ${debt.remainingInstallmentsCount} left"
@@ -265,6 +297,9 @@ fun DebtDetailScreen(
             }
             MetricRow(label = "Frequency", value = debt.frequency.label, boldValue = false)
             if (!isSettled) {
+              val dueDateObj = ManilaTime.parseDate(debt.nextDueDate)
+              val countdownText = ManilaTime.formatDaysUntilDue(debt.nextDueDate, today)
+              val countdownDelta = dueDateObj?.let { ManilaTime.daysUntil(today, it) }
               Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -281,10 +316,27 @@ fun DebtDetailScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface
                   )
-                  if (debt.status == DebtStatus.ACTIVE) {
+                  if (countdownText != null && countdownDelta != null) {
+                    StatusBadge(
+                      text = countdownText,
+                      tone = when {
+                        countdownDelta <= 0L -> BadgeTone.DANGER
+                        countdownDelta == 1L -> BadgeTone.WARNING
+                        else -> BadgeTone.PRIMARY
+                      }
+                    )
+                  }
+                  if (debt.status == DebtStatus.ACTIVE && debt.dateStatus != DueDateStatus.CONFIRMED) {
                     DueDateStatusBadge(status = debt.dateStatus)
                   }
                 }
+              }
+              if (!isRevolving && liveProjectedPayoff != null) {
+                MetricRow(
+                  label = "Fully paid by",
+                  value = ManilaTime.formatDisplay(liveProjectedPayoff),
+                  valueColor = MaterialTheme.colorScheme.primary
+                )
               }
             } else {
               MetricRow(
@@ -347,7 +399,8 @@ fun DebtDetailScreen(
         RepaymentAnalysisSection(
           debt = debt,
           installments = visibleInstallments,
-          analysisRecord = analysisRecord
+          analysisRecord = analysisRecord,
+          projectedPayoff = liveProjectedPayoff
         )
       }
 
@@ -535,7 +588,9 @@ fun DebtDetailScreen(
                   }
                   Spacer(modifier = Modifier.height(4.dp))
                   Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    DueDateStatusBadge(status = inst.dateStatus)
+                    if (inst.dateStatus != DueDateStatus.CONFIRMED) {
+                      DueDateStatusBadge(status = inst.dateStatus)
+                    }
                     StatusBadge(
                       text = inst.rawStatusLabel?.takeIf { it.isNotBlank() } ?: inst.status.label,
                       tone = when (inst.status) {
@@ -544,14 +599,6 @@ fun DebtDetailScreen(
                         InstallmentStatus.PARTIAL, InstallmentStatus.DISPUTED -> BadgeTone.WARNING
                         else -> BadgeTone.NEUTRAL
                       }
-                    )
-                  }
-                  inst.evidenceSourceLabel?.takeIf { it.isNotBlank() }?.let { srcLabel ->
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                      text = srcLabel,
-                      style = MaterialTheme.typography.labelSmall,
-                      color = semantic.muted
                     )
                   }
                 }
@@ -722,16 +769,15 @@ fun DebtDetailScreen(
   }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RepaymentAnalysisSection(
   debt: DebtEntity,
   installments: List<InstallmentEntity>,
-  analysisRecord: PersistedLoanAnalysisRecord?
+  analysisRecord: PersistedLoanAnalysisRecord?,
+  projectedPayoff: String?
 ) {
   val semantic = LocalBaonColors.current
   val timeline = analysisRecord?.payoffTimeline
-  val terms = analysisRecord?.contractualTerms
   val isRevolving = debt.productClassification == LoanProductClassification.REVOLVING_CREDIT ||
     debt.scheduleCompletenessStatus == ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF
   val isSettled = debt.status == DebtStatus.PAID || debt.remainingBalanceCents <= 0L
@@ -746,54 +792,25 @@ private fun RepaymentAnalysisSection(
     ?: debt.remainingInstallmentsCount.takeIf { it > 0 }
     ?: timeline?.remainingInstallmentsCount
 
-  val contractualMaturity = debt.contractualMaturityDateIso ?: timeline?.contractualMaturityDateIso
-  val currentScheduledPayoff = timeline?.currentScheduledPayoffDateIso
-    ?: installments.lastOrNull { !it.dueDate.isNullOrBlank() }?.dueDate
-  val projectedPayoff = debt.projectedPayoffDateIso ?: timeline?.projectedPayoffDateIso
   val actualPaidDate = debt.actualFullyPaidDateIso ?: timeline?.actualFullyPaidDateIso
-
-  val hypotheticalScenarios = remember(debt, terms) {
-    if (!isSettled && !isRevolving && debt.remainingBalanceCents > 0L) {
-      RepaymentScheduleAnalyzer.computeHypotheticalScenarios(
-        remainingBalanceCents = debt.remainingBalanceCents,
-        installmentAmountCents = debt.installmentAmountCents,
-        remainingInstallmentsCount = remainingCount ?: 1,
-        nextDueDateIso = debt.nextDueDate,
-        frequency = debt.frequency,
-        customIntervalDays = debt.customIntervalDays,
-        contractualTerms = terms ?: com.baonplan.finance.domain.ocr.ContractualTermsSummary()
-      )
-    } else {
-      emptyList()
-    }
+  val origDate = timeline?.originalLoanDateIso ?: debt.loanBookingDateIso
+  val explanation = when {
+    isRevolving -> "Revolving credit lines do not have a fixed full-payment date."
+    !isSettled && projectedPayoff == null ->
+      timeline?.missingInformationExplanation
+        ?: "Confirm next payment date and frequency to see when this loan is fully paid."
+    else -> null
+  }
+  val hasProgress = !isRevolving && totalCount != null && totalCount > 0 && paidCount != null
+  if (!hasProgress && origDate == null && actualPaidDate == null && explanation == null) {
+    return
   }
 
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    SectionHeader(title = "Repayment analysis")
+    SectionHeader(title = "Payoff progress")
     BaonCard {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          Text(
-            text = "Payoff timeline & schedule status",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface
-          )
-          StatusBadge(
-            text = debt.scheduleCompletenessStatus.label,
-            tone = when (debt.scheduleCompletenessStatus) {
-              ScheduleCompletenessStatus.COMPLETE_SCHEDULE -> BadgeTone.POSITIVE
-              ScheduleCompletenessStatus.PARTIAL_SCHEDULE -> BadgeTone.PRIMARY
-              ScheduleCompletenessStatus.REVOLVING_NO_FIXED_PAYOFF -> BadgeTone.NEUTRAL
-              else -> BadgeTone.WARNING
-            }
-          )
-        }
-
-        if (!isRevolving && totalCount != null && totalCount > 0 && paidCount != null) {
+        if (hasProgress) {
           val fraction = (paidCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f)
           Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(
@@ -801,7 +818,7 @@ private fun RepaymentAnalysisSection(
               horizontalArrangement = Arrangement.SpaceBetween
             ) {
               Text(
-                text = "Installment progress",
+                text = "Installments",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
               )
@@ -822,160 +839,31 @@ private fun RepaymentAnalysisSection(
           }
         }
 
-        debt.applicationProvider?.takeIf { it.isNotBlank() && it != debt.lender }?.let { app ->
-          MetricRow(label = "App / platform", value = app, boldValue = false)
-        }
-        debt.lendingCompany?.takeIf { it.isNotBlank() }?.let { company ->
-          MetricRow(label = "Lending / financing company", value = company, boldValue = false)
-        }
-        debt.actualCreditor?.takeIf { it.isNotBlank() && it != debt.lendingCompany }?.let { creditor ->
-          MetricRow(label = "Actual creditor", value = creditor, boldValue = false)
-        }
-        debt.loanReferenceId?.takeIf { it.isNotBlank() }?.let { ref ->
-          MetricRow(label = "Reference / contract ID", value = ref, boldValue = false)
-        }
-
-        (timeline?.originalLoanDateIso ?: debt.loanBookingDateIso)?.let { origIso ->
-          MetricRow(label = "Original loan date", value = ManilaTime.formatDisplay(origIso), boldValue = false)
-        }
-        timeline?.firstInstallmentDateIso?.let { firstIso ->
-          MetricRow(label = "First installment", value = ManilaTime.formatDisplay(firstIso), boldValue = false)
+        origDate?.let { origIso ->
+          MetricRow(label = "Loan date", value = ManilaTime.formatDisplay(origIso), boldValue = false)
         }
         if (isSettled) {
           actualPaidDate?.let { paidIso ->
             MetricRow(
-              label = "Actual fully paid date",
+              label = "Paid in full",
               value = ManilaTime.formatDisplay(paidIso),
               valueColor = semantic.positive
             )
           }
-        } else if (!isRevolving) {
-          contractualMaturity?.let { matIso ->
-            MetricRow(
-              label = "Contractual maturity",
-              value = ManilaTime.formatDisplay(matIso),
-              boldValue = false
-            )
-          }
-          currentScheduledPayoff?.takeIf { it != contractualMaturity }?.let { curIso ->
-            MetricRow(
-              label = "Current scheduled payoff",
-              value = ManilaTime.formatDisplay(curIso),
-              boldValue = false
-            )
-          }
-          projectedPayoff?.let { projIso ->
-            MetricRow(
-              label = if (debt.projectionReliability == ProjectionReliability.ESTIMATED_FROM_PARTIAL) {
-                "Projected full-payment date (est.)"
-              } else {
-                "Projected full-payment date"
-              },
-              value = ManilaTime.formatDisplay(projIso),
-              valueColor = MaterialTheme.colorScheme.primary
-            )
-          }
+        } else if (!isRevolving && projectedPayoff != null) {
+          MetricRow(
+            label = "Fully paid by",
+            value = ManilaTime.formatDisplay(projectedPayoff),
+            valueColor = MaterialTheme.colorScheme.primary
+          )
         }
 
-        val explanation = timeline?.missingInformationExplanation
-          ?: if (isRevolving) {
-            "Revolving credit lines do not have a fixed full-payment date because balances change with new usage and minimum payments."
-          } else if (!isSettled && projectedPayoff == null) {
-            "Upload a complete repayment schedule or confirm next payment date and interval to determine the expected full-payment date."
-          } else {
-            null
-          }
         explanation?.let { msg ->
           Text(
             text = msg,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
           )
-        }
-
-        if (terms != null) {
-          val rateSummary = listOfNotNull(
-            terms.annualInterestRatePercent?.let { "$it% p.a." },
-            terms.monthlyInterestRatePercent?.let { "$it% monthly" },
-            terms.dailyInterestRatePercent?.let { "$it% daily" },
-            terms.effectiveInterestRatePercent?.let { "EIR $it%" }
-          ).joinToString(" · ")
-          if (rateSummary.isNotBlank() ||
-            terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN ||
-            terms.prepaymentRule != PrepaymentRuleType.UNKNOWN ||
-            !analysisRecord?.analyzedDocuments.isNullOrEmpty()
-          ) {
-            CalmDivider()
-            ExpandableSection(
-              title = "Contractual terms & source evidence",
-              subtitle = "Interest rules, prepayment terms & document provenance",
-              initiallyExpanded = false
-            ) {
-              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (rateSummary.isNotBlank()) {
-                  MetricRow(label = "Interest rate", value = rateSummary, boldValue = false)
-                }
-                if (terms.interestCalculationMethod != InterestCalculationMethod.UNKNOWN) {
-                  MetricRow(label = "Calculation method", value = terms.interestCalculationMethod.label, boldValue = false)
-                }
-                if (terms.prepaymentRule != PrepaymentRuleType.UNKNOWN) {
-                  MetricRow(label = "Prepayment rule", value = terms.prepaymentRule.label, boldValue = false)
-                }
-                terms.latePaymentFeeRule?.let { lateRule ->
-                  MetricRow(label = "Late fee rule", value = lateRule, boldValue = false)
-                }
-                analysisRecord?.analyzedDocuments.orEmpty().forEach { doc ->
-                  Text(
-                    text = "• ${doc.displayTitle} (${doc.documentKind.label})",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                  )
-                }
-                analysisRecord?.evidenceTraces.orEmpty().forEach { trace ->
-                  Text(
-                    text = "• ${trace.fieldLabel}: ${trace.resolvedValueDisplay} (${trace.sourceDocumentLabel})",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = semantic.muted
-                  )
-                }
-              }
-            }
-          }
-        }
-
-        if (hypotheticalScenarios.isNotEmpty()) {
-          CalmDivider()
-          ExpandableSection(
-            title = "What-if payoff explorer",
-            subtitle = "Hypothetical simulations only — stored loan values are unchanged",
-            initiallyExpanded = false
-          ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-              hypotheticalScenarios.forEach { scenario ->
-                Surface(
-                  shape = RoundedCornerShape(10.dp),
-                  color = MaterialTheme.colorScheme.surfaceContainerLow,
-                  modifier = Modifier.fillMaxWidth()
-                ) {
-                  Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                  ) {
-                    Text(
-                      text = scenario.scenarioTitle,
-                      style = MaterialTheme.typography.labelLarge,
-                      color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                      text = scenario.explanation,
-                      style = MaterialTheme.typography.bodySmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                  }
-                }
-              }
-            }
-          }
         }
       }
     }

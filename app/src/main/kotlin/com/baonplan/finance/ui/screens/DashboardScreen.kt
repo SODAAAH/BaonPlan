@@ -175,9 +175,18 @@ fun DashboardScreen(
                 color = MaterialTheme.colorScheme.onSurface
               )
               Spacer(modifier = Modifier.height(3.dp))
+              val countdown = ManilaTime.formatDaysUntilDue(nextPayment.dueDateIso, state.today)
               Text(
                 text = if (nextPayment.dueDateIso != null) {
-                  "Due ${ManilaTime.formatFullDisplay(nextPayment.dueDateIso)}"
+                  buildString {
+                    append("Due ${ManilaTime.formatFullDisplay(nextPayment.dueDateIso)}")
+                    if (countdown != null &&
+                      nextPayment.urgency != PaymentUrgency.DUE_TODAY &&
+                      nextPayment.urgency != PaymentUrgency.DUE_TOMORROW
+                    ) {
+                      append(" · $countdown")
+                    }
+                  }
                 } else {
                   "Due date not confirmed"
                 },

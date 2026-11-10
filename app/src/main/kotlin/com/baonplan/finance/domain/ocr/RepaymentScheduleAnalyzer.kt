@@ -503,6 +503,12 @@ object RepaymentScheduleAnalyzer {
     } else {
       val freq = draft.frequency.value
       val startNext = ManilaTime.parseDate(nextPayDate)
+      val isSingleBillPayLater = draft.productClassification.value == LoanProductClassification.BNPL_PAY_LATER &&
+        activeRows.isEmpty() &&
+        remCount == null &&
+        nextPayDate != null &&
+        draft.amountCurrentlyDueCents.value != null
+
       if (startNext != null &&
         remCount != null &&
         remCount >= 1 &&
@@ -510,26 +516,34 @@ object RepaymentScheduleAnalyzer {
         freq != RepaymentFrequency.UNKNOWN &&
         freq != RepaymentFrequency.IRREGULAR
       ) {
-        var cursor: LocalDate? = startNext
-        for (step in 1 until remCount) {
-          cursor = cursor?.let { ManilaTime.advanceDate(it, freq, draft.customIntervalDays.value) }
-          if (cursor == null) break
-        }
-        val finalProjected = cursor
-        if (finalProjected != null) {
+        val anchorStart = inferAnchorStart(startNext, activeRows, freq)
+        val projectedDates = ManilaTime.generateProjectedScheduleDates(
+          nextDueDate = startNext,
+          count = remCount,
+          frequency = freq,
+          customIntervalDays = draft.customIntervalDays.value,
+          adjustHolidays = true,
+          anchorStart = anchorStart
+        )
+        val finalProjected = projectedDates.lastOrNull()
+        if (finalProjected != null && projectedDates.size == remCount) {
           projectedDate = ManilaTime.formatIso(finalProjected)
           reliability = ProjectionReliability.ESTIMATED_FROM_PARTIAL
           assumptions.add(
-            "Projected from next payment date (${ManilaTime.formatDisplay(nextPayDate)}) across $remCount remaining ${freq.label.lowercase()} payment(s); upload full schedule to confirm exact holiday shifts."
+            "Projected from next payment date (${ManilaTime.formatDisplay(nextPayDate)}) across $remCount remaining ${freq.label.lowercase()} payment(s)."
           )
           missingExplanation = if (origCount != null && activeRows.isNotEmpty()) {
             "Showing ${activeRows.size} of $origCount installment rows; remaining dates are projected from the ${freq.label.lowercase()} interval."
           } else {
-            "Full installment schedule was not included; payoff date is estimated from remaining installments and payment frequency."
+            "Full installment schedule was not included; payoff date is projected from remaining installments and payment frequency."
           }
         } else {
           missingExplanation = "Payment interval (${freq.label}) requires the full schedule or specific due dates to determine the final payoff date."
         }
+      } else if (isSingleBillPayLater) {
+        projectedDate = nextPayDate
+        reliability = ProjectionReliability.ESTIMATED_FROM_PARTIAL
+        assumptions.add("Full current bill due ${ManilaTime.formatDisplay(nextPayDate)}.")
       } else {
         missingExplanation = when {
           freq == RepaymentFrequency.IRREGULAR ->
@@ -562,6 +576,28 @@ object RepaymentScheduleAnalyzer {
       missingInformationExplanation = missingExplanation,
       assumptionsUsed = assumptions
     )
+  }
+
+  private fun inferAnchorStart(
+    startNext: LocalDate,
+    activeRows: List<ExtractedInstallmentRow>,
+    freq: RepaymentFrequency
+  ): LocalDate {
+    if (freq == RepaymentFrequency.WEEKLY || freq == RepaymentFrequency.EVERY_14_DAYS) {
+      val rowDates = activeRows.mapNotNull { ManilaTime.parseDate(it.dueDateIso) }
+      val dominantDay = rowDates
+        .filter { d -> !ManilaTime.isPhilippineRegularHoliday(d.minusDays(1)) }
+        .groupingBy { it.dayOfWeek }
+        .eachCount()
+        .maxByOrNull { it.value }
+        ?.key
+      if (dominantDay != null && startNext.dayOfWeek != dominantDay &&
+        ManilaTime.isPhilippineRegularHoliday(startNext.minusDays(1))
+      ) {
+        return startNext.minusDays(1)
+      }
+    }
+    return ManilaTime.inferUnshiftedAnchorDate(startNext)
   }
 
   private fun buildEvidenceTraces(

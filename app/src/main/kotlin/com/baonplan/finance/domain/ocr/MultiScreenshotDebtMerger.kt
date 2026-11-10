@@ -168,17 +168,19 @@ object MultiScreenshotDebtMerger {
         analyzedDocuments = scheduleAnalysis.analyzedDocuments,
         evidenceTraces = scheduleAnalysis.evidenceTraces,
         isSchedulePartial = scheduleAnalysis.isSchedulePartial,
-        finalDueDateIso = if (reasonedDraft.finalDueDateIso.value == null &&
-          timeline.currentScheduledPayoffDateIso != null
-        ) {
-          ExtractedField.calculated(
-            value = timeline.currentScheduledPayoffDateIso,
-            sourceSnippet = timeline.scheduleSourceSummary,
-            confidence = ExtractionConfidence.HIGH,
-            verificationReason = "Determined from reconstructed repayment schedule."
-          )
-        } else {
-          reasonedDraft.finalDueDateIso
+        finalDueDateIso = run {
+          val resolvedFinal = timeline.projectedPayoffDateIso
+            ?: timeline.currentScheduledPayoffDateIso.takeUnless { scheduleAnalysis.isSchedulePartial }
+          if (reasonedDraft.finalDueDateIso.value == null && resolvedFinal != null) {
+            ExtractedField.calculated(
+              value = resolvedFinal,
+              sourceSnippet = timeline.scheduleSourceSummary,
+              confidence = ExtractionConfidence.HIGH,
+              verificationReason = "Determined from repayment schedule analysis."
+            )
+          } else {
+            reasonedDraft.finalDueDateIso
+          }
         }
       )
       val issues = (analyzedDraft.validationIssues + existingValidator(analyzedDraft))
@@ -641,7 +643,7 @@ object MultiScreenshotDebtMerger {
     val productName = mergeScalar("Product name", "productName", { it.productName }, preferContractAuthority = true)
     val loanType = mergeScalar("Loan type", "category", { it.loanType })
     val refId = mergeScalar("Reference ID", "loanReferenceId", { it.loanReferenceId })
-    val loanName = mergeLoanNameField(pages, lender.value, refId.value, loanType.value)
+    val loanName = mergeLoanNameField(pages, refId.value)
     val loanBookingDate = mergeScalar("Booking date", "loanBookingDate", { it.loanBookingDateIso }, preferContractAuthority = true)
 
     val originalPrincipal = mergeScalar("Original loan amount", "originalPrincipalCents", { it.originalPrincipalCents }, moneyDiff, moneyFmt, preferContractAuthority = true)
@@ -799,8 +801,8 @@ object MultiScreenshotDebtMerger {
 
     val initialDueStatus = when {
       nextDueDate.value == null -> DueDateStatus.UNKNOWN
+      nextDueDate.confidence == ExtractionConfidence.HIGH && !nextDueDate.hasConflict -> DueDateStatus.CONFIRMED
       nextDueDate.origin == FieldOrigin.ESTIMATED -> DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
-      nextDueDate.confidence == ExtractionConfidence.HIGH -> DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION
       else -> DueDateStatus.UNCONFIRMED
     }
 
@@ -881,9 +883,7 @@ object MultiScreenshotDebtMerger {
 
   private fun mergeLoanNameField(
     pages: List<SingleScreenshotExtraction>,
-    lender: String?,
-    refId: String?,
-    loanType: String?
+    refId: String?
   ): ExtractedField<String> {
     val extracted = pages.map { it.loanName }
       .firstOrNull { it.origin == FieldOrigin.EXTRACTED && !it.value.isNullOrBlank() }
@@ -891,13 +891,11 @@ object MultiScreenshotDebtMerger {
 
     val suggested = pages.map { it.loanName }.firstOrNull { !it.value.isNullOrBlank() }
     if (suggested != null) {
-      val enriched = buildString {
-        append(lender ?: suggested.value)
-        if (!refId.isNullOrBlank() && !suggested.value!!.contains(refId, ignoreCase = true)) {
-          append(" #").append(refId)
-        } else if (lender != null && !loanType.isNullOrBlank() && !lender.contains(loanType, ignoreCase = true)) {
-          append(" ").append(loanType)
-        }
+      val baseName = suggested.value!!
+      val enriched = if (!refId.isNullOrBlank() && !baseName.contains(refId, ignoreCase = true)) {
+        "$baseName #$refId"
+      } else {
+        baseName
       }
       return suggested.copy(value = enriched.take(50))
     }

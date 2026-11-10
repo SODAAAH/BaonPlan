@@ -97,6 +97,140 @@ object ManilaTime {
   fun daysUntil(today: LocalDate, targetDate: LocalDate): Long =
     ChronoUnit.DAYS.between(today, targetDate)
 
+  fun formatDaysUntilDue(
+    dueDateIso: String?,
+    today: LocalDate = today()
+  ): String? {
+    val parsed = parseDate(dueDateIso) ?: return null
+    val delta = daysUntil(today, parsed)
+    return when {
+      delta == 0L -> "Due today"
+      delta == 1L -> "Tomorrow"
+      delta > 1L -> "In $delta days"
+      delta == -1L -> "1 day overdue"
+      else -> "${-delta} days overdue"
+    }
+  }
+
+  private val movablePhHolidays: Set<LocalDate> = setOf(
+    // 2025
+    LocalDate.of(2025, 4, 17), // Maundy Thursday
+    LocalDate.of(2025, 4, 18), // Good Friday
+    LocalDate.of(2025, 8, 25), // National Heroes Day
+    // 2026 (Proclamation No. 1006)
+    LocalDate.of(2026, 4, 2),  // Maundy Thursday
+    LocalDate.of(2026, 4, 3),  // Good Friday
+    LocalDate.of(2026, 8, 31), // National Heroes Day
+    // 2027 (Proclamation No. 1427)
+    LocalDate.of(2027, 3, 25), // Maundy Thursday
+    LocalDate.of(2027, 3, 26), // Good Friday
+    LocalDate.of(2027, 8, 30), // National Heroes Day
+    // 2028
+    LocalDate.of(2028, 4, 13), // Maundy Thursday
+    LocalDate.of(2028, 4, 14), // Good Friday
+    LocalDate.of(2028, 8, 28)  // National Heroes Day
+  )
+
+  /**
+   * Philippine Regular Holidays (fixed dates + Holy Thursday/Good Friday/National Heroes Day)
+   * used to recognize and project single-day lender schedule shifts such as Nov 30 -> Dec 01.
+   */
+  fun isPhilippineRegularHoliday(date: LocalDate): Boolean {
+    val m = date.monthValue
+    val d = date.dayOfMonth
+    val fixed = (m == 1 && d == 1) ||   // New Year's Day
+      (m == 4 && d == 9) ||             // Araw ng Kagitingan
+      (m == 5 && d == 1) ||             // Labor Day
+      (m == 6 && d == 12) ||            // Independence Day
+      (m == 11 && d == 30) ||           // Bonifacio Day
+      (m == 12 && d == 25) ||           // Christmas Day
+      (m == 12 && d == 30)              // Rizal Day
+    return fixed || date in movablePhHolidays
+  }
+
+  fun adjustForPhilippineHoliday(
+    date: LocalDate,
+    skipWeekends: Boolean = false
+  ): LocalDate {
+    var cursor = date
+    var guard = 0
+    while (guard < 7 && (isPhilippineRegularHoliday(cursor) ||
+        (skipWeekends && (cursor.dayOfWeek == DayOfWeek.SATURDAY || cursor.dayOfWeek == DayOfWeek.SUNDAY)))
+    ) {
+      cursor = cursor.plusDays(1)
+      guard++
+    }
+    return cursor
+  }
+
+  /**
+   * If [date] falls 1 day after a Philippine Regular Holiday, recovers the unshifted anchor date
+   * so subsequent weekly/biweekly installments snap back to the original weekday anchor.
+   */
+  fun inferUnshiftedAnchorDate(date: LocalDate): LocalDate =
+    if (isPhilippineRegularHoliday(date.minusDays(1))) date.minusDays(1) else date
+
+  /**
+   * Generates [count] scheduled dates starting at [nextDueDate], stepping cleanly from an unshifted
+   * anchor ([anchorStart] or inferred pre-holiday anchor) and shifting individual installments that
+   * fall on Philippine Regular Holidays forward to the next banking day.
+   */
+  fun generateProjectedScheduleDates(
+    nextDueDate: LocalDate,
+    count: Int,
+    frequency: RepaymentFrequency,
+    customIntervalDays: Int? = null,
+    adjustHolidays: Boolean = true,
+    anchorStart: LocalDate? = null
+  ): List<LocalDate> {
+    if (count <= 0) return emptyList()
+    if (count == 1 || frequency == RepaymentFrequency.ONE_TIME) {
+      return listOf(nextDueDate)
+    }
+    val effectiveAnchor = anchorStart ?: inferUnshiftedAnchorDate(nextDueDate)
+    val result = ArrayList<LocalDate>(count)
+    result.add(nextDueDate)
+
+    if (frequency == RepaymentFrequency.TWICE_MONTHLY) {
+      var cursor = nextDueDate
+      for (step in 1 until count) {
+        cursor = if (cursor.dayOfMonth <= 15) {
+          cursor.withDayOfMonth(cursor.lengthOfMonth())
+        } else {
+          cursor.plusMonths(1).withDayOfMonth(15)
+        }
+        result.add(cursor)
+      }
+      return result
+    }
+
+    for (step in 1 until count) {
+      val baseDate = when (frequency) {
+        RepaymentFrequency.DAILY -> effectiveAnchor.plusDays(step.toLong())
+        RepaymentFrequency.WEEKLY -> effectiveAnchor.plusWeeks(step.toLong())
+        RepaymentFrequency.EVERY_14_DAYS -> effectiveAnchor.plusDays(14L * step.toLong())
+        RepaymentFrequency.MONTHLY -> effectiveAnchor.plusMonths(step.toLong())
+        RepaymentFrequency.QUARTERLY -> effectiveAnchor.plusMonths(3L * step.toLong())
+        RepaymentFrequency.CUSTOM_DAYS -> {
+          val days = customIntervalDays?.takeIf { it > 0 } ?: return result
+          effectiveAnchor.plusDays(days.toLong() * step.toLong())
+        }
+        else -> return result
+      }
+      val adjusted = if (adjustHolidays &&
+        (frequency == RepaymentFrequency.WEEKLY ||
+          frequency == RepaymentFrequency.EVERY_14_DAYS ||
+          frequency == RepaymentFrequency.CUSTOM_DAYS)
+      ) {
+        adjustForPhilippineHoliday(baseDate)
+      } else {
+        baseDate
+      }
+      result.add(adjusted)
+    }
+    return result
+  }
+
   fun classifyUrgency(
     today: LocalDate,
     dueDateIso: String?,
