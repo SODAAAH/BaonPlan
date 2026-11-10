@@ -2,6 +2,8 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.ObligationRole
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -115,6 +117,10 @@ object MultiScreenshotDebtMerger {
       p.remainingInstallmentTotalCents.value != null ||
       p.installmentAmountCents.value != null ||
       p.totalRepaymentCents.value != null ||
+      p.statementBalanceCents.value != null ||
+      p.creditLimitCents.value != null ||
+      p.minimumDueCents.value != null ||
+      p.pastDueAmountCents.value != null ||
       p.nextDueDateIso.value != null ||
       p.installmentRows.isNotEmpty()
 
@@ -126,11 +132,25 @@ object MultiScreenshotDebtMerger {
       return false
     }
 
-    // 2. Reference / Order IDs are authoritative identity when present on both pages
+    // 1b. Reference / Order IDs are authoritative identity when present on both pages
     val refA = a.loanReferenceId.value?.trim()
     val refB = b.loanReferenceId.value?.trim()
     if (!refA.isNullOrBlank() && !refB.isNullOrBlank()) {
       return refA.equals(refB, ignoreCase = true)
+    }
+
+    // 2. Incompatible known product classifications (e.g. SPayLater vs SLoan, Credit Line vs Cash Loan)
+    val prodA = a.productClassification.value ?: LoanProductClassification.UNKNOWN
+    val prodB = b.productClassification.value ?: LoanProductClassification.UNKNOWN
+    val isRestructureTransition = a.scheduleVersion != b.scheduleVersion &&
+      (prodA == LoanProductClassification.FLEXIBLE_OR_RESTRUCTURED_LOAN ||
+        prodB == LoanProductClassification.FLEXIBLE_OR_RESTRUCTURED_LOAN)
+    if (!isRestructureTransition &&
+      prodA != LoanProductClassification.UNKNOWN &&
+      prodB != LoanProductClassification.UNKNOWN &&
+      prodA != prodB
+    ) {
+      return false
     }
 
     // 3. Conflicting explicit loan names -> strictly separate
@@ -144,22 +164,35 @@ object MultiScreenshotDebtMerger {
       nameSim >= 0.65f
     } else false
 
-    // 4. Hard immutable core-term contradictions -> strictly separate
+    val hasScheduleRestructure = (a.scheduleVersion != b.scheduleVersion ||
+      (a.scheduleEffectiveDateIso != null && b.scheduleEffectiveDateIso != null &&
+        a.scheduleEffectiveDateIso != b.scheduleEffectiveDateIso)) &&
+      (hasMatchingExplicitName ||
+        (a.originalPrincipalCents.extractedOnlyOrNull() != null &&
+          b.originalPrincipalCents.extractedOnlyOrNull() != null &&
+          abs(a.originalPrincipalCents.extractedOnlyOrNull()!! - b.originalPrincipalCents.extractedOnlyOrNull()!!) <= 100L))
+
+    // 4. Hard immutable core-term contradictions -> strictly separate (unless explicitly restructured schedule version)
     val origA = a.originalPrincipalCents.extractedOnlyOrNull()
     val origB = b.originalPrincipalCents.extractedOnlyOrNull()
     if (origA != null && origB != null && abs(origA - origB) > 100L) return false
 
-    val totalA = a.totalRepaymentCents.extractedOnlyOrNull()
-    val totalB = b.totalRepaymentCents.extractedOnlyOrNull()
-    if (totalA != null && totalB != null && abs(totalA - totalB) > 100L) return false
+    if (!hasScheduleRestructure) {
+      val totalA = a.totalRepaymentCents.extractedOnlyOrNull()
+      val totalB = b.totalRepaymentCents.extractedOnlyOrNull()
+      if (totalA != null && totalB != null && abs(totalA - totalB) > 100L) return false
+
+      val instA = a.installmentAmountCents.value
+      val instB = b.installmentAmountCents.value
+      if (instA != null && instB != null && abs(instA - instB) > 100L) return false
+
+      val countA = a.originalInstallmentCount.extractedOnlyOrNull()
+      val countB = b.originalInstallmentCount.extractedOnlyOrNull()
+      if (countA != null && countB != null && countA != countB) return false
+    }
 
     val instA = a.installmentAmountCents.value
     val instB = b.installmentAmountCents.value
-    if (instA != null && instB != null && abs(instA - instB) > 100L) return false
-
-    val countA = a.originalInstallmentCount.extractedOnlyOrNull()
-    val countB = b.originalInstallmentCount.extractedOnlyOrNull()
-    if (countA != null && countB != null && countA != countB) return false
 
     // 5. Differing balances or differing EXPLICIT due dates without shared identity/progression -> separate loans!
     val hasSnapshotProgression = compareRecency(a, b) != 0 &&
@@ -250,6 +283,22 @@ object MultiScreenshotDebtMerger {
    * Returns +1 if [a] is demonstrably newer than [b], -1 if [b] is newer, 0 if indeterminate.
    */
   internal fun compareRecency(a: SingleScreenshotExtraction, b: SingleScreenshotExtraction): Int {
+    if (a.scheduleVersion != b.scheduleVersion) {
+      return a.scheduleVersion.compareTo(b.scheduleVersion).coerceIn(-1, 1)
+    }
+
+    val effA = a.scheduleEffectiveDateIso
+    val effB = b.scheduleEffectiveDateIso
+    if (!effA.isNullOrBlank() && !effB.isNullOrBlank() && effA != effB) {
+      return effA.compareTo(effB).coerceIn(-1, 1)
+    }
+
+    val stmtA = a.statementDateIso.value
+    val stmtB = b.statementDateIso.value
+    if (!stmtA.isNullOrBlank() && !stmtB.isNullOrBlank() && stmtA != stmtB) {
+      return stmtA.compareTo(stmtB).coerceIn(-1, 1)
+    }
+
     val docA = a.documentDateIso
     val docB = b.documentDateIso
     if (!docA.isNullOrBlank() && !docB.isNullOrBlank() && docA != docB) {
@@ -262,8 +311,8 @@ object MultiScreenshotDebtMerger {
       return paidDateA.compareTo(paidDateB).coerceIn(-1, 1)
     }
 
-    val paidCountA = a.paidInstallmentsCount.value ?: a.installmentRows.count { it.status == ExtractedInstallmentStatus.PAID }.takeIf { it > 0 }
-    val paidCountB = b.paidInstallmentsCount.value ?: b.installmentRows.count { it.status == ExtractedInstallmentStatus.PAID }.takeIf { it > 0 }
+    val paidCountA = a.paidInstallmentsCount.value ?: a.installmentRows.count { it.status.isSettledPaid }.takeIf { it > 0 }
+    val paidCountB = b.paidInstallmentsCount.value ?: b.installmentRows.count { it.status.isSettledPaid }.takeIf { it > 0 }
     if (paidCountA != null && paidCountB != null && paidCountA != paidCountB) {
       return paidCountA.compareTo(paidCountB).coerceIn(-1, 1)
     }
@@ -403,19 +452,34 @@ object MultiScreenshotDebtMerger {
 
     val lender = mergeLenderField(pages)
     val providerProfileId = pages.firstOrNull { !it.providerProfileId.isNullOrBlank() }?.providerProfileId
+    val productClassification = mergeScalar("Product type", "productClassification", { it.productClassification })
+    val applicationProvider = mergeScalar("Application provider", "applicationProvider", { it.applicationProvider })
+    val actualCreditor = mergeScalar("Actual creditor", "actualCreditor", { it.actualCreditor })
     val loanType = mergeScalar("Loan type", "category", { it.loanType })
     val refId = mergeScalar("Reference ID", "loanReferenceId", { it.loanReferenceId })
     val loanName = mergeLoanNameField(pages, lender.value, refId.value, loanType.value)
+    val loanBookingDate = mergeScalar("Booking date", "loanBookingDate", { it.loanBookingDateIso })
 
     val originalPrincipal = mergeScalar("Original loan amount", "originalPrincipalCents", { it.originalPrincipalCents }, moneyDiff, moneyFmt)
+    val disbursedAmount = mergeScalar("Disbursed amount", "disbursedAmountCents", { it.disbursedAmountCents }, moneyDiff, moneyFmt)
     val amountReceived = mergeScalar("Amount received", "amountReceivedCents", { it.amountReceivedCents }, moneyDiff, moneyFmt)
     val outstandingBalance = mergeScalar("Current balance", "outstandingBalanceCents", { it.outstandingBalanceCents }, moneyDiff, moneyFmt)
     val amountCurrentlyDue = mergeScalar("Amount currently due", "amountCurrentlyDueCents", { it.amountCurrentlyDueCents }, moneyDiff, moneyFmt)
+    val pastDueAmount = mergeScalar("Past due amount", "pastDueAmountCents", { it.pastDueAmountCents }, moneyDiff, moneyFmt)
+    val unpaidCharges = mergeScalar("Unpaid charges", "unpaidChargesCents", { it.unpaidChargesCents }, moneyDiff, moneyFmt)
     val remInstTotal = mergeScalar("Remaining installment total", "remainingInstallmentTotalCents", { it.remainingInstallmentTotalCents }, moneyDiff, moneyFmt)
     val installmentAmount = mergeScalar("Installment amount", "installmentAmountCents", { it.installmentAmountCents }, moneyDiff, moneyFmt)
     val origCount = mergeScalar("Original installment count", "originalInstallmentCount", { it.originalInstallmentCount })
     val paidCount = mergeScalar("Paid installments", "paidInstallmentsCount", { it.paidInstallmentsCount })
     val remCountExplicit = mergeScalar("Remaining installments", "remainingInstallmentsCount", { it.remainingInstallmentsCount })
+
+    val creditLimit = mergeScalar("Credit limit", "creditLimitCents", { it.creditLimitCents }, moneyDiff, moneyFmt)
+    val availableCredit = mergeScalar("Available credit", "availableCreditCents", { it.availableCreditCents }, moneyDiff, moneyFmt)
+    val usedCredit = mergeScalar("Used credit", "usedCreditCents", { it.usedCreditCents }, moneyDiff, moneyFmt)
+    val statementBalance = mergeScalar("Statement balance", "statementBalanceCents", { it.statementBalanceCents }, moneyDiff, moneyFmt)
+    val minimumDue = mergeScalar("Minimum due", "minimumDueCents", { it.minimumDueCents }, moneyDiff, moneyFmt)
+    val statementDate = mergeScalar("Statement date", "statementDate", { it.statementDateIso })
+    val statementPeriod = mergeScalar("Statement period", "statementPeriod", { it.statementPeriod })
 
     val totalRepayment = mergeScalar("Total repayment", "totalRepaymentCents", { it.totalRepaymentCents }, moneyDiff, moneyFmt)
     val interest = mergeScalar("Interest", "interestCents", { it.interestCents }, moneyDiff, moneyFmt)
@@ -424,27 +488,37 @@ object MultiScreenshotDebtMerger {
     val otherFees = mergeScalar("Other fees", "otherFeesCents", { it.otherFeesCents }, moneyDiff, moneyFmt)
     val loanStatus = mergeScalar("Loan status", "loanStatus", { it.loanStatus })
 
-    // Deduplicate and merge installment schedule rows in chronological order
-    val mergedRows = mergeScheduleRows(pages.flatMap { it.installmentRows })
-
-    val unpaidRows = mergedRows.filter {
-      it.status == ExtractedInstallmentStatus.UPCOMING ||
-        it.status == ExtractedInstallmentStatus.OVERDUE ||
-        it.status == ExtractedInstallmentStatus.UNKNOWN
+    // Handle restructured schedule versions: prefer latest scheduleVersion while noting superseded schedule
+    val latestScheduleVersion = pages.maxOfOrNull { it.scheduleVersion } ?: 1
+    val scheduleEffectiveDateIso = pages.mapNotNull { it.scheduleEffectiveDateIso }.maxOrNull()
+    val hasOlderScheduleVersion = pages.any { it.scheduleVersion < latestScheduleVersion }
+    val activeSchedulePages = if (hasOlderScheduleVersion) {
+      mergeNotes.add("Using restructured schedule v$latestScheduleVersion (supersedes earlier schedule version).")
+      pages.filter { it.scheduleVersion == latestScheduleVersion }
+    } else {
+      pages
     }
-    val paidRows = mergedRows.filter { it.status == ExtractedInstallmentStatus.PAID }
+
+    // Deduplicate and merge installment schedule rows in chronological order
+    val mergedRows = mergeScheduleRows(activeSchedulePages.flatMap { it.installmentRows })
+    val isSchedulePartial = activeSchedulePages.any { it.isSchedulePartial }
+    val obligationRole = pages.map { it.obligationRole }
+      .firstOrNull { it != ObligationRole.STANDALONE } ?: ObligationRole.STANDALONE
+
+    val unpaidRows = mergedRows.filter { it.status.isUnpaidObligation }
+    val paidRows = mergedRows.filter { it.status.isSettledPaid }
 
     val unpaidWithAmounts = unpaidRows.mapNotNull { it.amountCents }
     val calcUnpaidSum = if (unpaidWithAmounts.isNotEmpty() && unpaidWithAmounts.size == unpaidRows.size) {
       ExtractedField.calculated(
-        value = unpaidWithAmounts.sum(),
+        value = MoneyFormatter.sumCentsExact(unpaidWithAmounts),
         sourceSnippet = "${unpaidRows.size} unpaid schedule rows",
         confidence = ExtractionConfidence.HIGH,
         verificationReason = "Calculated by summing ${unpaidRows.size} extracted unpaid installments."
       )
     } else if (unpaidWithAmounts.isNotEmpty()) {
       ExtractedField.calculated(
-        value = unpaidWithAmounts.sum(),
+        value = MoneyFormatter.sumCentsExact(unpaidWithAmounts),
         sourceSnippet = "${unpaidWithAmounts.size} of ${unpaidRows.size} unpaid rows had amounts",
         confidence = ExtractionConfidence.MEDIUM,
         verificationReason = "Partial sum — some unpaid rows have no detected peso amount."
@@ -456,7 +530,7 @@ object MultiScreenshotDebtMerger {
     val paidWithAmounts = paidRows.mapNotNull { it.amountCents }
     val calcPaidSum = if (paidWithAmounts.isNotEmpty()) {
       ExtractedField.calculated(
-        value = paidWithAmounts.sum(),
+        value = MoneyFormatter.sumCentsExact(paidWithAmounts),
         sourceSnippet = "${paidWithAmounts.size} paid schedule rows",
         confidence = if (paidWithAmounts.size == paidRows.size) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
         verificationReason = "Calculated by summing ${paidWithAmounts.size} extracted paid installments."
@@ -526,14 +600,21 @@ object MultiScreenshotDebtMerger {
       candidateId = "loan_group_${groupIdx + 1}",
       sourceScreenshotIndices = pages.map { it.screenshotIndex }.distinct().sorted(),
       providerProfileId = providerProfileId,
+      productClassification = productClassification,
+      applicationProvider = applicationProvider,
+      actualCreditor = actualCreditor,
       lender = lender,
       loanName = loanName,
       loanType = loanType,
       loanReferenceId = refId,
+      loanBookingDateIso = loanBookingDate,
       originalPrincipalCents = originalPrincipal,
+      disbursedAmountCents = disbursedAmount,
       amountReceivedCents = amountReceived,
       outstandingBalanceCents = outstandingBalance,
       amountCurrentlyDueCents = amountCurrentlyDue,
+      pastDueAmountCents = pastDueAmount,
+      unpaidChargesCents = unpaidCharges,
       remainingInstallmentTotalCents = remInstTotal,
       calculatedUnpaidScheduleSumCents = calcUnpaidSum,
       calculatedPaidScheduleSumCents = calcPaidSum,
@@ -541,6 +622,13 @@ object MultiScreenshotDebtMerger {
       originalInstallmentCount = origCount,
       paidInstallmentsCount = paidCount,
       remainingInstallmentsCount = remCountExplicit,
+      creditLimitCents = creditLimit,
+      availableCreditCents = availableCredit,
+      usedCreditCents = usedCredit,
+      statementBalanceCents = statementBalance,
+      minimumDueCents = minimumDue,
+      statementDateIso = statementDate,
+      statementPeriod = statementPeriod,
       frequency = explicitFreq,
       customIntervalDays = customDays,
       nextDueDateIso = nextDueDate,
@@ -554,9 +642,14 @@ object MultiScreenshotDebtMerger {
       loanStatus = loanStatus,
       dueDateStatus = initialDueStatus,
       installmentRows = mergedRows,
+      isSchedulePartial = isSchedulePartial,
+      scheduleVersion = latestScheduleVersion,
+      scheduleEffectiveDateIso = scheduleEffectiveDateIso,
+      obligationRole = obligationRole,
       mergeNotes = mergeNotes.distinct(),
       validationIssues = extraIssues.distinctBy { Triple(it.fieldKey, it.severity, it.title) },
       detectedLabelCues = pages.flatMap { it.detectedLabelCues },
+      textCorrections = pages.flatMap { it.textCorrections },
       numericDateOrderUsed = numericOrderUsed
     )
   }
@@ -652,14 +745,11 @@ object MultiScreenshotDebtMerger {
     val normA = normalizeText(a)
     val normB = normalizeText(b)
     if (normA == normB) return true
-    return (normA == "shopee" && normB.startsWith("shopee ")) ||
-      (normB == "shopee" && normA.startsWith("shopee ")) ||
-      (normA == "gcash" && normB.startsWith("gcash ")) ||
-      (normB == "gcash" && normA.startsWith("gcash ")) ||
-      (normA == "maya" && normB.startsWith("maya ")) ||
-      (normB == "maya" && normA.startsWith("maya ")) ||
-      (normA == "lazada" && normB.startsWith("lazada ")) ||
-      (normB == "lazada" && normA.startsWith("lazada "))
+    val prefixes = listOf("shopee", "gcash", "maya", "lazada", "billease", "atome", "cimb", "skyro", "home credit", "tala")
+    return prefixes.any { prefix ->
+      (normA == prefix && normB.startsWith("$prefix ")) ||
+        (normB == prefix && normA.startsWith("$prefix "))
+    }
   }
 
   private fun tokenSimilarity(a: String, b: String): Float {

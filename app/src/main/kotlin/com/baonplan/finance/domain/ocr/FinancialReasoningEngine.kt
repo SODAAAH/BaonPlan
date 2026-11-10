@@ -2,6 +2,7 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -10,10 +11,11 @@ import java.time.temporal.ChronoUnit
 import kotlin.math.abs
 
 /**
- * Pure Kotlin financial reasoning and confidence evaluation engine.
- * Combines extracted values via exact mathematical relationships, detects inconsistencies
- * without silent overwrites, infers missing fields with explicit classification
- * (EXTRACTED / CALCULATED / ESTIMATED), and attaches plain-language explanations.
+ * Pure Kotlin deterministic financial reasoning and confidence evaluation engine.
+ * Combines extracted values via exact centavo/BigDecimal mathematical relationships,
+ * detects inconsistencies without silent overwrites, infers missing fields with
+ * explicit classification (EXTRACTED / CALCULATED / ESTIMATED), and attaches
+ * plain-language explanations.
  */
 object FinancialReasoningEngine {
 
@@ -24,12 +26,10 @@ object FinancialReasoningEngine {
     val idx = raw.screenshotIndex
     val issues = raw.issues.toMutableList()
     val rows = raw.installmentRows
-    val paidRows = rows.filter { it.status == ExtractedInstallmentStatus.PAID }
-    val unpaidRows = rows.filter {
-      it.status == ExtractedInstallmentStatus.UPCOMING ||
-        it.status == ExtractedInstallmentStatus.OVERDUE ||
-        it.status == ExtractedInstallmentStatus.UNKNOWN
-    }
+    val paidRows = rows.filter { it.status.isSettledPaid }
+    val unpaidRows = rows.filter { it.status.isUnpaidObligation }
+    val productClass = raw.productClassification.value
+    val isRevolving = productClass == LoanProductClassification.REVOLVING_CREDIT
 
     // 1. Solve installment counts (Original, Paid, Remaining) without overwriting extracted values
     val (solvedOrig, solvedPaid, solvedRem) = solveInstallmentCounts(
@@ -38,6 +38,8 @@ object FinancialReasoningEngine {
       explicitRem = raw.remainingInstallmentsCount,
       paidRowsCount = paidRows.size,
       unpaidRowsCount = unpaidRows.size,
+      isSchedulePartial = raw.isSchedulePartial,
+      isRevolving = isRevolving,
       screenshotIndex = idx
     )
 
@@ -54,43 +56,64 @@ object FinancialReasoningEngine {
       analyzeScheduleFrequency(rows, solvedOrig.value, idx)
     }
 
-    // 3. Individual installment amount fallback (only if uniform across >= 2 rows)
+    // 3. Individual installment amount fallback (only if uniform across >= 2 rows and not revolving)
     val solvedInstAmount = if (raw.installmentAmountCents.value != null) {
       ensureExplanation(raw.installmentAmountCents) {
         "Directly read from labeled payment line in screenshot #${idx + 1}."
       }
-    } else {
+    } else if (!isRevolving) {
       deriveInstallmentAmountFromRows(rows, raw.totalRepaymentCents.value, solvedOrig.value, idx)
+    } else {
+      raw.installmentAmountCents
     }
 
     // 4. Remaining installment total (CALCULATED when not directly extracted)
-    val solvedRemTotal = solveRemainingInstallmentTotal(
-      extracted = raw.remainingInstallmentTotalCents,
-      installmentAmount = solvedInstAmount,
-      remainingCount = solvedRem,
-      unpaidRows = unpaidRows,
-      screenshotIndex = idx
-    )
+    val solvedRemTotal = if (!isRevolving) {
+      solveRemainingInstallmentTotal(
+        extracted = raw.remainingInstallmentTotalCents,
+        installmentAmount = solvedInstAmount,
+        remainingCount = solvedRem,
+        unpaidRows = unpaidRows,
+        screenshotIndex = idx,
+        issues = issues
+      )
+    } else {
+      raw.remainingInstallmentTotalCents
+    }
 
-    // 5. Total repayment (CALCULATED or ESTIMATED when not directly extracted)
-    val solvedTotalRepayment = solveTotalRepayment(
-      extracted = raw.totalRepaymentCents,
-      originalPrincipal = raw.originalPrincipalCents,
-      interest = raw.interestCents,
-      serviceFee = raw.serviceFeeCents,
-      processingFee = raw.processingFeeCents,
-      otherFees = raw.otherFeesCents,
-      installmentAmount = solvedInstAmount,
-      originalCount = solvedOrig,
-      rows = rows,
+    // 5. Total repayment (CALCULATED or ESTIMATED when not directly extracted, non-revolving)
+    val solvedTotalRepayment = if (!isRevolving) {
+      solveTotalRepayment(
+        extracted = raw.totalRepaymentCents,
+        originalPrincipal = raw.originalPrincipalCents,
+        interest = raw.interestCents,
+        serviceFee = raw.serviceFeeCents,
+        processingFee = raw.processingFeeCents,
+        otherFees = raw.otherFeesCents,
+        installmentAmount = solvedInstAmount,
+        originalCount = solvedOrig,
+        rows = rows,
+        screenshotIndex = idx
+      )
+    } else {
+      raw.totalRepaymentCents
+    }
+
+    // 5b. Revolving credit line used-credit derivation (only same-snapshot Limit - Available)
+    val solvedUsedCredit = solveRevolvingUsedCredit(
+      extractedUsed = raw.usedCreditCents,
+      creditLimit = raw.creditLimitCents,
+      availableCredit = raw.availableCreditCents,
       screenshotIndex = idx
     )
 
     // 6. Honest Loan Status & zero-balance guard
-    val (solvedStatus, updatedBalance) = solveLoanStatusAndZeroGuard(
+    val (solvedStatus, initialBalance) = solveLoanStatusAndZeroGuard(
       extractedStatus = raw.loanStatus,
       outstandingBalance = raw.outstandingBalanceCents,
       amountCurrentlyDue = raw.amountCurrentlyDueCents,
+      statementBalance = raw.statementBalanceCents,
+      productClassification = productClass,
       frequency = solvedFreq.value,
       remainingCount = solvedRem.value,
       paidRows = paidRows,
@@ -99,6 +122,32 @@ object FinancialReasoningEngine {
       screenshotIndex = idx,
       issues = issues
     )
+
+    val updatedBalance = when {
+      initialBalance.value != null -> initialBalance
+      isRevolving && raw.statementBalanceCents.value != null -> ExtractedField.calculated(
+        value = raw.statementBalanceCents.value,
+        sourceSnippet = raw.statementBalanceCents.sourceSnippet,
+        screenshotIndex = idx,
+        confidence = raw.statementBalanceCents.confidence,
+        verificationReason = "Derived from statement balance (${MoneyFormatter.formatPeso(raw.statementBalanceCents.value)})."
+      )
+      isRevolving && solvedUsedCredit.value != null -> ExtractedField.calculated(
+        value = solvedUsedCredit.value,
+        sourceSnippet = solvedUsedCredit.sourceSnippet,
+        screenshotIndex = idx,
+        confidence = solvedUsedCredit.confidence,
+        verificationReason = "Derived from used credit balance (${MoneyFormatter.formatPeso(solvedUsedCredit.value)})."
+      )
+      !isRevolving && solvedRemTotal.value != null && solvedRemTotal.value > 0L -> ExtractedField.calculated(
+        value = solvedRemTotal.value,
+        sourceSnippet = solvedRemTotal.sourceSnippet,
+        screenshotIndex = idx,
+        confidence = solvedRemTotal.confidence,
+        verificationReason = "Derived from remaining installment total (${MoneyFormatter.formatPeso(solvedRemTotal.value)}) because no separate principal balance was shown."
+      )
+      else -> initialBalance
+    }
 
     // 7. Next / Final / Last Paid Dates + missing nextDueDate estimation
     var solvedNextDue = raw.nextDueDateIso
@@ -145,7 +194,7 @@ object FinancialReasoningEngine {
     var solvedFinalDue = ensureExplanation(raw.finalDueDateIso) {
       "Final scheduled payment date found in screenshot #${idx + 1}."
     }
-    if (solvedFinalDue.value == null && rows.size >= 2) {
+    if (solvedFinalDue.value == null && rows.size >= 2 && !raw.isSchedulePartial) {
       val lastDated = rows.lastOrNull { it.dueDateIso != null }
       if (lastDated != null && lastDated.dueDateIso != solvedNextDue.value) {
         solvedFinalDue = ExtractedField.extracted(
@@ -191,6 +240,9 @@ object FinancialReasoningEngine {
       originalPrincipalCents = applyQualityAndDefaultReason(raw.originalPrincipalCents, pageQuality) {
         "Extracted original loan principal from screenshot #${idx + 1}."
       },
+      disbursedAmountCents = applyQualityAndDefaultReason(raw.disbursedAmountCents, pageQuality) {
+        "Extracted disbursed amount from screenshot #${idx + 1}."
+      },
       amountReceivedCents = applyQualityAndDefaultReason(raw.amountReceivedCents, pageQuality) {
         "Extracted net proceeds disbursed from screenshot #${idx + 1}."
       },
@@ -202,6 +254,27 @@ object FinancialReasoningEngine {
       },
       remainingInstallmentTotalCents = applyQualityAndDefaultReason(solvedRemTotal, pageQuality) {
         "Extracted remaining installment total from screenshot #${idx + 1}."
+      },
+      pastDueAmountCents = applyQualityAndDefaultReason(raw.pastDueAmountCents, pageQuality) {
+        "Extracted past-due amount from screenshot #${idx + 1}."
+      },
+      unpaidChargesCents = applyQualityAndDefaultReason(raw.unpaidChargesCents, pageQuality) {
+        "Extracted unpaid charges from screenshot #${idx + 1}."
+      },
+      creditLimitCents = applyQualityAndDefaultReason(raw.creditLimitCents, pageQuality) {
+        "Extracted credit limit from screenshot #${idx + 1}."
+      },
+      availableCreditCents = applyQualityAndDefaultReason(raw.availableCreditCents, pageQuality) {
+        "Extracted available credit from screenshot #${idx + 1}."
+      },
+      usedCreditCents = applyQualityAndDefaultReason(solvedUsedCredit, pageQuality) {
+        "Extracted used credit from screenshot #${idx + 1}."
+      },
+      statementBalanceCents = applyQualityAndDefaultReason(raw.statementBalanceCents, pageQuality) {
+        "Extracted statement balance from screenshot #${idx + 1}."
+      },
+      minimumDueCents = applyQualityAndDefaultReason(raw.minimumDueCents, pageQuality) {
+        "Extracted minimum amount due from screenshot #${idx + 1}."
       },
       installmentAmountCents = applyQualityAndDefaultReason(solvedInstAmount, pageQuality) {
         "Extracted per-installment payment amount from screenshot #${idx + 1}."
@@ -256,12 +329,11 @@ object FinancialReasoningEngine {
     hadExplicitFrequencyAcrossPages: Boolean
   ): DebtImportDraft {
     val rows = draft.installmentRows
-    val paidRows = rows.filter { it.status == ExtractedInstallmentStatus.PAID }
-    val unpaidRows = rows.filter {
-      it.status == ExtractedInstallmentStatus.UPCOMING ||
-        it.status == ExtractedInstallmentStatus.OVERDUE ||
-        it.status == ExtractedInstallmentStatus.UNKNOWN
-    }
+    val paidRows = rows.filter { it.status.isSettledPaid }
+    val unpaidRows = rows.filter { it.status.isUnpaidObligation }
+    val productClass = draft.productClassification.value
+    val isRevolving = productClass == LoanProductClassification.REVOLVING_CREDIT
+    val issues = draft.validationIssues.toMutableList()
 
     val (solvedOrig, solvedPaid, solvedRem) = solveInstallmentCounts(
       explicitOrig = draft.originalInstallmentCount,
@@ -269,6 +341,8 @@ object FinancialReasoningEngine {
       explicitRem = draft.remainingInstallmentsCount,
       paidRowsCount = paidRows.size,
       unpaidRowsCount = unpaidRows.size,
+      isSchedulePartial = draft.isSchedulePartial,
+      isRevolving = isRevolving,
       screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
     )
 
@@ -284,41 +358,53 @@ object FinancialReasoningEngine {
 
     val solvedInst = if (draft.installmentAmountCents.value != null) {
       ensureExplanation(draft.installmentAmountCents) { "Extracted per-payment amount." }
-    } else {
+    } else if (!isRevolving) {
       deriveInstallmentAmountFromRows(
         rows = rows,
         totalRepayment = draft.totalRepaymentCents.value,
         origCount = solvedOrig.value,
         screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
       )
+    } else {
+      draft.installmentAmountCents
     }
 
-    val solvedRemTotal = solveRemainingInstallmentTotal(
-      extracted = draft.remainingInstallmentTotalCents,
-      installmentAmount = solvedInst,
-      remainingCount = solvedRem,
-      unpaidRows = unpaidRows,
-      screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
-    )
+    val solvedRemTotal = if (!isRevolving) {
+      solveRemainingInstallmentTotal(
+        extracted = draft.remainingInstallmentTotalCents,
+        installmentAmount = solvedInst,
+        remainingCount = solvedRem,
+        unpaidRows = unpaidRows,
+        screenshotIndex = draft.sourceScreenshotIndices.firstOrNull(),
+        issues = issues
+      )
+    } else {
+      draft.remainingInstallmentTotalCents
+    }
 
-    val solvedTotalRepayment = solveTotalRepayment(
-      extracted = draft.totalRepaymentCents,
-      originalPrincipal = draft.originalPrincipalCents,
-      interest = draft.interestCents,
-      serviceFee = draft.serviceFeeCents,
-      processingFee = draft.processingFeeCents,
-      otherFees = draft.otherFeesCents,
-      installmentAmount = solvedInst,
-      originalCount = solvedOrig,
-      rows = rows,
-      screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
-    )
+    val solvedTotalRepayment = if (!isRevolving) {
+      solveTotalRepayment(
+        extracted = draft.totalRepaymentCents,
+        originalPrincipal = draft.originalPrincipalCents,
+        interest = draft.interestCents,
+        serviceFee = draft.serviceFeeCents,
+        processingFee = draft.processingFeeCents,
+        otherFees = draft.otherFeesCents,
+        installmentAmount = solvedInst,
+        originalCount = solvedOrig,
+        rows = rows,
+        screenshotIndex = draft.sourceScreenshotIndices.firstOrNull()
+      )
+    } else {
+      draft.totalRepaymentCents
+    }
 
-    val issues = draft.validationIssues.toMutableList()
     val (solvedStatus, updatedBalance) = solveLoanStatusAndZeroGuard(
       extractedStatus = draft.loanStatus,
       outstandingBalance = draft.outstandingBalanceCents,
       amountCurrentlyDue = draft.amountCurrentlyDueCents,
+      statementBalance = draft.statementBalanceCents,
+      productClassification = productClass,
       frequency = solvedFreq.value,
       remainingCount = solvedRem.value,
       paidRows = paidRows,
@@ -364,7 +450,6 @@ object FinancialReasoningEngine {
       }
     }
 
-    // Internal consistency boost / warning across balance, counts, and schedule
     val mergedFreqConsistent = solvedFreq.value != null &&
       solvedFreq.value != RepaymentFrequency.UNKNOWN &&
       solvedNextDue.value != null &&
@@ -438,6 +523,17 @@ object FinancialReasoningEngine {
     val srcIdx = screenshotIndex ?: datedRows.first().first.screenshotIndex
     val allRowDatesHighConf = datedRows.all { it.first.dateConfidence == ExtractionConfidence.HIGH }
 
+    // 0. Daily (1 day)
+    if (gaps.all { it == 1 }) {
+      return ExtractedField.estimated(
+        value = RepaymentFrequency.DAILY,
+        sourceSnippet = snippet,
+        screenshotIndex = srcIdx,
+        confidence = if (allRowDatesHighConf) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+        verificationReason = "${dates.size} repayment dates were detected at daily 1-day intervals."
+      ) to ExtractedField.notDetected()
+    }
+
     // 1. Weekly (exact 7d, or 6–8d holiday/weekend shift with bounded cumulative anchor drift)
     if (gaps.all { it == 7 }) {
       return ExtractedField.estimated(
@@ -486,6 +582,17 @@ object FinancialReasoningEngine {
       ) to ExtractedField.notDetected()
     }
 
+    // 2b. Twice-monthly / Semi-monthly (e.g. 15th & 30th/end-of-month)
+    if (looksSemiMonthly) {
+      return ExtractedField.estimated(
+        value = RepaymentFrequency.TWICE_MONTHLY,
+        sourceSnippet = snippet,
+        screenshotIndex = srcIdx,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "${dates.size} repayment dates follow a twice-monthly (15th & month-end) calendar pattern."
+      ) to ExtractedField.notDetected()
+    }
+
     // 3. Monthly (exact calendar day or end-of-month; or ±2-day holiday/weekend shift across consecutive months)
     if (isStrictMonthlyDates(dates)) {
       return ExtractedField.estimated(
@@ -510,9 +617,24 @@ object FinancialReasoningEngine {
       ) to ExtractedField.notDetected()
     }
 
-    // 4. Exact Custom N days (never force semi-monthly 15th/30th cycles into Custom 15 days)
+    // 3b. Quarterly (3-month steps ±3 days)
+    val isQuarterly = dates.zipWithNext().all { (a, b) ->
+      val monthDiff = (b.year * 12 + b.monthValue) - (a.year * 12 + a.monthValue)
+      monthDiff == 3 && abs(ChronoUnit.DAYS.between(a.plusMonths(3), b)) <= 3L
+    }
+    if (isQuarterly) {
+      return ExtractedField.estimated(
+        value = RepaymentFrequency.QUARTERLY,
+        sourceSnippet = snippet,
+        screenshotIndex = srcIdx,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "${dates.size} repayment dates follow a quarterly (every 3 months) cycle."
+      ) to ExtractedField.notDetected()
+    }
+
+    // 4. Exact Custom N days
     val uniqueGaps = gaps.distinct()
-    if (!looksSemiMonthly && uniqueGaps.size == 1 && uniqueGaps.single() in 1..180) {
+    if (uniqueGaps.size == 1 && uniqueGaps.single() in 1..180) {
       val n = uniqueGaps.single()
       return ExtractedField.estimated(
         value = RepaymentFrequency.CUSTOM_DAYS,
@@ -529,18 +651,13 @@ object FinancialReasoningEngine {
       )
     }
 
-    // 5. Semi-monthly or irregular dates preserved faithfully
-    val irregularReason = if (looksSemiMonthly) {
-      "Dates follow a semi-monthly calendar pattern (e.g. 15th & end of month), so custom dates are preserved."
-    } else {
-      "Intervals vary (${gaps.joinToString("d, ")}d), so custom dates are kept instead of forcing a fixed cycle."
-    }
+    // 5. Irregular / custom dates preserved faithfully without forcing weekly/monthly
     return ExtractedField.extracted(
       value = RepaymentFrequency.IRREGULAR,
       sourceSnippet = snippet,
       screenshotIndex = srcIdx,
       confidence = ExtractionConfidence.HIGH,
-      verificationReason = irregularReason
+      verificationReason = "Intervals vary (${gaps.joinToString("d, ")}d), so custom dates are kept instead of forcing a fixed cycle."
     ) to ExtractedField.notDetected()
   }
 
@@ -568,13 +685,65 @@ object FinancialReasoningEngine {
     explicitRem: ExtractedField<Int>,
     paidRowsCount: Int,
     unpaidRowsCount: Int,
+    isSchedulePartial: Boolean,
+    isRevolving: Boolean,
     screenshotIndex: Int?
   ): Triple<ExtractedField<Int>, ExtractedField<Int>, ExtractedField<Int>> {
+    if (isRevolving) {
+      return Triple(explicitOrig, explicitPaid, explicitRem)
+    }
+
     var orig = ensureExplanation(explicitOrig) { "Extracted total installments count." }
     var paid = ensureExplanation(explicitPaid) { "Extracted paid installments count." }
     var rem = ensureExplanation(explicitRem) { "Extracted remaining installments count." }
 
-    // First bring in schedule-row counts ONLY where missing
+    // Step A: Exact arithmetic completion from explicit counts FIRST (e.g., 24 - 3 = 21)
+    // so a truncated schedule preview (e.g., 6 visible rows) NEVER overrides 24 - 3!
+    run {
+      val oVal = orig.value
+      val pVal = paid.value
+      val rVal = rem.value
+
+      if (rem.value == null && oVal != null && pVal != null && oVal >= pVal) {
+        val diff = oVal - pVal
+        val bothHigh = orig.confidence == ExtractionConfidence.HIGH && paid.confidence == ExtractionConfidence.HIGH
+        rem = ExtractedField.calculated(
+          value = diff,
+          sourceSnippet = "$oVal - $pVal",
+          screenshotIndex = screenshotIndex ?: orig.sourceScreenshotIndex ?: paid.sourceScreenshotIndex,
+          confidence = if (bothHigh) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+          verificationReason = "Calculated as total installments ($oVal) minus paid installments ($pVal)."
+        )
+      } else if (paid.value == null && oVal != null && rVal != null && oVal >= rVal) {
+        val diff = oVal - rVal
+        val bothHigh = orig.confidence == ExtractionConfidence.HIGH && rem.confidence == ExtractionConfidence.HIGH
+        paid = ExtractedField.calculated(
+          value = diff,
+          sourceSnippet = "$oVal - $rVal",
+          screenshotIndex = screenshotIndex ?: orig.sourceScreenshotIndex ?: rem.sourceScreenshotIndex,
+          confidence = if (bothHigh) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+          verificationReason = "Calculated as total installments ($oVal) minus remaining installments ($rVal)."
+        )
+      } else if (orig.value == null && pVal != null && rVal != null && (pVal + rVal) > 0) {
+        val sum = pVal + rVal
+        val corroboratingScheduleRows = paidRowsCount == pVal && unpaidRowsCount == rVal
+        orig = ExtractedField.calculated(
+          value = sum,
+          sourceSnippet = "$pVal + $rVal",
+          screenshotIndex = screenshotIndex ?: paid.sourceScreenshotIndex ?: rem.sourceScreenshotIndex,
+          confidence = if (corroboratingScheduleRows ||
+            (paid.confidence == ExtractionConfidence.HIGH && rem.confidence == ExtractionConfidence.HIGH)
+          ) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
+          verificationReason = "Calculated as paid installments ($pVal) plus remaining installments ($rVal)."
+        )
+      }
+    }
+
+    // Step B: Fall back to counting visible schedule rows ONLY when not demonstrably truncated
+    val totalVisibleRows = paidRowsCount + unpaidRowsCount
+    val visiblyTruncatedAgainstOrig = orig.value != null && totalVisibleRows < orig.value &&
+      (paidRowsCount > 0 || isSchedulePartial)
+
     if (paid.value == null && paidRowsCount > 0) {
       val consistentWithOrig = orig.value == null || paidRowsCount <= orig.value
       if (consistentWithOrig) {
@@ -588,7 +757,7 @@ object FinancialReasoningEngine {
       }
     }
 
-    if (rem.value == null && unpaidRowsCount > 0) {
+    if (rem.value == null && unpaidRowsCount > 0 && !visiblyTruncatedAgainstOrig && !isSchedulePartial) {
       val consistentWithOrig = orig.value == null || unpaidRowsCount <= orig.value
       if (consistentWithOrig) {
         rem = ExtractedField.calculated(
@@ -601,42 +770,27 @@ object FinancialReasoningEngine {
       }
     }
 
-    // Exact arithmetic completion: Orig - Paid = Rem, etc.
-    val oVal = orig.value
-    val pVal = paid.value
-    val rVal = rem.value
-
-    if (rem.value == null && oVal != null && pVal != null && oVal >= pVal) {
-      val diff = oVal - pVal
-      val bothHigh = orig.confidence == ExtractionConfidence.HIGH && paid.confidence == ExtractionConfidence.HIGH
+    // Step C: Second arithmetic pass if Step B filled one side
+    val oVal2 = orig.value
+    val pVal2 = paid.value
+    val rVal2 = rem.value
+    if (rem.value == null && oVal2 != null && pVal2 != null && oVal2 >= pVal2) {
+      val diff = oVal2 - pVal2
       rem = ExtractedField.calculated(
         value = diff,
-        sourceSnippet = "$oVal - $pVal",
+        sourceSnippet = "$oVal2 - $pVal2",
         screenshotIndex = screenshotIndex ?: orig.sourceScreenshotIndex ?: paid.sourceScreenshotIndex,
-        confidence = if (bothHigh) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
-        verificationReason = "Calculated as total installments ($oVal) minus paid installments ($pVal)."
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Calculated as total installments ($oVal2) minus paid installments ($pVal2)."
       )
-    } else if (paid.value == null && oVal != null && rVal != null && oVal >= rVal) {
-      val diff = oVal - rVal
-      val bothHigh = orig.confidence == ExtractionConfidence.HIGH && rem.confidence == ExtractionConfidence.HIGH
-      paid = ExtractedField.calculated(
-        value = diff,
-        sourceSnippet = "$oVal - $rVal",
-        screenshotIndex = screenshotIndex ?: orig.sourceScreenshotIndex ?: rem.sourceScreenshotIndex,
-        confidence = if (bothHigh) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
-        verificationReason = "Calculated as total installments ($oVal) minus remaining installments ($rVal)."
-      )
-    } else if (orig.value == null && pVal != null && rVal != null && (pVal + rVal) > 0) {
-      val sum = pVal + rVal
-      val corroboratingScheduleRows = paidRowsCount == pVal && unpaidRowsCount == rVal
+    } else if (orig.value == null && pVal2 != null && rVal2 != null && (pVal2 + rVal2) > 0) {
+      val sum = pVal2 + rVal2
       orig = ExtractedField.calculated(
         value = sum,
-        sourceSnippet = "$pVal + $rVal",
+        sourceSnippet = "$pVal2 + $rVal2",
         screenshotIndex = screenshotIndex ?: paid.sourceScreenshotIndex ?: rem.sourceScreenshotIndex,
-        confidence = if (corroboratingScheduleRows ||
-          (paid.confidence == ExtractionConfidence.HIGH && rem.confidence == ExtractionConfidence.HIGH)
-        ) ExtractionConfidence.HIGH else ExtractionConfidence.MEDIUM,
-        verificationReason = "Calculated as paid installments ($pVal) plus remaining installments ($rVal)."
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Calculated as paid installments ($pVal2) plus remaining installments ($rVal2)."
       )
     }
 
@@ -679,18 +833,53 @@ object FinancialReasoningEngine {
     installmentAmount: ExtractedField<Long>,
     remainingCount: ExtractedField<Int>,
     unpaidRows: List<ExtractedInstallmentRow>,
-    screenshotIndex: Int?
+    screenshotIndex: Int?,
+    issues: MutableList<ImportValidationIssue>
   ): ExtractedField<Long> {
+    val inst = installmentAmount.value
+    val rem = remainingCount.value
+    val unpaidAmts = unpaidRows.mapNotNull { it.amountCents }
+
     if (extracted.value != null) {
-      return ensureExplanation(extracted) {
+      val base = ensureExplanation(extracted) {
         "Extracted directly from remaining installment total label."
       }
+      if (inst != null && inst > 0L && rem != null && rem > 0) {
+        val product = MoneyFormatter.multiplyCents(inst, rem)
+        if (abs(product - extracted.value) <= 100L) {
+          return base.copy(
+            confidence = ExtractionConfidence.HIGH,
+            verificationReason = "${base.verificationReason} Matches $rem × ${MoneyFormatter.formatPeso(inst)} = ${MoneyFormatter.formatPeso(product)}."
+          )
+        } else if (unpaidAmts.distinct().size <= 1) {
+          issues.add(
+            ImportValidationIssue(
+              fieldKey = "remainingInstallmentTotalCents",
+              severity = ImportSeverity.WARNING,
+              title = "Remaining total differs from $rem × ${MoneyFormatter.formatPeso(inst)}",
+              message = "Screenshot shows ${MoneyFormatter.formatPeso(extracted.value)}, while $rem × ${MoneyFormatter.formatPeso(inst)} = ${MoneyFormatter.formatPeso(product)}."
+            )
+          )
+          return base.copy(
+            confidence = ExtractionConfidence.LOW,
+            hasConflict = true,
+            alternatives = base.alternatives + FieldAlternative(
+              value = product,
+              label = "${MoneyFormatter.formatPeso(product)} ($rem × ${MoneyFormatter.formatPeso(inst)})",
+              origin = FieldOrigin.CALCULATED,
+              screenshotIndex = screenshotIndex,
+              sourceSnippet = "$rem × ${MoneyFormatter.formatPeso(inst)}"
+            ),
+            verificationReason = "${base.verificationReason} Conflicts with $rem × ${MoneyFormatter.formatPeso(inst)} = ${MoneyFormatter.formatPeso(product)} — verify which is accurate."
+          )
+        }
+      }
+      return base
     }
 
-    val unpaidAmts = unpaidRows.mapNotNull { it.amountCents }
     if (unpaidRows.isNotEmpty() && unpaidAmts.size == unpaidRows.size) {
-      val sum = unpaidAmts.sum()
-      if (sum > 0L && (remainingCount.value == null || remainingCount.value == unpaidRows.size)) {
+      val sum = MoneyFormatter.sumCentsExact(unpaidAmts)
+      if (sum > 0L && (rem == null || rem == unpaidRows.size)) {
         return ExtractedField.calculated(
           value = sum,
           sourceSnippet = "${unpaidRows.size} unpaid schedule rows",
@@ -701,17 +890,14 @@ object FinancialReasoningEngine {
       }
     }
 
-    val inst = installmentAmount.value
-    val rem = remainingCount.value
     if (inst != null && inst > 0L && rem != null && rem > 0) {
-      val product = inst * rem.toLong()
+      val product = MoneyFormatter.multiplyCents(inst, rem)
       val hasConflictingRowAmounts = unpaidAmts.distinct().size > 1
       if (!hasConflictingRowAmounts) {
         val equalEvidence = unpaidRows.isEmpty() || unpaidAmts.all { abs(it - inst) <= 50L }
         if (equalEvidence) {
           val bothHigh = installmentAmount.confidence == ExtractionConfidence.HIGH &&
-            remainingCount.confidence == ExtractionConfidence.HIGH &&
-            unpaidRows.size == rem
+            remainingCount.confidence == ExtractionConfidence.HIGH
           return ExtractedField.calculated(
             value = product,
             sourceSnippet = "$rem × ${MoneyFormatter.formatPeso(inst)}",
@@ -748,11 +934,9 @@ object FinancialReasoningEngine {
       processingFee.value != null ||
       otherFees.value != null
     if (principal != null && principal > 0L && hasAnyFeeOrInterest) {
-      val total = principal +
-        (interest.value ?: 0L) +
-        (serviceFee.value ?: 0L) +
-        (processingFee.value ?: 0L) +
-        (otherFees.value ?: 0L)
+      val total = MoneyFormatter.sumCentsExact(
+        listOfNotNull(principal, interest.value, serviceFee.value, processingFee.value, otherFees.value)
+      )
       return ExtractedField.calculated(
         value = total,
         sourceSnippet = "Principal + fees",
@@ -771,7 +955,7 @@ object FinancialReasoningEngine {
         installmentAmount.origin == FieldOrigin.EXTRACTED &&
         originalCount.origin == FieldOrigin.EXTRACTED
       ) {
-        val estTotal = inst * orig.toLong()
+        val estTotal = MoneyFormatter.multiplyCents(inst, orig)
         return ExtractedField.estimated(
           value = estTotal,
           sourceSnippet = "$orig × ${MoneyFormatter.formatPeso(inst)}",
@@ -785,10 +969,38 @@ object FinancialReasoningEngine {
     return extracted
   }
 
+  private fun solveRevolvingUsedCredit(
+    extractedUsed: ExtractedField<Long>,
+    creditLimit: ExtractedField<Long>,
+    availableCredit: ExtractedField<Long>,
+    screenshotIndex: Int?
+  ): ExtractedField<Long> {
+    if (extractedUsed.value != null) {
+      return ensureExplanation(extractedUsed) { "Extracted used credit from screenshot #${(screenshotIndex ?: 0) + 1}." }
+    }
+    val limit = creditLimit.value
+    val avail = availableCredit.value
+    if (limit != null && avail != null && limit >= avail &&
+      creditLimit.sourceScreenshotIndex == availableCredit.sourceScreenshotIndex
+    ) {
+      val used = limit - avail
+      return ExtractedField.calculated(
+        value = used,
+        sourceSnippet = "${MoneyFormatter.formatPeso(limit)} - ${MoneyFormatter.formatPeso(avail)}",
+        screenshotIndex = screenshotIndex ?: creditLimit.sourceScreenshotIndex,
+        confidence = ExtractionConfidence.MEDIUM,
+        verificationReason = "Calculated as credit limit (${MoneyFormatter.formatPeso(limit)}) minus available credit (${MoneyFormatter.formatPeso(avail)}) from the same snapshot."
+      )
+    }
+    return extractedUsed
+  }
+
   private fun solveLoanStatusAndZeroGuard(
     extractedStatus: ExtractedField<DebtStatus>,
     outstandingBalance: ExtractedField<Long>,
     amountCurrentlyDue: ExtractedField<Long>,
+    statementBalance: ExtractedField<Long>,
+    productClassification: LoanProductClassification?,
     frequency: RepaymentFrequency?,
     remainingCount: Int?,
     paidRows: List<ExtractedInstallmentRow>,
@@ -815,7 +1027,6 @@ object FinancialReasoningEngine {
       ExtractedField.notDetected()
     }
 
-    // Never assume loan is fully paid just because balance field read as ₱0.00
     if (updatedBal.value == 0L && status.value != DebtStatus.PAID) {
       issues.add(
         ImportValidationIssue(
@@ -831,8 +1042,11 @@ object FinancialReasoningEngine {
       )
     }
 
-    // Estimate outstanding balance ONLY when clearly backed (e.g. single remaining cycle matching Amount Currently Due)
-    if (updatedBal.value == null && amountCurrentlyDue.value != null && amountCurrentlyDue.value > 0L &&
+    // For revolving credit lines, never estimate balance from 5% min due; statement balance is preserved in statementBalanceCents
+    if (productClassification != LoanProductClassification.REVOLVING_CREDIT &&
+      updatedBal.value == null &&
+      amountCurrentlyDue.value != null &&
+      amountCurrentlyDue.value > 0L &&
       (frequency == RepaymentFrequency.ONE_TIME || remainingCount == 1)
     ) {
       updatedBal = ExtractedField.estimated(
@@ -856,18 +1070,25 @@ object FinancialReasoningEngine {
     val lastPaid = ManilaTime.parseDate(lastPaidDate.value) ?: return null
     val freq = frequency.value ?: return null
     val nextLocal: LocalDate? = when (freq) {
+      RepaymentFrequency.DAILY -> lastPaid.plusDays(1)
       RepaymentFrequency.WEEKLY -> lastPaid.plusDays(7)
       RepaymentFrequency.EVERY_14_DAYS -> lastPaid.plusDays(14)
       RepaymentFrequency.MONTHLY -> lastPaid.plusMonths(1)
+      RepaymentFrequency.QUARTERLY -> lastPaid.plusMonths(3)
       RepaymentFrequency.CUSTOM_DAYS -> customIntervalDays?.takeIf { it in 1..365 }?.let { lastPaid.plusDays(it.toLong()) }
-      RepaymentFrequency.ONE_TIME, RepaymentFrequency.IRREGULAR, RepaymentFrequency.UNKNOWN -> null
+      RepaymentFrequency.TWICE_MONTHLY,
+      RepaymentFrequency.ONE_TIME,
+      RepaymentFrequency.IRREGULAR,
+      RepaymentFrequency.UNKNOWN -> null
     }
     if (nextLocal == null) return null
     val iso = ManilaTime.formatIso(nextLocal)
     val patternDesc = when (freq) {
+      RepaymentFrequency.DAILY -> "daily (+1 day)"
       RepaymentFrequency.WEEKLY -> "weekly (+7 days)"
       RepaymentFrequency.EVERY_14_DAYS -> "every 14 days (+14 days)"
       RepaymentFrequency.MONTHLY -> "monthly (+1 month)"
+      RepaymentFrequency.QUARTERLY -> "quarterly (+3 months)"
       RepaymentFrequency.CUSTOM_DAYS -> "every $customIntervalDays days"
       else -> freq.label
     }

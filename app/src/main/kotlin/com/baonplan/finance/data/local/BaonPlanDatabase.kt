@@ -35,7 +35,7 @@ import com.baonplan.finance.data.local.entity.UserSettingsEntity
     UserSettingsEntity::class,
     DebtAttachmentEntity::class
   ],
-  version = 2,
+  version = 3,
   exportSchema = true
 )
 @TypeConverters(RoomConverters::class)
@@ -63,6 +63,40 @@ abstract class BaonPlanDatabase : RoomDatabase() {
       }
     }
 
+    val MIGRATION_2_3 = object : Migration(2, 3) {
+      override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `productClassification` TEXT NOT NULL DEFAULT 'UNKNOWN'")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `applicationProvider` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `actualCreditor` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `productName` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `loanReferenceId` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `loanBookingDateIso` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `disbursedAmountCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `otherChargesCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `outstandingPrincipalCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `remainingInstallmentTotalCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `amountCurrentlyDueCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `pastDueAmountCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `unpaidChargesCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `creditLimitCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `availableCreditCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `usedCreditCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `statementBalanceCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `minimumDueCents` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `statementDateIso` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `statementPeriod` TEXT")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `originalInstallmentsCount` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `paidInstallmentsCount` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `parentDebtId` INTEGER")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `obligationRole` TEXT NOT NULL DEFAULT 'STANDALONE'")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `scheduleVersion` INTEGER NOT NULL DEFAULT 1")
+        db.execSQL("ALTER TABLE `debts` ADD COLUMN `scheduleEffectiveDateIso` TEXT")
+
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `scheduleVersion` INTEGER NOT NULL DEFAULT 1")
+        db.execSQL("ALTER TABLE `installments` ADD COLUMN `rawStatusLabel` TEXT")
+      }
+    }
+
     @Volatile
     private var INSTANCE: BaonPlanDatabase? = null
 
@@ -73,7 +107,7 @@ abstract class BaonPlanDatabase : RoomDatabase() {
           BaonPlanDatabase::class.java,
           DATABASE_NAME
         )
-          .addMigrations(MIGRATION_1_2)
+          .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
           .build()
           .also { INSTANCE = it }
       }

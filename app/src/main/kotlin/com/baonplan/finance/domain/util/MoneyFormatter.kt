@@ -76,4 +76,37 @@ object MoneyFormatter {
       null
     }
   }
+
+  /**
+   * Exact BigDecimal multiplication of centavos by a non-negative integer count.
+   * Never uses Float or Double.
+   */
+  fun multiplyCents(amountCents: Long, count: Int): Long {
+    if (count <= 0 || amountCents == 0L) return 0L
+    return BigDecimal.valueOf(amountCents)
+      .multiply(BigDecimal.valueOf(count.toLong()))
+      .longValueExact()
+  }
+
+  /**
+   * Exact BigDecimal ceiling division of centavos (e.g. remainingBalance / installmentAmount).
+   * Returns 0 if numerator <= 0 or divisor <= 0.
+   */
+  fun divideCentsCeil(numeratorCents: Long, divisorCents: Long): Long {
+    if (numeratorCents <= 0L || divisorCents <= 0L) return 0L
+    return BigDecimal.valueOf(numeratorCents)
+      .divide(BigDecimal.valueOf(divisorCents), 0, RoundingMode.CEILING)
+      .longValueExact()
+  }
+
+  /**
+   * Exact BigDecimal summation of centavo values without overflow drift.
+   */
+  fun sumCentsExact(values: Iterable<Long>): Long {
+    var total = BigDecimal.ZERO
+    for (v in values) {
+      total = total.add(BigDecimal.valueOf(v))
+    }
+    return total.longValueExact()
+  }
 }

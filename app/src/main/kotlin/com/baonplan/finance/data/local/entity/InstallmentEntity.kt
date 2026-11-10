@@ -1,5 +1,6 @@
 package com.baonplan.finance.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -34,5 +35,8 @@ data class InstallmentEntity(
   val paidDate: String? = null,
   val linkedTransactionId: Long? = null,
   val isManuallyEntered: Boolean = true,
-  val notes: String = ""
+  val notes: String = "",
+  @ColumnInfo(defaultValue = "1")
+  val scheduleVersion: Int = 1,
+  val rawStatusLabel: String? = null
 )

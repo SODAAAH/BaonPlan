@@ -115,7 +115,7 @@ class FinancialReasoningEngineTest {
     )
     assertEquals(RepaymentFrequency.IRREGULAR, irregular.frequency.value)
 
-    // True semi-monthly (15th & 30th) must NOT be forced into 14-day biweekly!
+    // True semi-monthly (15th & 30th) is classified as TWICE_MONTHLY (never 14-day biweekly!)
     val semiMonthlyRows = listOf(
       ExtractedInstallmentRow("sm1", dueDateIso = "2026-04-15", dateConfidence = ExtractionConfidence.HIGH),
       ExtractedInstallmentRow("sm2", dueDateIso = "2026-04-30", dateConfidence = ExtractionConfidence.HIGH),
@@ -125,7 +125,8 @@ class FinancialReasoningEngineTest {
     val semiMonthly = FinancialReasoningEngine.enrichSinglePage(
       SingleScreenshotExtraction(0, ExtractedDocumentKind.SCHEDULE_ONLY, installmentRows = semiMonthlyRows)
     )
-    assertEquals(RepaymentFrequency.IRREGULAR, semiMonthly.frequency.value)
+    assertEquals(RepaymentFrequency.TWICE_MONTHLY, semiMonthly.frequency.value)
+    assertEquals(FieldOrigin.ESTIMATED, semiMonthly.frequency.origin)
   }
 
   @Test

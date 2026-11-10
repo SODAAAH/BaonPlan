@@ -315,11 +315,12 @@ class DebtOcrExtractorTest {
 
     val ex = DebtOcrExtractor.extract(mayaPage, refDate)
 
-    assertEquals("Maya (Maya Credit)", ex.lender.value)
+    assertEquals("Maya (Easy Credit)", ex.lender.value)
     // O->0 and whitespace grouping repairs: ₱1,O87.38 -> 108_738L
+    assertEquals(108_738L, ex.usedCreditCents.value)
     assertEquals(108_738L, ex.outstandingBalanceCents.value)
-    // Provider profile keeps Maya "Total Amount Due" in amountCurrentlyDue rather than overwriting principal/balance
-    assertEquals(108_738L, ex.amountCurrentlyDueCents.value)
+    // Provider profile maps Maya Easy Credit "Total Amount Due" to statementBalance rather than principal
+    assertEquals(108_738L, ex.statementBalanceCents.value)
     assertEquals(5_178L, ex.processingFeeCents.value)
     assertEquals(125_000L, ex.serviceFeeCents.value)
     // Ambiguous MM/DD vs DD/MM date populates swap alternative

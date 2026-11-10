@@ -146,6 +146,7 @@ class BackupSerializerTest {
     assertTrue(decodedV1.debtAttachments.isEmpty())
 
     val payloadV2 = BaonPlanBackupPayload(
+      schemaVersion = 2,
       settings = DefaultSettingsProvider.defaultSettings(),
       debts = emptyList(),
       installments = emptyList(),
@@ -169,5 +170,37 @@ class BackupSerializerTest {
     assertEquals(2, decodedV2.schemaVersion)
     assertEquals(1, decodedV2.debtAttachments.size)
     assertEquals("debt_99_s0.jpg", decodedV2.debtAttachments.single().fileName)
+
+    val payloadV3 = BaonPlanBackupPayload(
+      settings = DefaultSettingsProvider.defaultSettings(),
+      debts = listOf(
+        DebtEntity(
+          id = 10L,
+          name = "CIMB REVI Credit",
+          lender = "CIMB Bank PH",
+          category = "Revolving Credit Line",
+          productClassification = com.baonplan.finance.domain.model.LoanProductClassification.REVOLVING_CREDIT,
+          creditLimitCents = 2_000_000L,
+          availableCreditCents = 1_500_000L,
+          usedCreditCents = 500_000L,
+          statementBalanceCents = 500_000L,
+          minimumDueCents = 25_000L,
+          remainingBalanceCents = 500_000L
+        )
+      ),
+      installments = emptyList(),
+      transactions = emptyList(),
+      allowanceRecords = emptyList(),
+      expenses = emptyList(),
+      debtReserves = emptyList()
+    )
+    val decodedV3 = BackupSerializer.decodeBackupJson(BackupSerializer.encodeBackupJson(payloadV3)).getOrThrow()
+    assertEquals(3, decodedV3.schemaVersion)
+    assertEquals(
+      com.baonplan.finance.domain.model.LoanProductClassification.REVOLVING_CREDIT,
+      decodedV3.debts.single().productClassification
+    )
+    assertEquals(2_000_000L, decodedV3.debts.single().creditLimitCents)
+    assertEquals(500_000L, decodedV3.debts.single().statementBalanceCents)
   }
 }

@@ -1,6 +1,7 @@
 package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -15,9 +16,13 @@ object DebtImportValidator {
   fun validateDraft(draft: DebtImportDraft): List<ImportValidationIssue> =
     validateValues(
       debtName = draft.loanName.value.orEmpty(),
+      productClassification = draft.productClassification.value ?: LoanProductClassification.UNKNOWN,
+      isSchedulePartial = draft.isSchedulePartial,
       remainingBalanceCents = draft.outstandingBalanceCents.value
         ?: draft.remainingInstallmentTotalCents.value
         ?: draft.calculatedUnpaidScheduleSumCents.value
+        ?: draft.statementBalanceCents.value
+        ?: draft.usedCreditCents.value
         ?: draft.amountCurrentlyDueCents.value,
       explicitBalanceCents = draft.outstandingBalanceCents.value,
       explicitAmountCurrentlyDueCents = draft.amountCurrentlyDueCents.value,
@@ -29,6 +34,11 @@ object DebtImportValidator {
       processingFeeCents = draft.processingFeeCents.value,
       otherFeesCents = draft.otherFeesCents.value,
       totalScheduledCents = draft.totalRepaymentCents.value,
+      creditLimitCents = draft.creditLimitCents.value,
+      availableCreditCents = draft.availableCreditCents.value,
+      usedCreditCents = draft.usedCreditCents.value,
+      statementBalanceCents = draft.statementBalanceCents.value,
+      minimumDueCents = draft.minimumDueCents.value,
       installmentAmountCents = draft.installmentAmountCents.value,
       originalInstallmentCount = draft.originalInstallmentCount.value,
       paidInstallmentsCount = draft.paidInstallmentsCount.value,
@@ -54,6 +64,11 @@ object DebtImportValidator {
     processingFeeCents: Long? = null,
     otherFeesCents: Long? = null,
     totalScheduledCents: Long? = null,
+    creditLimitCents: Long? = null,
+    availableCreditCents: Long? = null,
+    usedCreditCents: Long? = null,
+    statementBalanceCents: Long? = null,
+    minimumDueCents: Long? = null,
     installmentAmountCents: Long? = null,
     originalInstallmentCount: Int? = null,
     paidInstallmentsCount: Int? = null,
@@ -63,6 +78,8 @@ object DebtImportValidator {
     nextDueDateIso: String? = null,
     dueDateStatus: DueDateStatus = DueDateStatus.UNCONFIRMED,
     scheduleRows: List<ExtractedInstallmentRow> = emptyList(),
+    productClassification: LoanProductClassification = LoanProductClassification.UNKNOWN,
+    isSchedulePartial: Boolean = false,
     requireNonBlankName: Boolean = true
   ): List<ImportValidationIssue> {
     val issues = mutableListOf<ImportValidationIssue>()
@@ -99,7 +116,12 @@ object DebtImportValidator {
       "otherFeesCents" to ("Other fees" to otherFeesCents),
       "totalRepaymentCents" to ("Total scheduled repayment" to totalScheduledCents),
       "amountCurrentlyDueCents" to ("Amount currently due" to explicitAmountCurrentlyDueCents),
-      "remainingInstallmentTotalCents" to ("Remaining installment total" to explicitRemainingInstallmentTotalCents)
+      "remainingInstallmentTotalCents" to ("Remaining installment total" to explicitRemainingInstallmentTotalCents),
+      "creditLimitCents" to ("Credit limit" to creditLimitCents),
+      "availableCreditCents" to ("Available credit" to availableCreditCents),
+      "usedCreditCents" to ("Used credit" to usedCreditCents),
+      "statementBalanceCents" to ("Statement balance" to statementBalanceCents),
+      "minimumDueCents" to ("Minimum due" to minimumDueCents)
     )
     for ((key, pair) in nonNegativeMap) {
       val value = pair.second
@@ -263,14 +285,42 @@ object DebtImportValidator {
       }
     }
 
-    val unpaidRows = scheduleRows.filter {
-      it.status == ExtractedInstallmentStatus.UPCOMING ||
-        it.status == ExtractedInstallmentStatus.OVERDUE ||
-        it.status == ExtractedInstallmentStatus.UNKNOWN
+    // Revolving credit line checks (never treat available credit as debt or min due as full balance)
+    if (productClassification == LoanProductClassification.REVOLVING_CREDIT ||
+      creditLimitCents != null ||
+      availableCreditCents != null ||
+      statementBalanceCents != null
+    ) {
+      if (creditLimitCents != null && availableCreditCents != null && remainingBalanceCents != null &&
+        abs(remainingBalanceCents - availableCreditCents) <= 100L &&
+        abs(creditLimitCents - availableCreditCents) > 100L
+      ) {
+        issues.add(
+          ImportValidationIssue(
+            fieldKey = "availableCreditAsBalance",
+            severity = ImportSeverity.WARNING,
+            title = "Balance matches available credit",
+            message = "Remaining balance (${MoneyFormatter.formatPeso(remainingBalanceCents)}) equals Available credit. For credit lines, Remaining balance should reflect Statement Balance or Used Credit, not Available Credit."
+          )
+        )
+      }
+      if (statementBalanceCents != null && minimumDueCents != null && minimumDueCents > statementBalanceCents + 100L) {
+        issues.add(
+          ImportValidationIssue(
+            fieldKey = "minimumDueVsStatement",
+            severity = ImportSeverity.WARNING,
+            title = "Minimum due exceeds statement balance",
+            message = "Minimum due (${MoneyFormatter.formatPeso(minimumDueCents)}) is greater than Statement balance (${MoneyFormatter.formatPeso(statementBalanceCents)})."
+          )
+        )
+      }
     }
-    val paidRows = scheduleRows.filter { it.status == ExtractedInstallmentStatus.PAID }
 
-    if (paidInstallmentsCount != null && paidRows.isNotEmpty() && paidRows.size != paidInstallmentsCount) {
+    val unpaidRows = scheduleRows.filter { it.status.isUnpaidObligation }
+    val paidRows = scheduleRows.filter { it.status.isSettledPaid }
+
+    val hasPartialPaidRows = isSchedulePartial && paidInstallmentsCount != null && paidRows.size < paidInstallmentsCount
+    if (paidInstallmentsCount != null && paidRows.isNotEmpty() && paidRows.size != paidInstallmentsCount && !hasPartialPaidRows) {
       issues.add(
         ImportValidationIssue(
           fieldKey = "paidRowMismatch",
@@ -281,7 +331,17 @@ object DebtImportValidator {
       )
     }
 
-    if (remainingInstallmentsCount != null && unpaidRows.isNotEmpty() && unpaidRows.size != remainingInstallmentsCount) {
+    val hasPartialUnpaidRows = isSchedulePartial && remainingInstallmentsCount != null && unpaidRows.size < remainingInstallmentsCount
+    if (hasPartialUnpaidRows && unpaidRows.isNotEmpty()) {
+      issues.add(
+        ImportValidationIssue(
+          fieldKey = "partialScheduleNotice",
+          severity = ImportSeverity.INFO,
+          title = "Partial schedule shown (${unpaidRows.size} of $remainingInstallmentsCount remaining rows)",
+          message = "Only the visible rows from the screenshot were captured. Upload additional schedule screenshots or add remaining rows manually if needed."
+        )
+      )
+    } else if (remainingInstallmentsCount != null && unpaidRows.isNotEmpty() && unpaidRows.size != remainingInstallmentsCount) {
       issues.add(
         ImportValidationIssue(
           fieldKey = "remainingRowMismatch",
@@ -292,8 +352,8 @@ object DebtImportValidator {
       )
     }
 
-    if (unpaidRows.isNotEmpty() && unpaidRows.all { it.amountCents != null }) {
-      val calcUnpaidSum = unpaidRows.sumOf { it.amountCents ?: 0L }
+    if (unpaidRows.isNotEmpty() && unpaidRows.all { it.amountCents != null } && !hasPartialUnpaidRows) {
+      val calcUnpaidSum = MoneyFormatter.sumCentsExact(unpaidRows.mapNotNull { it.amountCents })
       if (remainingBalanceCents != null && remainingBalanceCents > 0L && abs(calcUnpaidSum - remainingBalanceCents) > 100L) {
         issues.add(
           ImportValidationIssue(

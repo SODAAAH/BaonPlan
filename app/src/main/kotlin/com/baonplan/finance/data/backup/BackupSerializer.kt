@@ -16,7 +16,7 @@ import java.time.Instant
 
 @Serializable
 data class BaonPlanBackupPayload(
-  val schemaVersion: Int = 2,
+  val schemaVersion: Int = 3,
   val appId: String = "com.baonplan.finance",
   val currency: String = "PHP",
   val timezone: String = "Asia/Manila",

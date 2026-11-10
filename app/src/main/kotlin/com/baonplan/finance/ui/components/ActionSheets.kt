@@ -67,6 +67,8 @@ import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.data.local.entity.TransactionEntity
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.ObligationRole
 import com.baonplan.finance.domain.ocr.DebtDuplicateDetector
 import com.baonplan.finance.domain.ocr.DebtImportDraft
 import com.baonplan.finance.domain.ocr.DebtImportValidator
@@ -77,6 +79,7 @@ import com.baonplan.finance.domain.ocr.ExtractionConfidence
 import com.baonplan.finance.domain.ocr.FieldAlternative
 import com.baonplan.finance.domain.ocr.FieldOrigin
 import com.baonplan.finance.domain.ocr.ImportSeverity
+import com.baonplan.finance.domain.ocr.TextCorrectionAudit
 import com.baonplan.finance.ui.theme.LocalBaonColors
 import com.baonplan.finance.data.local.entity.UserSettingsEntity
 import com.baonplan.finance.domain.FinancialCalculator
@@ -1014,13 +1017,36 @@ fun DebtEditorDialog(
         ?: "Installment Loan"
     )
   }
+  var productClassification by remember(stateKey) {
+    mutableStateOf(
+      existing?.productClassification
+        ?: prefillDraft?.productClassification?.value
+        ?: LoanProductClassification.UNKNOWN
+    )
+  }
+  var applicationProvider by remember(stateKey) {
+    mutableStateOf(existing?.applicationProvider ?: prefillDraft?.applicationProvider?.value.orEmpty())
+  }
+  var actualCreditor by remember(stateKey) {
+    mutableStateOf(existing?.actualCreditor ?: prefillDraft?.actualCreditor?.value.orEmpty())
+  }
   var loanReferenceId by remember(stateKey) {
-    mutableStateOf(prefillDraft?.loanReferenceId?.value.orEmpty())
+    mutableStateOf(existing?.loanReferenceId ?: prefillDraft?.loanReferenceId?.value.orEmpty())
+  }
+  var loanBookingDateIso by remember(stateKey) {
+    mutableStateOf(existing?.loanBookingDateIso ?: prefillDraft?.loanBookingDateIso?.value)
   }
   var originalPrincipalText by remember(stateKey) {
     mutableStateOf(
       MoneyFormatter.formatEditableAmount(
         existing?.originalPrincipalCents ?: prefillDraft?.originalPrincipalCents?.value
+      )
+    )
+  }
+  var disbursedAmountText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.disbursedAmountCents ?: prefillDraft?.disbursedAmountCents?.value
       )
     )
   }
@@ -1054,8 +1080,65 @@ fun DebtEditorDialog(
   }
   var otherFeesText by remember(stateKey) {
     mutableStateOf(
-      MoneyFormatter.formatEditableAmount(prefillDraft?.otherFeesCents?.value)
+      MoneyFormatter.formatEditableAmount(
+        existing?.otherChargesCents ?: prefillDraft?.otherFeesCents?.value
+      )
     )
+  }
+  var pastDueAmountText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.pastDueAmountCents ?: prefillDraft?.pastDueAmountCents?.value
+      )
+    )
+  }
+  var unpaidChargesText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.unpaidChargesCents ?: prefillDraft?.unpaidChargesCents?.value
+      )
+    )
+  }
+  var creditLimitText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.creditLimitCents ?: prefillDraft?.creditLimitCents?.value
+      )
+    )
+  }
+  var availableCreditText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.availableCreditCents ?: prefillDraft?.availableCreditCents?.value
+      )
+    )
+  }
+  var usedCreditText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.usedCreditCents ?: prefillDraft?.usedCreditCents?.value
+      )
+    )
+  }
+  var statementBalanceText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.statementBalanceCents ?: prefillDraft?.statementBalanceCents?.value
+      )
+    )
+  }
+  var minimumDueText by remember(stateKey) {
+    mutableStateOf(
+      MoneyFormatter.formatEditableAmount(
+        existing?.minimumDueCents ?: prefillDraft?.minimumDueCents?.value
+      )
+    )
+  }
+  var statementDateIso by remember(stateKey) {
+    mutableStateOf(existing?.statementDateIso ?: prefillDraft?.statementDateIso?.value)
+  }
+  var statementPeriod by remember(stateKey) {
+    mutableStateOf(existing?.statementPeriod ?: prefillDraft?.statementPeriod?.value.orEmpty())
   }
   var totalScheduledText by remember(stateKey) {
     mutableStateOf(
@@ -1078,6 +1161,14 @@ fun DebtEditorDialog(
   val initialBalanceField: ExtractedField<Long>? = remember(stateKey) {
     when {
       prefillDraft == null -> null
+      prefillDraft.productClassification.value == LoanProductClassification.REVOLVING_CREDIT ->
+        when {
+          prefillDraft.statementBalanceCents.value != null -> prefillDraft.statementBalanceCents
+          prefillDraft.usedCreditCents.value != null -> prefillDraft.usedCreditCents
+          prefillDraft.outstandingBalanceCents.value != null -> prefillDraft.outstandingBalanceCents
+          prefillDraft.amountCurrentlyDueCents.value != null -> prefillDraft.amountCurrentlyDueCents
+          else -> prefillDraft.statementBalanceCents
+        }
       prefillDraft.outstandingBalanceCents.value != null -> prefillDraft.outstandingBalanceCents
       prefillDraft.remainingInstallmentTotalCents.value != null -> prefillDraft.remainingInstallmentTotalCents
       prefillDraft.calculatedUnpaidScheduleSumCents.value != null && prefillDraft.calculatedUnpaidScheduleSumCents.value > 0L ->
@@ -1086,38 +1177,41 @@ fun DebtEditorDialog(
       else -> prefillDraft.outstandingBalanceCents
     }
   }
-  var remainingBalanceText by remember(stateKey) {
-    mutableStateOf(
-      when {
-        existing != null -> MoneyFormatter.formatEditableAmount(existing.remainingBalanceCents)
-        initialBalanceField?.value != null -> MoneyFormatter.formatEditableAmount(initialBalanceField.value)
-        else -> ""
-      }
-    )
+  val initialBalanceText = remember(stateKey) {
+    when {
+      existing != null -> MoneyFormatter.formatEditableAmount(existing.remainingBalanceCents)
+      initialBalanceField?.value != null -> MoneyFormatter.formatEditableAmount(initialBalanceField.value)
+      else -> ""
+    }
   }
-  var installmentAmountText by remember(stateKey) {
-    mutableStateOf(
-      when {
-        existing != null && existing.installmentAmountCents > 0L ->
-          MoneyFormatter.formatEditableAmount(existing.installmentAmountCents)
-        prefillDraft?.installmentAmountCents?.value != null && prefillDraft.installmentAmountCents.value > 0L ->
-          MoneyFormatter.formatEditableAmount(prefillDraft.installmentAmountCents.value)
-        else -> ""
-      }
-    )
+  var remainingBalanceText by remember(stateKey) { mutableStateOf(initialBalanceText) }
+  val initialInstallmentText = remember(stateKey) {
+    when {
+      existing != null && existing.installmentAmountCents > 0L ->
+        MoneyFormatter.formatEditableAmount(existing.installmentAmountCents)
+      prefillDraft?.installmentAmountCents?.value != null && prefillDraft.installmentAmountCents.value > 0L ->
+        MoneyFormatter.formatEditableAmount(prefillDraft.installmentAmountCents.value)
+      else -> ""
+    }
   }
+  var installmentAmountText by remember(stateKey) { mutableStateOf(initialInstallmentText) }
   var originalCountText by remember(stateKey) {
-    mutableStateOf(prefillDraft?.originalInstallmentCount?.value?.toString().orEmpty())
+    mutableStateOf(
+      existing?.originalInstallmentsCount?.toString()
+        ?: prefillDraft?.originalInstallmentCount?.value?.toString().orEmpty()
+    )
   }
   var paidCountText by remember(stateKey) {
-    mutableStateOf(prefillDraft?.paidInstallmentsCount?.value?.toString().orEmpty())
-  }
-  var remainingCountText by remember(stateKey) {
     mutableStateOf(
-      existing?.remainingInstallmentsCount?.takeIf { it > 0 }?.toString()
-        ?: prefillDraft?.remainingInstallmentsCount?.value?.toString().orEmpty()
+      existing?.paidInstallmentsCount?.toString()
+        ?: prefillDraft?.paidInstallmentsCount?.value?.toString().orEmpty()
     )
   }
+  val initialRemainingCountText = remember(stateKey) {
+    existing?.remainingInstallmentsCount?.takeIf { it > 0 }?.toString()
+      ?: prefillDraft?.remainingInstallmentsCount?.value?.toString().orEmpty()
+  }
+  var remainingCountText by remember(stateKey) { mutableStateOf(initialRemainingCountText) }
   var frequency by remember(stateKey) {
     mutableStateOf(
       existing?.frequency
@@ -1143,6 +1237,9 @@ fun DebtEditorDialog(
         ?: prefillDraft?.dueDateStatus
         ?: DueDateStatus.UNCONFIRMED
     )
+  }
+  var linkedParentDebtId by remember(stateKey) {
+    mutableStateOf<Long?>(existing?.parentDebtId)
   }
   var notes by remember(stateKey) { mutableStateOf(existing?.notes ?: "") }
   var errorText by remember(stateKey) { mutableStateOf<String?>(null) }
@@ -1176,11 +1273,19 @@ fun DebtEditorDialog(
   val parsedRemainingBalance = MoneyFormatter.parsePesoToCents(remainingBalanceText)
   val parsedInstallmentAmount = MoneyFormatter.parsePesoToCents(installmentAmountText)
   val parsedOrigPrincipal = MoneyFormatter.parsePesoToCents(originalPrincipalText)
+  val parsedDisbursedAmount = MoneyFormatter.parsePesoToCents(disbursedAmountText)
   val parsedAmountReceived = MoneyFormatter.parsePesoToCents(amountReceivedText)
   val parsedInterest = MoneyFormatter.parsePesoToCents(interestText)
   val parsedServiceFee = MoneyFormatter.parsePesoToCents(serviceFeeText)
   val parsedProcessingFee = MoneyFormatter.parsePesoToCents(processingFeeText)
   val parsedOtherFees = MoneyFormatter.parsePesoToCents(otherFeesText)
+  val parsedPastDueAmount = MoneyFormatter.parsePesoToCents(pastDueAmountText)
+  val parsedUnpaidCharges = MoneyFormatter.parsePesoToCents(unpaidChargesText)
+  val parsedCreditLimit = MoneyFormatter.parsePesoToCents(creditLimitText)
+  val parsedAvailableCredit = MoneyFormatter.parsePesoToCents(availableCreditText)
+  val parsedUsedCredit = MoneyFormatter.parsePesoToCents(usedCreditText)
+  val parsedStatementBalance = MoneyFormatter.parsePesoToCents(statementBalanceText)
+  val parsedMinimumDue = MoneyFormatter.parsePesoToCents(minimumDueText)
   val parsedTotalScheduled = MoneyFormatter.parsePesoToCents(totalScheduledText)
   val parsedOrigCount = originalCountText.toIntOrNull()
   val parsedPaidCount = paidCountText.toIntOrNull()
@@ -1200,6 +1305,8 @@ fun DebtEditorDialog(
   val liveIssues = if (scanDraft != null) {
     DebtImportValidator.validateValues(
       debtName = name,
+      productClassification = productClassification,
+      isSchedulePartial = scanDraft.isSchedulePartial,
       remainingBalanceCents = parsedRemainingBalance,
       explicitBalanceCents = scanDraft.outstandingBalanceCents.value ?: parsedRemainingBalance,
       explicitAmountCurrentlyDueCents = scanDraft.amountCurrentlyDueCents.value,
@@ -1211,6 +1318,11 @@ fun DebtEditorDialog(
       processingFeeCents = parsedProcessingFee,
       otherFeesCents = parsedOtherFees,
       totalScheduledCents = parsedTotalScheduled,
+      creditLimitCents = parsedCreditLimit,
+      availableCreditCents = parsedAvailableCredit,
+      usedCreditCents = parsedUsedCredit,
+      statementBalanceCents = parsedStatementBalance,
+      minimumDueCents = parsedMinimumDue,
       installmentAmountCents = parsedInstallmentAmount,
       originalInstallmentCount = parsedOrigCount,
       paidInstallmentsCount = parsedPaidCount,
@@ -1231,6 +1343,7 @@ fun DebtEditorDialog(
       lender = lender,
       loanName = name,
       loanReferenceId = loanReferenceId,
+      productClassification = productClassification,
       remainingBalanceCents = parsedRemainingBalance,
       originalPrincipalCents = parsedOrigPrincipal,
       installmentAmountCents = parsedInstallmentAmount,
@@ -1349,13 +1462,14 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
+        val displayNameField = effectiveScanField(scanDraft.loanName, name, prefillDraft?.loanName?.value.orEmpty())
         ScanFieldCaption(
-          field = scanDraft.loanName,
+          field = displayNameField,
           currentText = name,
           onExplain = {
             explanationTarget = buildExplanationTarget(
               title = "Debt name",
-              field = scanDraft.loanName,
+              field = displayNameField,
               currentDisplay = name.ifBlank { null },
               formatAlt = { it },
               onApplyAlt = { alt -> name = alt; errorText = null }
@@ -1374,13 +1488,14 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
+        val displayLenderField = effectiveScanField(scanDraft.lender, lender, prefillDraft?.lender?.value.orEmpty())
         ScanFieldCaption(
-          field = scanDraft.lender,
+          field = displayLenderField,
           currentText = lender,
           onExplain = {
             explanationTarget = buildExplanationTarget(
               title = "Lender / Provider",
-              field = scanDraft.lender,
+              field = displayLenderField,
               currentDisplay = lender.ifBlank { null },
               formatAlt = { it },
               onApplyAlt = { alt -> lender = alt }
@@ -1389,10 +1504,103 @@ fun DebtEditorDialog(
         )
       }
 
+      if (isScanReview || productClassification != LoanProductClassification.UNKNOWN) {
+        Text(
+          text = "Product type",
+          style = MaterialTheme.typography.labelLarge,
+          color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+          LoanProductClassification.entries.forEach { prod ->
+            FilterChip(
+              selected = productClassification == prod,
+              onClick = {
+                productClassification = prod
+                if (category.isBlank() || category == "Installment Loan") {
+                  category = prod.label
+                }
+                errorText = null
+              },
+              label = { Text(prod.label, style = MaterialTheme.typography.labelSmall) }
+            )
+          }
+        }
+      }
+
+      val candidateParentDebts = remember(existingDebts, lender, existing?.id) {
+        val normLender = lender.trim().lowercase()
+        existingDebts.filter { candidate ->
+          candidate.id != existing?.id &&
+            candidate.status == DebtStatus.ACTIVE &&
+            candidate.parentDebtId == null &&
+            (normLender.isBlank() ||
+              candidate.lender.lowercase().contains(normLender) ||
+              normLender.contains(candidate.lender.lowercase()))
+        }
+      }
+      if ((productClassification == LoanProductClassification.BNPL_PAY_LATER ||
+          productClassification == LoanProductClassification.CREDIT_BILL_INSTALLMENT ||
+          scanDraft?.obligationRole == ObligationRole.BILLING_STATEMENT ||
+          scanDraft?.obligationRole == ObligationRole.CONVERTED_INSTALLMENT) &&
+        candidateParentDebts.isNotEmpty()
+      ) {
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceContainerLow,
+          border = BorderStroke(1.dp, LocalBaonColors.current.divider),
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+          ) {
+            Text(
+              text = "Avoid double-counting in total debt",
+              style = MaterialTheme.typography.labelMedium,
+              fontWeight = FontWeight.SemiBold,
+              color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+              text = "If this statement or converted plan belongs to an existing credit line already tracked in BaonPlan, link it below so its balance is not counted twice.",
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+              FilterChip(
+                selected = linkedParentDebtId == null,
+                onClick = { linkedParentDebtId = null },
+                label = { Text("Standalone (count in totals)", style = MaterialTheme.typography.labelSmall) }
+              )
+              candidateParentDebts.forEach { parent ->
+                FilterChip(
+                  selected = linkedParentDebtId == parent.id,
+                  onClick = { linkedParentDebtId = parent.id },
+                  label = { Text("Link to ${parent.name}", style = MaterialTheme.typography.labelSmall) }
+                )
+              }
+            }
+          }
+        }
+      }
+
       OutlinedTextField(
         value = remainingBalanceText,
         onValueChange = { remainingBalanceText = it; errorText = null },
-        label = { Text("Remaining balance *") },
+        label = {
+          Text(
+            if (productClassification == LoanProductClassification.REVOLVING_CREDIT) {
+              "Remaining debt balance *"
+            } else {
+              "Remaining balance *"
+            }
+          )
+        },
         placeholder = placeholderIfScan,
         prefix = { Text("₱") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -1401,7 +1609,8 @@ fun DebtEditorDialog(
         modifier = Modifier.fillMaxWidth()
       )
       if (scanDraft != null) {
-        val primaryBalField = initialBalanceField ?: scanDraft.outstandingBalanceCents
+        val rawBalField = initialBalanceField ?: scanDraft.outstandingBalanceCents
+        val primaryBalField = effectiveScanField(rawBalField, remainingBalanceText, initialBalanceText)
         ScanFieldCaption(
           field = primaryBalField,
           currentText = remainingBalanceText,
@@ -1419,15 +1628,39 @@ fun DebtEditorDialog(
           }
         )
 
+        if (productClassification == LoanProductClassification.REVOLVING_CREDIT ||
+          creditLimitText.isNotBlank() ||
+          availableCreditText.isNotBlank() ||
+          statementBalanceText.isNotBlank() ||
+          minimumDueText.isNotBlank()
+        ) {
+          RevolvingCreditReviewCard(
+            creditLimitText = creditLimitText,
+            onCreditLimitChange = { newVal: String -> creditLimitText = newVal; errorText = null },
+            availableCreditText = availableCreditText,
+            onAvailableCreditChange = { newVal: String -> availableCreditText = newVal; errorText = null },
+            usedCreditText = usedCreditText,
+            onUsedCreditChange = { newVal: String -> usedCreditText = newVal; errorText = null },
+            statementBalanceText = statementBalanceText,
+            onStatementBalanceChange = { newVal: String -> statementBalanceText = newVal; errorText = null },
+            minimumDueText = minimumDueText,
+            onMinimumDueChange = { newVal: String -> minimumDueText = newVal; errorText = null },
+            onApplyAsRemainingBalance = { cents: Long ->
+              remainingBalanceText = MoneyFormatter.formatEditableAmount(cents)
+              errorText = null
+            }
+          )
+        }
+
         BalanceComparisonReviewCard(
           extractedBalanceCents = scanDraft.outstandingBalanceCents.value,
           extractedAmountCurrentlyDueCents = scanDraft.amountCurrentlyDueCents.value,
           extractedRemainingInstallmentTotalCents = scanDraft.remainingInstallmentTotalCents.value,
           calculatedUnpaidScheduleSumCents = editableScheduleRows
-            .filter { it.status != ExtractedInstallmentStatus.PAID }
+            .filter { it.status.isUnpaidObligation }
             .mapNotNull { MoneyFormatter.parsePesoToCents(it.amountText) }
             .takeIf { it.isNotEmpty() }
-            ?.sum(),
+            ?.let { MoneyFormatter.sumCentsExact(it) },
           onApplyAmount = { cents ->
             remainingBalanceText = MoneyFormatter.formatEditableAmount(cents)
             errorText = null
@@ -1449,13 +1682,14 @@ fun DebtEditorDialog(
             modifier = Modifier.fillMaxWidth()
           )
           if (scanDraft != null) {
+            val displayInstField = effectiveScanField(scanDraft.installmentAmountCents, installmentAmountText, initialInstallmentText)
             ScanFieldCaption(
-              field = scanDraft.installmentAmountCents,
+              field = displayInstField,
               currentText = installmentAmountText,
               onExplain = {
                 explanationTarget = buildExplanationTarget(
                   title = "Installment amount",
-                  field = scanDraft.installmentAmountCents,
+                  field = displayInstField,
                   currentDisplay = parsedInstallmentAmount?.let { MoneyFormatter.formatPeso(it) },
                   formatAlt = { MoneyFormatter.formatPeso(it) },
                   onApplyAlt = { alt ->
@@ -1479,13 +1713,14 @@ fun DebtEditorDialog(
             modifier = Modifier.fillMaxWidth()
           )
           if (scanDraft != null) {
+            val displayRemCountField = effectiveScanField(scanDraft.remainingInstallmentsCount, remainingCountText, initialRemainingCountText)
             ScanFieldCaption(
-              field = scanDraft.remainingInstallmentsCount,
+              field = displayRemCountField,
               currentText = remainingCountText,
               onExplain = {
                 explanationTarget = buildExplanationTarget(
                   title = "Remaining installments",
-                  field = scanDraft.remainingInstallmentsCount,
+                  field = displayRemCountField,
                   currentDisplay = remainingCountText.ifBlank { null },
                   formatAlt = { it.toString() },
                   onApplyAlt = { alt ->
@@ -1596,6 +1831,14 @@ fun DebtEditorDialog(
       }
 
       if (isScanReview) {
+        if (scanDraft?.isSchedulePartial == true && editableScheduleRows.isNotEmpty()) {
+          InfoCallout(
+            icon = Icons.Outlined.Info,
+            title = "Partial schedule view",
+            body = "Showing ${editableScheduleRows.size} visible row(s) from the screenshot without extrapolating unseen rows.",
+            tone = BadgeTone.NEUTRAL
+          )
+        }
         ExpandableSection(
           title = "Payment schedule (${editableScheduleRows.size})",
           subtitle = if (editableScheduleRows.isEmpty()) {
@@ -1645,6 +1888,7 @@ fun DebtEditorDialog(
                       dateConfidence = ExtractionConfidence.HIGH,
                       amountText = installmentAmountText,
                       status = ExtractedInstallmentStatus.UPCOMING,
+                      rawStatusLabel = null,
                       sourceSnippet = "Added during review",
                       screenshotIndex = -1,
                       verificationNote = null
@@ -1661,12 +1905,12 @@ fun DebtEditorDialog(
               if (editableScheduleRows.isNotEmpty()) {
                 FilledTonalButton(
                   onClick = {
-                    val unpaid = editableScheduleRows.filter { it.status != ExtractedInstallmentStatus.PAID }
-                    val paid = editableScheduleRows.filter { it.status == ExtractedInstallmentStatus.PAID }
+                    val unpaid = editableScheduleRows.filter { it.status.isUnpaidObligation }
+                    val paid = editableScheduleRows.filter { it.status.isSettledPaid }
                     remainingCountText = unpaid.size.toString()
                     if (paid.isNotEmpty()) {
                       paidCountText = paid.size.toString()
-                      val paidSum = paid.mapNotNull { MoneyFormatter.parsePesoToCents(it.amountText) }.sum()
+                      val paidSum = MoneyFormatter.sumCentsExact(paid.mapNotNull { MoneyFormatter.parsePesoToCents(it.amountText) })
                       if (paidSum > 0L) {
                         priorPaidText = MoneyFormatter.formatEditableAmount(paidSum)
                       }
@@ -1684,6 +1928,37 @@ fun DebtEditorDialog(
                   modifier = Modifier.weight(1f)
                 ) {
                   Text("Sync count & due", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+              }
+            }
+          }
+        }
+        if (scanDraft?.textCorrections?.isNotEmpty() == true) {
+          ExpandableSection(
+            title = "OCR text cleanup (${scanDraft.textCorrections.size})",
+            subtitle = "Raw OCR text preserved alongside normalized symbols",
+            initiallyExpanded = false
+          ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+              scanDraft.textCorrections.forEach { audit ->
+                Surface(
+                  shape = RoundedCornerShape(8.dp),
+                  color = MaterialTheme.colorScheme.surfaceContainerLow,
+                  modifier = Modifier.fillMaxWidth()
+                ) {
+                  Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                      text = "Raw: \"${audit.rawText}\" → \"${audit.normalizedText}\"",
+                      style = MaterialTheme.typography.labelSmall,
+                      fontWeight = FontWeight.SemiBold,
+                      color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                      text = audit.reason,
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                  }
                 }
               }
             }
@@ -2151,14 +2426,24 @@ fun DebtEditorDialog(
           }
           val (instOk, instParsed) = parseOptionalPeso(installmentAmountText)
           val (origOk, origPrincipal) = parseOptionalPeso(originalPrincipalText)
+          val (disbOk, disbursedAmount) = parseOptionalPeso(disbursedAmountText)
           val (recvOk, amountReceived) = parseOptionalPeso(amountReceivedText)
           val (intOk, interestCents) = parseOptionalPeso(interestText)
           val (svcOk, serviceFeeCents) = parseOptionalPeso(serviceFeeText)
           val (procOk, processingFeeCents) = parseOptionalPeso(processingFeeText)
           val (otherOk, otherFeesCents) = parseOptionalPeso(otherFeesText)
+          val (pastDueOk, pastDueAmount) = parseOptionalPeso(pastDueAmountText)
+          val (chargesOk, unpaidCharges) = parseOptionalPeso(unpaidChargesText)
+          val (limitOk, creditLimitCents) = parseOptionalPeso(creditLimitText)
+          val (availOk, availableCreditCents) = parseOptionalPeso(availableCreditText)
+          val (usedOk, usedCreditCents) = parseOptionalPeso(usedCreditText)
+          val (stmtOk, statementBalanceCents) = parseOptionalPeso(statementBalanceText)
+          val (minDueOk, minimumDueCents) = parseOptionalPeso(minimumDueText)
           val (schedOk, totalScheduled) = parseOptionalPeso(totalScheduledText)
           val (priorOk, priorPaidParsed) = parseOptionalPeso(priorPaidText)
-          if (!instOk || !origOk || !recvOk || !intOk || !svcOk || !procOk || !otherOk || !schedOk || !priorOk) {
+          if (!instOk || !origOk || !disbOk || !recvOk || !intOk || !svcOk || !procOk || !otherOk ||
+            !pastDueOk || !chargesOk || !limitOk || !availOk || !usedOk || !stmtOk || !minDueOk || !schedOk || !priorOk
+          ) {
             errorText = "Check peso amounts — enter numbers only or leave optional fields blank"
             return@SheetButtonRow
           }
@@ -2231,6 +2516,13 @@ fun DebtEditorDialog(
             notes.trim()
           }
 
+          val resolvedObligationRole = when {
+            linkedParentDebtId != null && productClassification == LoanProductClassification.CREDIT_BILL_INSTALLMENT ->
+              ObligationRole.CONVERTED_INSTALLMENT
+            linkedParentDebtId != null -> ObligationRole.BILLING_STATEMENT
+            else -> ObligationRole.STANDALONE
+          }
+
           val entity = (existing ?: DebtEntity(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
@@ -2240,50 +2532,86 @@ fun DebtEditorDialog(
             name = name.trim(),
             lender = lender.ifBlank { "Manual Entry" },
             category = category.ifBlank { "Loan" },
+            productClassification = productClassification,
+            applicationProvider = applicationProvider.trim().ifBlank { null },
+            actualCreditor = actualCreditor.trim().ifBlank { null },
+            loanReferenceId = loanReferenceId.trim().ifBlank { null },
+            loanBookingDateIso = loanBookingDateIso,
             originalPrincipalCents = origPrincipal,
+            disbursedAmountCents = disbursedAmount,
             amountReceivedCents = amountReceived,
             interestCents = interestCents,
             serviceFeeCents = serviceFeeCents,
             processingFeeCents = processingFeeCents,
+            otherChargesCents = otherFeesCents,
+            pastDueAmountCents = pastDueAmount,
+            unpaidChargesCents = unpaidCharges,
+            creditLimitCents = creditLimitCents,
+            availableCreditCents = availableCreditCents,
+            usedCreditCents = usedCreditCents,
+            statementBalanceCents = statementBalanceCents,
+            minimumDueCents = minimumDueCents,
+            statementDateIso = statementDateIso,
+            statementPeriod = statementPeriod.trim().ifBlank { null },
             totalScheduledRepaymentCents = totalScheduled,
             priorPaidCents = priorPaidParsed ?: 0L,
             isPriorPaidKnown = priorPaidParsed != null,
             remainingBalanceCents = remBalance,
             installmentAmountCents = instAmt,
+            originalInstallmentsCount = parsedOrigCount,
+            paidInstallmentsCount = parsedPaidCount,
             remainingInstallmentsCount = remCount,
             frequency = frequency,
             customIntervalDays = customDays,
             lastKnownPaidDate = existing?.lastKnownPaidDate
               ?: scanDraft?.lastPaidDateIso?.value
               ?: editableScheduleRows
-                .filter { it.status == ExtractedInstallmentStatus.PAID }
+                .filter { it.status.isSettledPaid }
                 .mapNotNull { it.dueDateIso }
                 .maxOrNull(),
             nextDueDate = nextDueDate,
             dateStatus = dateStatus,
             status = resolvedStatus,
+            scheduleVersion = scanDraft?.scheduleVersion ?: existing?.scheduleVersion ?: 1,
+            scheduleEffectiveDateIso = scanDraft?.scheduleEffectiveDateIso ?: existing?.scheduleEffectiveDateIso,
+            obligationRole = resolvedObligationRole,
+            parentDebtId = linkedParentDebtId,
             isManuallyEntered = true,
             notes = combinedNotes
           )
 
           if (isScanReview && onSaveImported != null) {
             val scheduleEntities = editableScheduleRows.mapIndexed { idx, rowState ->
-              val isPaidRow = rowState.status == ExtractedInstallmentStatus.PAID
+              val isPaidRow = rowState.status.isSettledPaid
               val rowAmt = MoneyFormatter.parsePesoToCents(rowState.amountText)?.coerceAtLeast(0L) ?: 0L
               val rowDateStatus = when {
                 rowState.dueDateIso.isNullOrBlank() -> DueDateStatus.UNKNOWN
                 dateStatus == DueDateStatus.CONFIRMED -> DueDateStatus.CONFIRMED
                 else -> rowState.dateStatus
               }
+              val mappedStatus = when (rowState.status) {
+                ExtractedInstallmentStatus.PAID -> InstallmentStatus.PAID
+                ExtractedInstallmentStatus.PARTIALLY_PAID -> InstallmentStatus.PARTIAL
+                ExtractedInstallmentStatus.OVERDUE -> InstallmentStatus.OVERDUE
+                ExtractedInstallmentStatus.PENDING -> InstallmentStatus.PENDING
+                ExtractedInstallmentStatus.UNPAID -> InstallmentStatus.UNPAID
+                ExtractedInstallmentStatus.REFUNDED -> InstallmentStatus.REFUNDED
+                ExtractedInstallmentStatus.REVERSED -> InstallmentStatus.REVERSED
+                ExtractedInstallmentStatus.DISPUTED -> InstallmentStatus.DISPUTED
+                ExtractedInstallmentStatus.UNKNOWN -> InstallmentStatus.UNKNOWN
+                ExtractedInstallmentStatus.UPCOMING -> InstallmentStatus.UPCOMING
+              }
               InstallmentEntity(
                 debtId = 0L,
-                installmentNumber = idx + 1,
+                installmentNumber = rowState.installmentNumberHint ?: (idx + 1),
                 dueDate = rowState.dueDateIso,
                 amountDueCents = rowAmt,
                 paidAmountCents = if (isPaidRow) rowAmt else 0L,
                 dateStatus = rowDateStatus,
-                status = if (isPaidRow) InstallmentStatus.PAID else InstallmentStatus.UPCOMING,
+                status = mappedStatus,
                 paidDate = if (isPaidRow) rowState.dueDateIso else null,
+                scheduleVersion = scanDraft?.scheduleVersion ?: 1,
+                rawStatusLabel = rowState.rawStatusLabel,
                 isManuallyEntered = true,
                 notes = if (rowState.status == ExtractedInstallmentStatus.OVERDUE) {
                   "Imported as overdue"
@@ -2348,6 +2676,20 @@ private data class ExplanationSheetTarget(
   val alternatives: List<ExplanationAlternativeUi>
 )
 
+private fun <T> effectiveScanField(
+  field: ExtractedField<T>,
+  currentText: String,
+  initialText: String
+): ExtractedField<T> =
+  if (currentText.trim() != initialText.trim() && currentText.isNotBlank()) {
+    field.copy(
+      origin = FieldOrigin.MANUALLY_CORRECTED,
+      verificationReason = "Edited by you during review."
+    )
+  } else {
+    field
+  }
+
 private fun <T> buildExplanationTarget(
   title: String,
   field: ExtractedField<T>,
@@ -2359,6 +2701,8 @@ private fun <T> buildExplanationTarget(
     FieldOrigin.EXTRACTED -> "Directly read from the uploaded screenshot text."
     FieldOrigin.CALCULATED -> "Calculated mathematically from other extracted values."
     FieldOrigin.ESTIMATED -> "Estimated from surrounding dates, payment rows, or patterns."
+    FieldOrigin.MANUALLY_CORRECTED -> "Edited by you during review."
+    FieldOrigin.NEEDS_REVIEW -> "Detected with uncertainty or conflict — verify before saving."
     FieldOrigin.NOT_DETECTED -> "Not clearly found in the uploaded screenshots."
   }
   val alts = field.alternatives.map { alt ->
@@ -2406,6 +2750,8 @@ private fun FieldExplanationDialog(
             FieldOrigin.EXTRACTED -> BadgeTone.NEUTRAL
             FieldOrigin.CALCULATED -> BadgeTone.PRIMARY
             FieldOrigin.ESTIMATED -> BadgeTone.WARNING
+            FieldOrigin.MANUALLY_CORRECTED -> BadgeTone.POSITIVE
+            FieldOrigin.NEEDS_REVIEW -> BadgeTone.DANGER
             FieldOrigin.NOT_DETECTED -> BadgeTone.NEUTRAL
           }
           StatusBadge(text = target.origin.badgeLabel, tone = originTone)
@@ -2520,6 +2866,7 @@ private data class EditableScheduleRowState(
   val dateConfidence: ExtractionConfidence,
   val amountText: String,
   val status: ExtractedInstallmentStatus,
+  val rawStatusLabel: String? = null,
   val sourceSnippet: String,
   val screenshotIndex: Int,
   val verificationNote: String?
@@ -2548,6 +2895,7 @@ private data class EditableScheduleRowState(
       dateConfidence = row.dateConfidence,
       amountText = MoneyFormatter.formatEditableAmount(row.amountCents),
       status = row.status,
+      rawStatusLabel = row.status.takeIf { it != ExtractedInstallmentStatus.UNKNOWN }?.label,
       sourceSnippet = row.sourceSnippet,
       screenshotIndex = row.screenshotIndex,
       verificationNote = row.verificationNote
@@ -2602,11 +2950,15 @@ private fun <T> ScanFieldCaption(
 
   if (field.origin == FieldOrigin.NOT_DETECTED) return
 
-  val needsVerify = field.hasConflict || field.confidence == ExtractionConfidence.LOW
+  val needsVerify = field.hasConflict ||
+    field.confidence == ExtractionConfidence.LOW ||
+    field.origin == FieldOrigin.NEEDS_REVIEW
   val highlightReview = !needsVerify && field.confidence == ExtractionConfidence.MEDIUM
   val originTag = when (field.origin) {
     FieldOrigin.CALCULATED -> "Calculated"
     FieldOrigin.ESTIMATED -> "Estimated"
+    FieldOrigin.MANUALLY_CORRECTED -> "Edited"
+    FieldOrigin.NEEDS_REVIEW -> "Needs review"
     FieldOrigin.EXTRACTED -> field.sourceScreenshotIndex?.let { "From #${it + 1}" } ?: "Extracted"
     FieldOrigin.NOT_DETECTED -> "Not detected"
   }
@@ -2687,6 +3039,120 @@ private fun <T> ScanFieldCaption(
           fontWeight = FontWeight.SemiBold,
           color = MaterialTheme.colorScheme.primary
         )
+      }
+    }
+  }
+}
+
+@Composable
+private fun RevolvingCreditReviewCard(
+  creditLimitText: String,
+  onCreditLimitChange: (String) -> Unit,
+  availableCreditText: String,
+  onAvailableCreditChange: (String) -> Unit,
+  usedCreditText: String,
+  onUsedCreditChange: (String) -> Unit,
+  statementBalanceText: String,
+  onStatementBalanceChange: (String) -> Unit,
+  minimumDueText: String,
+  onMinimumDueChange: (String) -> Unit,
+  onApplyAsRemainingBalance: (Long) -> Unit
+) {
+  val semantic = LocalBaonColors.current
+  val parsedStatement = MoneyFormatter.parsePesoToCents(statementBalanceText)
+  val parsedUsed = MoneyFormatter.parsePesoToCents(usedCreditText)
+
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    border = BorderStroke(1.dp, semantic.divider),
+    modifier = Modifier.fillMaxWidth()
+  ) {
+    Column(
+      modifier = Modifier.padding(12.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+      Text(
+        text = "Credit line & statement figures",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface
+      )
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+          value = creditLimitText,
+          onValueChange = onCreditLimitChange,
+          label = { Text("Credit limit") },
+          prefix = { Text("₱") },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+          singleLine = true,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.weight(1f)
+        )
+        OutlinedTextField(
+          value = availableCreditText,
+          onValueChange = onAvailableCreditChange,
+          label = { Text("Available credit") },
+          prefix = { Text("₱") },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+          singleLine = true,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.weight(1f)
+        )
+      }
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+          value = statementBalanceText,
+          onValueChange = onStatementBalanceChange,
+          label = { Text("Statement bal.") },
+          prefix = { Text("₱") },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+          singleLine = true,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.weight(1f)
+        )
+        OutlinedTextField(
+          value = minimumDueText,
+          onValueChange = onMinimumDueChange,
+          label = { Text("Minimum due") },
+          prefix = { Text("₱") },
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+          singleLine = true,
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier.weight(1f)
+        )
+      }
+      OutlinedTextField(
+        value = usedCreditText,
+        onValueChange = onUsedCreditChange,
+        label = { Text("Used / outstanding credit") },
+        prefix = { Text("₱") },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        singleLine = true,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth()
+      )
+      if (parsedStatement != null || parsedUsed != null) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          if (parsedStatement != null) {
+            FilledTonalButton(
+              onClick = { onApplyAsRemainingBalance(parsedStatement) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use statement bal.", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+          if (parsedUsed != null && parsedUsed != parsedStatement) {
+            OutlinedButton(
+              onClick = { onApplyAsRemainingBalance(parsedUsed) },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              shape = RoundedCornerShape(8.dp)
+            ) {
+              Text("Use used credit", style = MaterialTheme.typography.labelSmall)
+            }
+          }
+        }
       }
     }
   }
@@ -2904,7 +3370,10 @@ private fun ScheduleRowEditorCard(
         listOf(
           ExtractedInstallmentStatus.PAID to "Paid",
           ExtractedInstallmentStatus.UPCOMING to "Upcoming",
-          ExtractedInstallmentStatus.OVERDUE to "Overdue"
+          ExtractedInstallmentStatus.OVERDUE to "Overdue",
+          ExtractedInstallmentStatus.PENDING to "Pending",
+          ExtractedInstallmentStatus.REFUNDED to "Refunded",
+          ExtractedInstallmentStatus.UNKNOWN to "Unknown"
         ).forEach { (st, lbl) ->
           FilterChip(
             selected = rowState.status == st,
@@ -2975,7 +3444,11 @@ fun GenerateScheduleDialog(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var frequency by remember {
     mutableStateOf(
-      if (debt.frequency == RepaymentFrequency.UNKNOWN || debt.frequency == RepaymentFrequency.IRREGULAR) {
+      if (debt.frequency == RepaymentFrequency.UNKNOWN ||
+        debt.frequency == RepaymentFrequency.IRREGULAR ||
+        debt.frequency == RepaymentFrequency.TWICE_MONTHLY ||
+        debt.frequency == RepaymentFrequency.ONE_TIME
+      ) {
         RepaymentFrequency.WEEKLY
       } else {
         debt.frequency

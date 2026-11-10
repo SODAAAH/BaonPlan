@@ -5,14 +5,25 @@ import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.ExpenseCategory
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.ObligationRole
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.model.ReserveStatus
 import com.baonplan.finance.domain.model.ReserveType
 import com.baonplan.finance.domain.model.TransactionType
 
 class RoomConverters {
+  @TypeConverter fun fromLoanProductClassification(v: LoanProductClassification): String = v.name
+  @TypeConverter fun toLoanProductClassification(v: String): LoanProductClassification =
+    runCatching { LoanProductClassification.valueOf(v) }.getOrDefault(LoanProductClassification.UNKNOWN)
+
+  @TypeConverter fun fromObligationRole(v: ObligationRole): String = v.name
+  @TypeConverter fun toObligationRole(v: String): ObligationRole =
+    runCatching { ObligationRole.valueOf(v) }.getOrDefault(ObligationRole.STANDALONE)
+
   @TypeConverter fun fromRepaymentFrequency(v: RepaymentFrequency): String = v.name
-  @TypeConverter fun toRepaymentFrequency(v: String): RepaymentFrequency = RepaymentFrequency.valueOf(v)
+  @TypeConverter fun toRepaymentFrequency(v: String): RepaymentFrequency =
+    runCatching { RepaymentFrequency.valueOf(v) }.getOrDefault(RepaymentFrequency.UNKNOWN)
 
   @TypeConverter fun fromDueDateStatus(v: DueDateStatus): String = v.name
   @TypeConverter fun toDueDateStatus(v: String): DueDateStatus = DueDateStatus.valueOf(v)
@@ -21,7 +32,8 @@ class RoomConverters {
   @TypeConverter fun toDebtStatus(v: String): DebtStatus = DebtStatus.valueOf(v)
 
   @TypeConverter fun fromInstallmentStatus(v: InstallmentStatus): String = v.name
-  @TypeConverter fun toInstallmentStatus(v: String): InstallmentStatus = InstallmentStatus.valueOf(v)
+  @TypeConverter fun toInstallmentStatus(v: String): InstallmentStatus =
+    runCatching { InstallmentStatus.valueOf(v) }.getOrDefault(InstallmentStatus.UNKNOWN)
 
   @TypeConverter fun fromTransactionType(v: TransactionType): String = v.name
   @TypeConverter fun toTransactionType(v: String): TransactionType = TransactionType.valueOf(v)

@@ -35,7 +35,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDate
-import kotlin.math.ceil
 
 data class RetainedAttachmentSource(
   val sourceFile: File,
@@ -516,7 +515,7 @@ class BaonPlanRepository(
   ): Long {
     val now = ManilaTime.nowMillis()
     val firstUnpaidDated = scheduleRows
-      .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+      .filter { it.status.isPayableInstallment }
       .firstOrNull { !it.dueDate.isNullOrBlank() }
 
     val resolvedNextDue = debt.nextDueDate ?: firstUnpaidDated?.dueDate
@@ -543,7 +542,8 @@ class BaonPlanRepository(
             row.copy(
               id = 0L,
               debtId = debtId,
-              installmentNumber = idx + 1,
+              installmentNumber = row.installmentNumber.takeIf { it > 0 } ?: (idx + 1),
+              scheduleVersion = row.scheduleVersion.coerceAtLeast(normalizedDebt.scheduleVersion),
               linkedTransactionId = null,
               isManuallyEntered = true
             )
@@ -700,11 +700,15 @@ class BaonPlanRepository(
       debtDao.update(updatedDebt)
 
       val existing = installmentDao.getByDebtId(debtId)
-      val unpaid = existing.filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
-      if (generateFullSchedule && updatedDebt.frequency != RepaymentFrequency.UNKNOWN && updatedDebt.frequency != RepaymentFrequency.IRREGULAR) {
+      val unpaid = existing.filter { it.status.isPayableInstallment }
+      if (generateFullSchedule &&
+        updatedDebt.frequency != RepaymentFrequency.UNKNOWN &&
+        updatedDebt.frequency != RepaymentFrequency.IRREGULAR &&
+        updatedDebt.frequency != RepaymentFrequency.TWICE_MONTHLY
+      ) {
         val count = updatedDebt.remainingInstallmentsCount.takeIf { it > 0 }
           ?: if (updatedDebt.installmentAmountCents > 0L) {
-            ceil(updatedDebt.remainingBalanceCents.toDouble() / updatedDebt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+            MoneyFormatter.divideCentsCeil(updatedDebt.remainingBalanceCents, updatedDebt.installmentAmountCents).toInt().coerceAtLeast(1)
           } else 1
         val specs = FinancialCalculator.generateInstallmentSchedule(
           startDate = confirmedDate,
@@ -769,7 +773,10 @@ class BaonPlanRepository(
     dateStatus: DueDateStatus
   ): Boolean {
     val startDate = ManilaTime.parseDate(startDateIso) ?: return false
-    if (frequency == RepaymentFrequency.UNKNOWN || frequency == RepaymentFrequency.IRREGULAR) return false
+    if (frequency == RepaymentFrequency.UNKNOWN ||
+      frequency == RepaymentFrequency.IRREGULAR ||
+      frequency == RepaymentFrequency.TWICE_MONTHLY
+    ) return false
     return db.withTransaction {
       val debt = debtDao.getById(debtId) ?: return@withTransaction false
       val specs = FinancialCalculator.generateInstallmentSchedule(
@@ -849,7 +856,7 @@ class BaonPlanRepository(
   ): Long? {
     return db.withTransaction {
       val inst = installmentDao.getById(installmentId) ?: return@withTransaction null
-      if (inst.status == InstallmentStatus.PAID) return@withTransaction null
+      if (!inst.status.isPayableInstallment) return@withTransaction null
       val remainingDue = (inst.amountDueCents - inst.paidAmountCents).coerceAtLeast(0L)
       if (remainingDue <= 0L) return@withTransaction null
       recordRepaymentInternal(
@@ -919,9 +926,7 @@ class BaonPlanRepository(
 
     // Apply payment cleanly to pending installments
     val allInst = installmentDao.getByDebtId(debtId)
-    val pendingInst = allInst.filter {
-      it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-    }
+    val pendingInst = allInst.filter { it.status.isPayableInstallment }
     val orderedPending = if (targetInstallmentId != null) {
       val target = pendingInst.firstOrNull { it.id == targetInstallmentId }
       if (target != null) listOf(target) + pendingInst.filter { it.id != targetInstallmentId } else pendingInst
@@ -955,20 +960,18 @@ class BaonPlanRepository(
     val newStatus = if (newRemainingBalance == 0L) DebtStatus.PAID else debt.status
 
     val updatedInstallments = installmentDao.getByDebtId(debtId)
-    val nextUnpaid = updatedInstallments.firstOrNull {
-      it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-    }
+    val nextUnpaid = updatedInstallments.firstOrNull { it.status.isPayableInstallment }
 
     val nextRemainingInstallments = when {
       newRemainingBalance == 0L -> 0
-      updatedInstallments.any { it.status != InstallmentStatus.PAID } &&
-        updatedInstallments.count { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL } >= debt.remainingInstallmentsCount ->
-        updatedInstallments.count { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+      updatedInstallments.any { it.status.isPayableInstallment } &&
+        updatedInstallments.count { it.status.isPayableInstallment } >= debt.remainingInstallmentsCount ->
+        updatedInstallments.count { it.status.isPayableInstallment }
       debt.remainingInstallmentsCount > 0 -> {
         if (completedInstCount > 0) {
           (debt.remainingInstallmentsCount - completedInstCount).coerceAtLeast(1)
         } else if (debt.installmentAmountCents > 0L) {
-          ceil(newRemainingBalance.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+          MoneyFormatter.divideCentsCeil(newRemainingBalance, debt.installmentAmountCents).toInt().coerceAtLeast(1)
         } else {
           debt.remainingInstallmentsCount
         }
@@ -985,7 +988,11 @@ class BaonPlanRepository(
     } else if (nextUnpaid != null) {
       newNextDueDate = nextUnpaid.dueDate
       newDateStatus = nextUnpaid.dateStatus
-    } else if (debt.nextDueDate != null && debt.frequency != RepaymentFrequency.UNKNOWN && debt.frequency != RepaymentFrequency.IRREGULAR) {
+    } else if (debt.nextDueDate != null &&
+      debt.frequency != RepaymentFrequency.UNKNOWN &&
+      debt.frequency != RepaymentFrequency.IRREGULAR &&
+      debt.frequency != RepaymentFrequency.TWICE_MONTHLY
+    ) {
       val parsedCurrent = ManilaTime.parseDate(debt.nextDueDate)
       val advanced = if (parsedCurrent != null && (completedInstCount > 0 || appliedPayment >= debt.installmentAmountCents)) {
         ManilaTime.advanceDate(parsedCurrent, debt.frequency, debt.customIntervalDays)
@@ -1072,12 +1079,8 @@ class BaonPlanRepository(
               }
 
               val allInstAfterRevert = installmentDao.getByDebtId(debt.id)
-              val firstUnpaidAfterRevert = allInstAfterRevert.firstOrNull {
-                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-              }
-              val unpaidCountAfterRevert = allInstAfterRevert.count {
-                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-              }
+              val firstUnpaidAfterRevert = allInstAfterRevert.firstOrNull { it.status.isPayableInstallment }
+              val unpaidCountAfterRevert = allInstAfterRevert.count { it.status.isPayableInstallment }
 
               val restoredRemaining = debt.remainingBalanceCents + tx.amountCents
               val restoredTracked = (debt.trackedPaidCents - tx.amountCents).coerceAtLeast(0L)
@@ -1089,7 +1092,7 @@ class BaonPlanRepository(
               val restoredInstallmentCount = when {
                 unpaidCountAfterRevert > 0 -> unpaidCountAfterRevert
                 debt.installmentAmountCents > 0L && restoredRemaining > 0L ->
-                  ceil(restoredRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+                  MoneyFormatter.divideCentsCeil(restoredRemaining, debt.installmentAmountCents).toInt().coerceAtLeast(1)
                 else -> debt.remainingInstallmentsCount
               }
               val restoredNextDueDate = firstUnpaidAfterRevert?.dueDate ?: debt.nextDueDate
@@ -1186,9 +1189,7 @@ class BaonPlanRepository(
                   toRevert -= revertAmt
                 }
               } else if (delta > 0L) {
-                val pending = allInstBefore.filter {
-                  it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-                }
+                val pending = allInstBefore.filter { it.status.isPayableInstallment }
                 val ordered = if (tx.installmentId != null) {
                   val target = pending.firstOrNull { it.id == tx.installmentId }
                   if (target != null) listOf(target) + pending.filter { it.id != tx.installmentId } else pending
@@ -1225,12 +1226,8 @@ class BaonPlanRepository(
               }
 
               val allInstAfter = installmentDao.getByDebtId(debt.id)
-              val firstUnpaid = allInstAfter.firstOrNull {
-                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-              }
-              val unpaidCount = allInstAfter.count {
-                it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL
-              }
+              val firstUnpaid = allInstAfter.firstOrNull { it.status.isPayableInstallment }
+              val unpaidCount = allInstAfter.count { it.status.isPayableInstallment }
 
               val newTracked = (debt.trackedPaidCents + delta).coerceAtLeast(0L)
               val newRemaining = (debt.remainingBalanceCents - delta).coerceAtLeast(0L)
@@ -1243,7 +1240,7 @@ class BaonPlanRepository(
                 newRemaining == 0L -> 0
                 allInstAfter.isNotEmpty() -> unpaidCount
                 debt.installmentAmountCents > 0L ->
-                  ceil(newRemaining.toDouble() / debt.installmentAmountCents.toDouble()).toInt().coerceAtLeast(1)
+                  MoneyFormatter.divideCentsCeil(newRemaining, debt.installmentAmountCents).toInt().coerceAtLeast(1)
                 else -> debt.remainingInstallmentsCount
               }
               val newNextDueDate: String?

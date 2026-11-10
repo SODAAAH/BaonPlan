@@ -211,6 +211,8 @@ private fun DebtRow(
   // Strictly at most ONE concise status tag per row
   val statusHint: Pair<String, BadgeTone>? = when {
     debt.status == DebtStatus.PAID -> "Paid" to BadgeTone.POSITIVE
+    debt.parentDebtId != null && !debt.obligationRole.countsInTotalDebt ->
+      "Linked · excluded from total" to BadgeTone.NEUTRAL
     debt.status == DebtStatus.ACTIVE && debt.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION ->
       "Estimated date" to BadgeTone.WARNING
     debt.status == DebtStatus.ACTIVE && debt.dateStatus == DueDateStatus.UNCONFIRMED ->

@@ -3,12 +3,14 @@ package com.baonplan.finance.domain.ocr
 import com.baonplan.finance.data.local.entity.DebtEntity
 import com.baonplan.finance.data.local.entity.InstallmentEntity
 import com.baonplan.finance.domain.model.DebtStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
 import java.util.Locale
 import kotlin.math.abs
 
 /**
  * Pure Kotlin duplicate detector comparing a candidate import draft against existing Room records.
- * Avoids false positives for distinct loans from the same lender (e.g., two separate Shopee orders).
+ * Avoids false positives for distinct loans from the same lender (e.g., two separate Shopee orders
+ * or SLoan vs SPayLater on the same app).
  */
 object DebtDuplicateDetector {
 
@@ -21,7 +23,10 @@ object DebtDuplicateDetector {
     existingDebts: List<DebtEntity>,
     existingInstallments: List<InstallmentEntity>
   ): List<DuplicateDebtMatch> {
-    val targetBalance = draft.outstandingBalanceCents.value ?: draft.remainingInstallmentTotalCents.value
+    val targetBalance = draft.outstandingBalanceCents.value
+      ?: draft.remainingInstallmentTotalCents.value
+      ?: draft.statementBalanceCents.value
+      ?: draft.usedCreditCents.value
     val targetPrincipal = draft.originalPrincipalCents.value
     val targetInstallment = draft.installmentAmountCents.value
     val targetNextDate = draft.nextDueDateIso.value
@@ -31,6 +36,7 @@ object DebtDuplicateDetector {
       lender = draft.lender.value,
       loanName = draft.loanName.value,
       loanReferenceId = draft.loanReferenceId.value,
+      productClassification = draft.productClassification.value ?: LoanProductClassification.UNKNOWN,
       remainingBalanceCents = targetBalance,
       originalPrincipalCents = targetPrincipal,
       installmentAmountCents = targetInstallment,
@@ -51,7 +57,8 @@ object DebtDuplicateDetector {
     nextDueDateIso: String?,
     scheduleDates: Set<String> = emptySet(),
     existingDebts: List<DebtEntity>,
-    existingInstallments: List<InstallmentEntity>
+    existingInstallments: List<InstallmentEntity>,
+    productClassification: LoanProductClassification = LoanProductClassification.UNKNOWN
   ): List<DuplicateDebtMatch> {
     if (existingDebts.isEmpty()) return emptyList()
     val installmentsByDebt = existingInstallments.groupBy { it.debtId }
@@ -63,6 +70,14 @@ object DebtDuplicateDetector {
 
     for (existing in existingDebts) {
       if (existing.status == DebtStatus.ARCHIVED) continue
+
+      // Distinct product classifications on the same app (e.g. SLoan vs SPayLater) are not duplicates
+      if (productClassification != LoanProductClassification.UNKNOWN &&
+        existing.productClassification != LoanProductClassification.UNKNOWN &&
+        productClassification != existing.productClassification
+      ) {
+        continue
+      }
 
       var score = 0
       val reasons = mutableListOf<String>()
@@ -77,8 +92,9 @@ object DebtDuplicateDetector {
       }
 
       if (normRef.length >= 3) {
+        val exRef = normalize(existing.loanReferenceId.orEmpty())
         val exNameAndNotes = normalize("${existing.name} ${existing.notes}")
-        if (exNameAndNotes.contains(normRef)) {
+        if ((exRef.isNotEmpty() && exRef == normRef) || exNameAndNotes.contains(normRef)) {
           score += 5
           nonLenderFinancialOrDateSignals++
           reasons.add("Matches reference #$loanReferenceId")

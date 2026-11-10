@@ -36,7 +36,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
-import com.baonplan.finance.domain.model.InstallmentStatus
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -59,7 +58,11 @@ fun ReportsScreen(
 ) {
   val semantic = LocalBaonColors.current
   val palette = semantic.chartPalette
-  val activeDebts = state.debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
+  val activeDebts = state.debts.filter {
+    it.status == DebtStatus.ACTIVE &&
+      it.remainingBalanceCents > 0L &&
+      com.baonplan.finance.domain.FinancialCalculator.countsTowardTotalDebt(it)
+  }
   val totalActive = state.totalActiveDebtCents
   val progress = state.repaymentProgress
   val weekly = state.weeklySummary
@@ -67,7 +70,7 @@ fun ReportsScreen(
   val installmentsByDebt = state.installments.groupBy { it.debtId }
   val unconfirmedOrUnknown = activeDebts.filter { debt ->
     val unpaidRows = installmentsByDebt[debt.id].orEmpty()
-      .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+      .filter { it.status.isPayableInstallment }
     val allUnpaidRowsDated = unpaidRows.isNotEmpty() && unpaidRows.all {
       ManilaTime.parseDate(it.dueDate) != null &&
         (it.dateStatus == DueDateStatus.CONFIRMED || it.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
@@ -76,6 +79,7 @@ fun ReportsScreen(
       (unpaidRows.isNotEmpty() && !allUnpaidRowsDated) ||
       (unpaidRows.isEmpty() && (
         debt.frequency == RepaymentFrequency.IRREGULAR ||
+          debt.frequency == RepaymentFrequency.TWICE_MONTHLY ||
           debt.dateStatus == DueDateStatus.UNCONFIRMED ||
           debt.dateStatus == DueDateStatus.UNKNOWN
         ))

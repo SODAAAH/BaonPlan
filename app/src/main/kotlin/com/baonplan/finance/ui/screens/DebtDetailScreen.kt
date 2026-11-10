@@ -72,6 +72,7 @@ import com.baonplan.finance.domain.FinancialCalculator
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
 import com.baonplan.finance.domain.model.InstallmentStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -182,10 +183,16 @@ fun DebtDetailScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
           ) {
+            val typeSub = if (debt.productClassification != LoanProductClassification.UNKNOWN) {
+              debt.productClassification.label
+            } else {
+              debt.category
+            }
             Text(
-              text = "${debt.lender} · ${debt.category}",
+              text = "${debt.lender} · $typeSub",
               style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
             StatusBadge(
               text = debt.status.label,
@@ -194,6 +201,13 @@ fun DebtDetailScreen(
                 DebtStatus.ARCHIVED -> BadgeTone.NEUTRAL
                 DebtStatus.ACTIVE -> BadgeTone.PRIMARY
               }
+            )
+          }
+          if (debt.parentDebtId != null && !debt.obligationRole.countsInTotalDebt) {
+            Spacer(modifier = Modifier.height(6.dp))
+            StatusBadge(
+              text = "Linked to parent account · excluded from total debt",
+              tone = BadgeTone.NEUTRAL
             )
           }
           Spacer(modifier = Modifier.height(10.dp))
@@ -348,6 +362,23 @@ fun DebtDetailScreen(
               label = "Remaining balance",
               value = MoneyFormatter.formatPeso(breakdown.remainingBalanceCents)
             )
+            if (debt.creditLimitCents != null || debt.availableCreditCents != null ||
+              debt.statementBalanceCents != null || debt.minimumDueCents != null
+            ) {
+              CalmDivider()
+              debt.creditLimitCents?.let {
+                MetricRow(label = "Credit limit", value = MoneyFormatter.formatPeso(it), boldValue = false)
+              }
+              debt.availableCreditCents?.let {
+                MetricRow(label = "Available credit", value = MoneyFormatter.formatPeso(it), boldValue = false)
+              }
+              debt.statementBalanceCents?.let {
+                MetricRow(label = "Statement balance", value = MoneyFormatter.formatPeso(it), boldValue = false)
+              }
+              debt.minimumDueCents?.let {
+                MetricRow(label = "Minimum due", value = MoneyFormatter.formatPeso(it), boldValue = false)
+              }
+            }
             if (debt.notes.isNotBlank()) {
               CalmDivider()
               Text(
@@ -434,7 +465,8 @@ fun DebtDetailScreen(
                       text = inst.status.label,
                       tone = when (inst.status) {
                         InstallmentStatus.PAID -> BadgeTone.POSITIVE
-                        InstallmentStatus.PARTIAL -> BadgeTone.WARNING
+                        InstallmentStatus.OVERDUE -> BadgeTone.DANGER
+                        InstallmentStatus.PARTIAL, InstallmentStatus.DISPUTED -> BadgeTone.WARNING
                         else -> BadgeTone.NEUTRAL
                       }
                     )
@@ -455,7 +487,7 @@ fun DebtDetailScreen(
                   }
                   if (debt.status == DebtStatus.ACTIVE &&
                     debt.remainingBalanceCents > 0L &&
-                    inst.status != InstallmentStatus.PAID
+                    inst.status.isPayableInstallment
                   ) {
                     TextButton(
                       onClick = { onMarkInstallmentPaid(inst) },

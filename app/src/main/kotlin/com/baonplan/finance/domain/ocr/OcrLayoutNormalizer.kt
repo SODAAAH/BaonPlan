@@ -33,10 +33,16 @@ data class NormalizedOcrRow(
   val averageConfidence: Float? = null
 )
 
+data class NormalizedPageResult(
+  val rows: List<NormalizedOcrRow>,
+  val audits: List<TextCorrectionAudit>
+)
+
 /**
  * Reconstructs logical horizontal rows and 2D cells from OCR bounding boxes so
- * split-column, metric-grid, hero-above-label, and separated currency tokens
- * (e.g. "₱ | 1,087.38") are paired accurately.
+ * split-column, metric-grid, hero-above-label, right-aligned status pills, and
+ * separated currency tokens (e.g. "₱ | 1,087.38") are paired accurately while
+ * recording every glyph/emblem repair in [TextCorrectionAudit].
  */
 object OcrLayoutNormalizer {
 
@@ -54,24 +60,54 @@ object OcrLayoutNormalizer {
   )
 
   private val financialGuardRegex = Regex(
-    """\b(?:loan|balance|due|installment|repayment|principal|amount|paid|interest|fee|spay|sloan|gloan|ggives|billease|maya|tala|atome|juanhand|peso|php)\b|₱""",
+    """\b(?:loan|balance|due|installment|repayment|principal|amount|paid|interest|fee|spay|sloan|gloan|ggives|billease|maya|tala|atome|juanhand|skyro|cimb|home\s*credit|peso|php)\b|₱""",
     RegexOption.IGNORE_CASE
   )
 
-  fun normalize(page: OcrDocumentPage): List<NormalizedOcrRow> {
-    val sanitized = page.lines
+  // Leading circular logo / icon OCR noise such as "G))", "(G)", "[G]", "G)", "©", "®", "◉", "•"
+  private val leadingEmblemNoiseRegex = Regex(
+    """^(?:G\){1,3}|[({\[]\s*[A-Za-z0-9•●◉©®]\s*[)}\]]|[©®•●◉▪▫◆◇▶►]+)\s+(?=(?:₱|PHP|Php|P\d|[A-Z]))"""
+  )
+
+  // Trailing UI copy/chevron glyph noise after reference codes or rows
+  private val trailingUiGlyphRegex = Regex(
+    """\s+(?:\[\]|❐|⧉|📋|›|»|>)$"""
+  )
+
+  // Context-guarded peso prefix + numeric body (e.g. "P1,000.00", "F1,087.38", "£51.78", "₱1 087.38", "₱51,78")
+  private val currencyTokenRepairRegex = Regex(
+    """(?<![A-Za-z0-9])(₱|PHP|Php|PhP|Ph\.?|P\.?|F|£)\s*([0-9OolI]{1,3}(?:[,\s][0-9OolI]{3})+(?:[.,]\s?[0-9OolI]{1,2})?|[0-9OolI]{1,3}(?:\.[0-9OolI]{3})+(?:\.[0-9OolI]{2})|[0-9OolI]+(?:[.,]\s?[0-9OolI]{1,2})?)(?![\d%]|\.\d|,\d)"""
+  )
+
+  // Standalone numeric money/count tokens with O/I/l slips in numeric positions (e.g. "1,O87.38" or "2l")
+  private val standaloneNumericSlipRegex = Regex(
+    """(?<![A-Za-z0-9./-])([0-9]{1,3}(?:,[0-9OolI]{3})+(?:\.[0-9OolI]{2})?|[0-9]+[.,][0-9OolI]{2})(?![A-Za-z0-9%./-])"""
+  )
+
+  fun normalize(page: OcrDocumentPage): List<NormalizedOcrRow> =
+    normalizeWithAudits(page).rows
+
+  fun normalizeWithAudits(page: OcrDocumentPage): NormalizedPageResult {
+    val audits = mutableListOf<TextCorrectionAudit>()
+    val deduplicatedLines = deduplicateOverlappingLines(page.lines)
+
+    val sanitized = deduplicatedLines
       .map { line ->
-        line.copy(
-          text = sanitizeOcrGlyphs(line.text),
-          elements = line.elements.map { it.copy(text = sanitizeOcrGlyphs(it.text)) }
-        )
+        val cleanedLine = cleanAndAuditText(line.text, page.screenshotIndex, audits)
+        val cleanedElements = line.elements.map { el ->
+          el.copy(text = cleanAndAuditText(el.text, page.screenshotIndex, null))
+        }
+        line.copy(text = cleanedLine, elements = cleanedElements)
       }
       .filter { it.text.isNotBlank() }
-    if (sanitized.isEmpty()) return emptyList()
+
+    if (sanitized.isEmpty()) {
+      return NormalizedPageResult(emptyList(), audits.distinct())
+    }
 
     val boxedCount = sanitized.count { it.box != null && it.box.height > 0 && it.box.width > 0 }
     if (boxedCount < sanitized.size / 2 || boxedCount == 0) {
-      return sanitized.mapIndexed { idx, line ->
+      val rows = sanitized.mapIndexed { idx, line ->
         val trimmed = line.text.trim()
         val cols = mergeStandaloneCurrencyColumns(
           trimmed.split('|').map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf(trimmed) }
@@ -101,6 +137,7 @@ object OcrLayoutNormalizer {
           averageConfidence = line.confidence
         )
       }
+      return NormalizedPageResult(rows, audits.distinct())
     }
 
     val filtered = filterSystemChromeLines(sanitized, page.height)
@@ -147,9 +184,15 @@ object OcrLayoutNormalizer {
         }
         if (horizontallyStackedBelow) continue
 
-        // Support tall hero currency values aligned visually with a smaller adjacent caption line
-        val isCompatibleRowHeight = overlapRatio >= 0.38f ||
-          (centerDelta <= (medianHeight * 0.55f) && max(box.height, clusterHeight) <= medianHeight * 2.8f)
+        // Support tall hero currency values AND slightly offset right-aligned status pills ("paid", "overdue")
+        val isRightAlignedPill = isStatusPillToken(piece.text) &&
+          sampleBoxes.none { existing ->
+            val xOverlap = max(0, min(box.right, existing.right) - max(box.left, existing.left))
+            xOverlap > 0
+          }
+        val isCompatibleRowHeight = overlapRatio >= 0.35f ||
+          (centerDelta <= (medianHeight * 0.58f) && max(box.height, clusterHeight) <= medianHeight * 2.8f) ||
+          (isRightAlignedPill && centerDelta <= (medianHeight * 0.85f))
 
         if (isCompatibleRowHeight && centerDelta < bestScore) {
           bestScore = centerDelta
@@ -164,7 +207,7 @@ object OcrLayoutNormalizer {
       }
     }
 
-    return clusters.map { cluster ->
+    val normalizedRows = clusters.map { cluster ->
       val ordered = cluster.sortedBy { it.box?.left ?: 0 }
       val rawCells = ordered.mapNotNull { piece ->
         val t = piece.text.trim()
@@ -233,6 +276,154 @@ object OcrLayoutNormalizer {
         averageConfidence = avgConf
       )
     }.sortedWith(compareBy<NormalizedOcrRow> { it.top }.thenBy { it.left })
+
+    return NormalizedPageResult(normalizedRows, audits.distinct())
+  }
+
+  private fun deduplicateOverlappingLines(lines: List<OcrLine>): List<OcrLine> {
+    if (lines.size < 2) return lines
+    val kept = mutableListOf<OcrLine>()
+    for (candidate in lines) {
+      val cBox = candidate.box
+      if (cBox == null) {
+        kept.add(candidate)
+        continue
+      }
+      val duplicateIdx = kept.indexOfFirst { existing ->
+        val eBox = existing.box ?: return@indexOfFirst false
+        val interW = max(0, min(cBox.right, eBox.right) - max(cBox.left, eBox.left))
+        val interH = max(0, min(cBox.bottom, eBox.bottom) - max(cBox.top, eBox.top))
+        val interArea = interW.toLong() * interH.toLong()
+        if (interArea <= 0L) return@indexOfFirst false
+        val cArea = (cBox.width.toLong() * cBox.height.toLong()).coerceAtLeast(1L)
+        val eArea = (eBox.width.toLong() * eBox.height.toLong()).coerceAtLeast(1L)
+        val minArea = min(cArea, eArea)
+        val overlapFraction = interArea.toFloat() / minArea.toFloat()
+        overlapFraction > 0.72f &&
+          (existing.text.trim().equals(candidate.text.trim(), ignoreCase = true) ||
+            existing.text.contains(candidate.text.trim(), ignoreCase = true) ||
+            candidate.text.contains(existing.text.trim(), ignoreCase = true))
+      }
+      if (duplicateIdx == -1) {
+        kept.add(candidate)
+      } else {
+        val existing = kept[duplicateIdx]
+        if (candidate.text.trim().length > existing.text.trim().length) {
+          kept[duplicateIdx] = candidate
+        }
+      }
+    }
+    return kept
+  }
+
+  private fun cleanAndAuditText(
+    raw: String,
+    screenshotIndex: Int,
+    audits: MutableList<TextCorrectionAudit>?
+  ): String {
+    var current = sanitizeOcrGlyphs(raw).trim()
+    if (current.isEmpty()) return current
+    val originalSnapshot = current
+
+    // 1. Strip circular app-emblem noise ("G)) ₱1,000.00 GCash Cash Loan" -> "₱1,000.00 GCash Cash Loan")
+    val withoutEmblem = leadingEmblemNoiseRegex.replace(current, "")
+    if (withoutEmblem != current && withoutEmblem.isNotBlank()) {
+      audits?.add(
+        TextCorrectionAudit(
+          rawText = originalSnapshot,
+          normalizedText = withoutEmblem,
+          reason = "Removed circular app-icon OCR noise",
+          screenshotIndex = screenshotIndex
+        )
+      )
+      current = withoutEmblem
+    }
+
+    // 2. Strip trailing copy/chevron glyphs
+    val withoutTrailingGlyph = trailingUiGlyphRegex.replace(current, "")
+    if (withoutTrailingGlyph != current && withoutTrailingGlyph.isNotBlank()) {
+      current = withoutTrailingGlyph
+    }
+
+    // 3. Context-guarded peso prefix + numeric body normalization
+    val currencyRepaired = currencyTokenRepairRegex.replace(current) { match ->
+      val rawPrefix = match.groupValues[1]
+      val rawNum = match.groupValues[2]
+      val isAmbiguousSingleP = rawPrefix == "P" && rawNum.none { it == '.' || it == ',' } && rawNum.length <= 2
+      if (isAmbiguousSingleP) {
+        match.value
+      } else {
+        val normalizedPrefix = when {
+          rawPrefix == "₱" -> "₱"
+          rawPrefix.equals("PHP", ignoreCase = true) -> "PHP "
+          else -> "₱"
+        }
+        val normalizedNum = repairNumericAmountToken(rawNum)
+        "$normalizedPrefix$normalizedNum"
+      }
+    }
+    if (currencyRepaired != current) {
+      audits?.add(
+        TextCorrectionAudit(
+          rawText = current,
+          normalizedText = currencyRepaired,
+          reason = "Normalized peso currency/digit OCR glyphs",
+          screenshotIndex = screenshotIndex
+        )
+      )
+      current = currencyRepaired
+    }
+
+    // 4. Context-guarded standalone numeric token O/I/l repair (only when surrounded by digits/separators)
+    val numericRepaired = standaloneNumericSlipRegex.replace(current) { match ->
+      repairNumericAmountToken(match.groupValues[1])
+    }
+    if (numericRepaired != current) {
+      audits?.add(
+        TextCorrectionAudit(
+          rawText = current,
+          normalizedText = numericRepaired,
+          reason = "Repaired letter-for-digit OCR slip in numeric amount",
+          screenshotIndex = screenshotIndex
+        )
+      )
+      current = numericRepaired
+    }
+
+    return current.replace(Regex("""\s{2,}"""), " ").trim()
+  }
+
+  internal fun repairNumericAmountToken(rawToken: String): String {
+    var repaired = rawToken
+      .replace('O', '0')
+      .replace('o', '0')
+      .replace('l', '1')
+      .replace('I', '1')
+      .replace(Regex("""\s+"""), "")
+
+    // Comma decimal ("51,78" -> "51.78")
+    if (!repaired.contains('.') && repaired.count { it == ',' } == 1) {
+      val commaParts = repaired.split(',')
+      if (commaParts.size == 2 && commaParts[1].length == 2) {
+        repaired = "${commaParts[0]}.${commaParts[1]}"
+      }
+    }
+
+    // Double-dot thousands ("1.250.00" -> "1,250.00")
+    val dotParts = repaired.split('.')
+    if (dotParts.size >= 3 && dotParts.last().length == 2) {
+      repaired = dotParts.dropLast(1).joinToString(",") + "." + dotParts.last()
+    }
+
+    return repaired
+  }
+
+  private fun isStatusPillToken(text: String): Boolean {
+    val clean = text.trim().lowercase(Locale.US).trimEnd('✓', '✔', '!', '.')
+    return clean in setOf(
+      "paid", "settled", "completed", "upcoming", "unpaid",
+      "pending", "overdue", "past due", "refunded", "reversed", "disputed"
+    )
   }
 
   private data class LinePiece(
@@ -318,13 +509,10 @@ object OcrLayoutNormalizer {
         startsWithMoneyDigitsRegex.containsMatchIn(next.text.trim()) &&
         (next.left - curr.right) <= medianHeight * 3.5f
       ) {
-        val prefix = curr.text.trim()
-        val numText = next.text.trim()
-        val mergedText = if (prefix.length <= 2 || prefix.equals("PHP", ignoreCase = true)) {
-          "$prefix$numText"
-        } else {
-          "$prefix $numText"
-        }
+        val rawPrefix = curr.text.trim()
+        val prefix = if (rawPrefix.equals("PHP", ignoreCase = true)) "PHP" else "₱"
+        val numText = repairNumericAmountToken(next.text.trim())
+        val mergedText = if (prefix == "₱") "$prefix$numText" else "$prefix $numText"
         result.add(
           OcrCell(
             text = mergedText,
@@ -356,7 +544,8 @@ object OcrLayoutNormalizer {
         standaloneCurrencyPrefixRegex.matches(curr) &&
         startsWithMoneyDigitsRegex.containsMatchIn(next)
       ) {
-        out.add("$curr$next")
+        val prefix = if (curr.equals("PHP", ignoreCase = true)) "PHP " else "₱"
+        out.add("$prefix${repairNumericAmountToken(next)}")
         i += 2
       } else {
         out.add(curr)

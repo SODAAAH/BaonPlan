@@ -126,14 +126,19 @@ object ManilaTime {
     customIntervalDays: Int? = null
   ): LocalDate? {
     return when (frequency) {
+      RepaymentFrequency.DAILY -> fromDate.plusDays(1)
       RepaymentFrequency.WEEKLY -> fromDate.plusWeeks(1)
       RepaymentFrequency.EVERY_14_DAYS -> fromDate.plusDays(14)
       RepaymentFrequency.MONTHLY -> fromDate.plusMonths(1)
+      RepaymentFrequency.QUARTERLY -> fromDate.plusMonths(3)
       RepaymentFrequency.CUSTOM_DAYS -> {
         val days = customIntervalDays?.takeIf { it > 0 } ?: return null
         fromDate.plusDays(days.toLong())
       }
-      RepaymentFrequency.ONE_TIME, RepaymentFrequency.IRREGULAR, RepaymentFrequency.UNKNOWN -> null
+      RepaymentFrequency.TWICE_MONTHLY,
+      RepaymentFrequency.ONE_TIME,
+      RepaymentFrequency.IRREGULAR,
+      RepaymentFrequency.UNKNOWN -> null
     }
   }
 }

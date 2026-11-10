@@ -30,30 +30,42 @@ import com.baonplan.finance.domain.model.WeeklyBudgetSummary
 import com.baonplan.finance.domain.model.WeeklyDuesReadiness
 import com.baonplan.finance.domain.model.WeeklyTrendPoint
 import com.baonplan.finance.domain.util.ManilaTime
+import com.baonplan.finance.domain.util.MoneyFormatter
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
-import kotlin.math.ceil
 
 object FinancialCalculator {
 
+  /**
+   * Returns true when this debt record represents an independent liability rather than a
+   * linked statement or converted installment plan whose underlying obligation is already tracked.
+   */
+  fun countsTowardTotalDebt(debt: DebtEntity): Boolean =
+    debt.obligationRole.countsInTotalDebt || debt.parentDebtId == null
+
   fun calculateTotalActiveDebt(debts: List<DebtEntity>): Long =
-    debts.filter { it.status == DebtStatus.ACTIVE }
-      .sumOf { it.remainingBalanceCents.coerceAtLeast(0L) }
+    MoneyFormatter.sumCentsExact(
+      debts.filter { it.status == DebtStatus.ACTIVE && countsTowardTotalDebt(it) }
+        .map { it.remainingBalanceCents.coerceAtLeast(0L) }
+    )
 
   fun calculateRepaymentProgress(debts: List<DebtEntity>): RepaymentProgressSummary {
-    val active = debts.filter { it.status == DebtStatus.ACTIVE }
-    val completed = debts.filter { it.status == DebtStatus.PAID }
-    val archived = debts.filter { it.status == DebtStatus.ARCHIVED }
+    val primaryDebts = debts.filter { countsTowardTotalDebt(it) }
+    val active = primaryDebts.filter { it.status == DebtStatus.ACTIVE }
+    val completed = primaryDebts.filter { it.status == DebtStatus.PAID }
+    val archived = primaryDebts.filter { it.status == DebtStatus.ARCHIVED }
 
-    val totalActiveDebt = active.sumOf { it.remainingBalanceCents.coerceAtLeast(0L) }
-    val completedOriginal = completed.sumOf {
-      (it.totalScheduledRepaymentCents ?: it.originalPrincipalCents ?: it.priorPaidCents)
-        .coerceAtLeast(0L)
-    }
-    val trackedRepaidOnActive = active.sumOf { it.trackedPaidCents.coerceAtLeast(0L) }
-    val knownPaidOnAll = debts.sumOf {
-      (it.priorPaidCents + it.trackedPaidCents).coerceAtLeast(0L)
-    }
+    val totalActiveDebt = MoneyFormatter.sumCentsExact(active.map { it.remainingBalanceCents.coerceAtLeast(0L) })
+    val completedOriginal = MoneyFormatter.sumCentsExact(
+      completed.map {
+        (it.totalScheduledRepaymentCents ?: it.originalPrincipalCents ?: it.priorPaidCents)
+          .coerceAtLeast(0L)
+      }
+    )
+    val trackedRepaidOnActive = MoneyFormatter.sumCentsExact(active.map { it.trackedPaidCents.coerceAtLeast(0L) })
+    val knownPaidOnAll = MoneyFormatter.sumCentsExact(
+      primaryDebts.map { (it.priorPaidCents + it.trackedPaidCents).coerceAtLeast(0L) }
+    )
 
     val denominator = knownPaidOnAll + totalActiveDebt
     val fraction = if (denominator > 0L) {
@@ -327,7 +339,9 @@ object FinancialCalculator {
     installments: List<InstallmentEntity>,
     today: LocalDate
   ): PaymentOverview {
-    val activeDebts = debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
+    val activeDebts = debts.filter {
+      it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L && countsTowardTotalDebt(it)
+    }
     val installmentsByDebt = installments.groupBy { it.debtId }
 
     val calendarItems = mutableListOf<NextPaymentItem>()
@@ -335,7 +349,7 @@ object FinancialCalculator {
 
     for (debt in activeDebts) {
       val unpaidInstallments = (installmentsByDebt[debt.id] ?: emptyList())
-        .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+        .filter { it.status.isPayableInstallment }
 
       if (unpaidInstallments.isNotEmpty()) {
         for (inst in unpaidInstallments) {
@@ -422,7 +436,10 @@ object FinancialCalculator {
     dateStatus: DueDateStatus
   ): List<GeneratedInstallmentSpec> {
     if (count <= 0 || installmentAmountCents <= 0L) return emptyList()
-    if (frequency == RepaymentFrequency.UNKNOWN || frequency == RepaymentFrequency.IRREGULAR) return emptyList()
+    if (frequency == RepaymentFrequency.UNKNOWN ||
+      frequency == RepaymentFrequency.IRREGULAR ||
+      frequency == RepaymentFrequency.TWICE_MONTHLY
+    ) return emptyList()
     if (frequency == RepaymentFrequency.CUSTOM_DAYS && (customIntervalDays == null || customIntervalDays <= 0)) {
       return emptyList()
     }
@@ -505,7 +522,9 @@ object FinancialCalculator {
     paymentOverview: PaymentOverview,
     today: LocalDate
   ): PayoffProjectionSummary {
-    val activeDebts = debts.filter { it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L }
+    val activeDebts = debts.filter {
+      it.status == DebtStatus.ACTIVE && it.remainingBalanceCents > 0L && countsTowardTotalDebt(it)
+    }
     val installmentsByDebt = installments.groupBy { it.debtId }
 
     var includedCount = 0
@@ -516,7 +535,7 @@ object FinancialCalculator {
 
     for (debt in activeDebts) {
       val unpaidInst = (installmentsByDebt[debt.id] ?: emptyList())
-        .filter { it.status == InstallmentStatus.UPCOMING || it.status == InstallmentStatus.PARTIAL }
+        .filter { it.status.isPayableInstallment }
 
       var debtCompletionDate: LocalDate? = null
       var debtEstimated = false
@@ -533,6 +552,7 @@ object FinancialCalculator {
       } else if (
         debt.frequency != RepaymentFrequency.UNKNOWN &&
         debt.frequency != RepaymentFrequency.IRREGULAR &&
+        debt.frequency != RepaymentFrequency.TWICE_MONTHLY &&
         (debt.dateStatus == DueDateStatus.CONFIRMED || debt.dateStatus == DueDateStatus.ESTIMATED_REQUIRES_CONFIRMATION)
       ) {
         val firstDue = ManilaTime.parseDate(debt.nextDueDate)
@@ -543,7 +563,7 @@ object FinancialCalculator {
           } else if (debt.installmentAmountCents > 0L) {
             val count = maxOf(
               debt.remainingInstallmentsCount,
-              ceil(debt.remainingBalanceCents.toDouble() / debt.installmentAmountCents.toDouble()).toInt()
+              MoneyFormatter.divideCentsCeil(debt.remainingBalanceCents, debt.installmentAmountCents).toInt()
             ).coerceAtLeast(1)
             var current: LocalDate? = firstDue
             repeat(count - 1) {

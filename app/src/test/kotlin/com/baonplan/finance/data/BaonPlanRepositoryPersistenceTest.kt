@@ -535,6 +535,7 @@ class BaonPlanRepositoryPersistenceTest {
           })
           .build()
       )
+      openHelper.setWriteAheadLoggingEnabled(false)
 
       openHelper.writableDatabase.use { raw ->
         raw.execSQL(
@@ -545,13 +546,21 @@ class BaonPlanRepositoryPersistenceTest {
       openHelper.close()
 
       val migratedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, v1DbFile.absolutePath)
-        .addMigrations(BaonPlanDatabase.MIGRATION_1_2)
+        .addMigrations(BaonPlanDatabase.MIGRATION_1_2, BaonPlanDatabase.MIGRATION_2_3)
         .allowMainThreadQueries()
         .build()
       try {
         val migratedDebt = migratedDb.debtDao().getById(7L)!!
         assertEquals("Legacy v1 Loan", migratedDebt.name)
         assertEquals(120_000L, migratedDebt.remainingBalanceCents)
+        assertEquals(
+          com.baonplan.finance.domain.model.LoanProductClassification.UNKNOWN,
+          migratedDebt.productClassification
+        )
+        assertEquals(
+          com.baonplan.finance.domain.model.ObligationRole.STANDALONE,
+          migratedDebt.obligationRole
+        )
 
         migratedDb.debtAttachmentDao().insertAll(
           listOf(
@@ -573,6 +582,92 @@ class BaonPlanRepositoryPersistenceTest {
       }
     } finally {
       v1DbFile.delete()
+    }
+  }
+
+  @Test
+  fun migration2To3_preservesV2RecordsAndSupportsLinkedChildObligationsWithoutDoubleCounting() = runTest {
+    val v2DbFile = File(context.cacheDir, "migration_v2_${System.nanoTime()}.db")
+    try {
+      val openHelper = FrameworkSQLiteOpenHelperFactory().create(
+        SupportSQLiteOpenHelper.Configuration.builder(context)
+          .name(v2DbFile.absolutePath)
+          .callback(object : SupportSQLiteOpenHelper.Callback(2) {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debts` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `lender` TEXT NOT NULL, `category` TEXT NOT NULL, `originalPrincipalCents` INTEGER, `amountReceivedCents` INTEGER, `interestCents` INTEGER, `serviceFeeCents` INTEGER, `processingFeeCents` INTEGER, `totalScheduledRepaymentCents` INTEGER, `priorPaidCents` INTEGER NOT NULL, `isPriorPaidKnown` INTEGER NOT NULL, `trackedPaidCents` INTEGER NOT NULL, `remainingBalanceCents` INTEGER NOT NULL, `installmentAmountCents` INTEGER NOT NULL, `remainingInstallmentsCount` INTEGER NOT NULL, `frequency` TEXT NOT NULL, `customIntervalDays` INTEGER, `lastKnownPaidDate` TEXT, `nextDueDate` TEXT, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, `updatedAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `installments` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `installmentNumber` INTEGER NOT NULL, `dueDate` TEXT, `amountDueCents` INTEGER NOT NULL, `paidAmountCents` INTEGER NOT NULL, `dateStatus` TEXT NOT NULL, `status` TEXT NOT NULL, `paidDate` TEXT, `linkedTransactionId` INTEGER, `isManuallyEntered` INTEGER NOT NULL, `notes` TEXT NOT NULL, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_installments_debtId` ON `installments` (`debtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debt_attachments` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `debtId` INTEGER NOT NULL, `fileName` TEXT NOT NULL, `displayLabel` TEXT NOT NULL, `screenshotIndex` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL, FOREIGN KEY(`debtId`) REFERENCES `debts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_attachments_debtId` ON `debt_attachments` (`debtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `transactions` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `type` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `date` TEXT NOT NULL, `debtId` INTEGER, `installmentId` INTEGER, `reserveId` INTEGER, `expenseId` INTEGER, `allowanceId` INTEGER, `fundedFromReserveCents` INTEGER NOT NULL, `category` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `isCorrected` INTEGER NOT NULL, `isVoided` INTEGER NOT NULL, `correctionReason` TEXT, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_date` ON `transactions` (`date`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_debtId` ON `transactions` (`debtId`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_installmentId` ON `transactions` (`installmentId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `allowance_records` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `receivedDate` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `sourceLabel` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_allowance_records_weekStartDate` ON `allowance_records` (`weekStartDate`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `expenses` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `date` TEXT NOT NULL, `category` TEXT NOT NULL, `title` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `isSchoolDay` INTEGER NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_expenses_date` ON `expenses` (`date`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `debt_reserves` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `weekStartDate` TEXT NOT NULL, `targetDebtId` INTEGER, `reserveType` TEXT NOT NULL, `amountCents` INTEGER NOT NULL, `appliedAmountCents` INTEGER NOT NULL, `status` TEXT NOT NULL, `notes` TEXT NOT NULL, `isManuallyEntered` INTEGER NOT NULL, `createdAtEpochMillis` INTEGER NOT NULL)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_weekStartDate` ON `debt_reserves` (`weekStartDate`)")
+              db.execSQL("CREATE INDEX IF NOT EXISTS `index_debt_reserves_targetDebtId` ON `debt_reserves` (`targetDebtId`)")
+              db.execSQL("CREATE TABLE IF NOT EXISTS `user_settings` (`id` INTEGER NOT NULL, `minWeeklyAllowanceCents` INTEGER NOT NULL, `maxWeeklyAllowanceCents` INTEGER NOT NULL, `conservativeAllowanceCents` INTEGER NOT NULL, `schoolDaysPerWeek` INTEGER NOT NULL, `foodPerSchoolDayCents` INTEGER NOT NULL, `weeklyFoodBudgetCents` INTEGER NOT NULL, `weeklyOtherExpensesBudgetCents` INTEGER NOT NULL, `weeklyEmergencySavingsTargetCents` INTEGER NOT NULL, `weeklyDebtReserveTargetCents` INTEGER NOT NULL, `remindersEnabled` INTEGER NOT NULL, `allowanceReminderDayOfWeek` INTEGER NOT NULL, `reminderHour` INTEGER NOT NULL, `reminderMinute` INTEGER NOT NULL, `isManuallyEntered` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            }
+
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+          })
+          .build()
+      )
+      openHelper.setWriteAheadLoggingEnabled(false)
+
+      openHelper.writableDatabase.use { raw ->
+        raw.execSQL(
+          "INSERT INTO `debts` (`id`, `name`, `lender`, `category`, `priorPaidCents`, `isPriorPaidKnown`, `trackedPaidCents`, `remainingBalanceCents`, `installmentAmountCents`, `remainingInstallmentsCount`, `frequency`, `dateStatus`, `status`, `isManuallyEntered`, `notes`, `createdAtEpochMillis`, `updatedAtEpochMillis`) " +
+            "VALUES (12, 'Existing v2 Credit Line', 'Maya', 'Credit Line', 0, 0, 0, 500000, 500000, 1, 'MONTHLY', 'CONFIRMED', 'ACTIVE', 1, '', 1000, 1000)"
+        )
+        raw.execSQL(
+          "INSERT INTO `installments` (`id`, `debtId`, `installmentNumber`, `dueDate`, `amountDueCents`, `paidAmountCents`, `dateStatus`, `status`, `isManuallyEntered`, `notes`) " +
+            "VALUES (99, 12, 1, '2026-12-05', 500000, 0, 'CONFIRMED', 'UPCOMING', 1, '')"
+        )
+      }
+      openHelper.close()
+
+      val migratedDb = Room.databaseBuilder(context, BaonPlanDatabase::class.java, v2DbFile.absolutePath)
+        .addMigrations(BaonPlanDatabase.MIGRATION_1_2, BaonPlanDatabase.MIGRATION_2_3)
+        .setJournalMode(androidx.room.RoomDatabase.JournalMode.TRUNCATE)
+        .allowMainThreadQueries()
+        .build()
+      try {
+        val parent = migratedDb.debtDao().getById(12L)!!
+        assertEquals("Existing v2 Credit Line", parent.name)
+        assertEquals(500_000L, parent.remainingBalanceCents)
+        assertEquals(1, parent.scheduleVersion)
+        val migratedInst = migratedDb.installmentDao().getById(99L)!!
+        assertEquals(1, migratedInst.scheduleVersion)
+        assertNull(migratedInst.rawStatusLabel)
+
+        // Insert a linked child billing statement and verify anti-double-counting
+        migratedDb.debtDao().insert(
+          DebtEntity(
+            name = "Maya Nov Statement",
+            lender = "Maya (Easy Credit)",
+            category = "Billing Statement",
+            productClassification = com.baonplan.finance.domain.model.LoanProductClassification.BNPL_PAY_LATER,
+            obligationRole = com.baonplan.finance.domain.model.ObligationRole.BILLING_STATEMENT,
+            parentDebtId = 12L,
+            remainingBalanceCents = 300_000L,
+            installmentAmountCents = 300_000L,
+            remainingInstallmentsCount = 1,
+            frequency = RepaymentFrequency.ONE_TIME
+          )
+        )
+        val allDebts = migratedDb.debtDao().getAll()
+        assertEquals(2, allDebts.size)
+        assertEquals(500_000L, FinancialCalculator.calculateTotalActiveDebt(allDebts))
+      } finally {
+        migratedDb.close()
+      }
+    } finally {
+      v2DbFile.delete()
     }
   }
 }

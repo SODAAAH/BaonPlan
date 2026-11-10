@@ -34,7 +34,7 @@ interface InstallmentDao {
   @Update
   suspend fun update(installment: InstallmentEntity)
 
-  @Query("DELETE FROM installments WHERE debtId = :debtId AND status != 'PAID'")
+  @Query("DELETE FROM installments WHERE debtId = :debtId AND status NOT IN ('PAID', 'REFUNDED', 'REVERSED', 'SKIPPED')")
   suspend fun deleteUnpaidByDebtId(debtId: Long)
 
   @Query("DELETE FROM installments WHERE debtId = :debtId")

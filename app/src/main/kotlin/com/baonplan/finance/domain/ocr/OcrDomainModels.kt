@@ -2,6 +2,8 @@ package com.baonplan.finance.domain.ocr
 
 import com.baonplan.finance.domain.model.DebtStatus
 import com.baonplan.finance.domain.model.DueDateStatus
+import com.baonplan.finance.domain.model.LoanProductClassification
+import com.baonplan.finance.domain.model.ObligationRole
 import com.baonplan.finance.domain.model.RepaymentFrequency
 import kotlinx.serialization.Serializable
 
@@ -9,6 +11,8 @@ enum class FieldOrigin(val badgeLabel: String) {
   EXTRACTED("Extracted"),
   CALCULATED("Calculated"),
   ESTIMATED("Estimated"),
+  MANUALLY_CORRECTED("Manually corrected"),
+  NEEDS_REVIEW("Needs review"),
   NOT_DETECTED("Not detected")
 }
 
@@ -21,10 +25,21 @@ enum class ExtractionConfidence(val userLabel: String, val rank: Int) {
 @Serializable
 enum class LoanFieldKey(val displayName: String) {
   ORIGINAL_PRINCIPAL("Original loan amount"),
-  AMOUNT_RECEIVED("Amount received"),
+  DISBURSED_AMOUNT("Disbursed amount"),
+  AMOUNT_RECEIVED("Net amount received"),
   OUTSTANDING_BALANCE("Outstanding balance"),
+  OUTSTANDING_PRINCIPAL("Outstanding principal"),
   AMOUNT_CURRENTLY_DUE("Amount currently due"),
   REMAINING_INSTALLMENT_TOTAL("Remaining installment total"),
+  PAST_DUE_AMOUNT("Past-due amount"),
+  UNPAID_CHARGES("Unpaid charges"),
+  CREDIT_LIMIT("Credit limit"),
+  AVAILABLE_CREDIT("Available credit"),
+  USED_CREDIT("Used credit"),
+  STATEMENT_BALANCE("Statement balance"),
+  MINIMUM_DUE("Minimum amount due"),
+  STATEMENT_DATE("Statement date"),
+  LOAN_BOOKING_DATE("Loan booking date"),
   INSTALLMENT_AMOUNT("Installment amount"),
   TOTAL_REPAYMENT("Total repayment"),
   INTEREST("Interest"),
@@ -38,7 +53,8 @@ enum class LoanFieldKey(val displayName: String) {
   FINAL_DUE_DATE("Final payment date"),
   LAST_PAID_DATE("Last paid date"),
   FREQUENCY("Repayment frequency"),
-  LOAN_TYPE("Loan type")
+  LOAN_TYPE("Loan type"),
+  PRODUCT_CLASSIFICATION("Product classification")
 }
 
 @Serializable
@@ -139,6 +155,34 @@ data class ExtractedField<T>(
       hasConflict = hasConflict,
       alternatives = alternatives
     )
+
+    fun <T> needsReview(
+      value: T,
+      sourceSnippet: String? = null,
+      screenshotIndex: Int? = null,
+      verificationReason: String? = null,
+      hasConflict: Boolean = false,
+      alternatives: List<FieldAlternative<T>> = emptyList()
+    ): ExtractedField<T> = ExtractedField(
+      value = value,
+      origin = FieldOrigin.NEEDS_REVIEW,
+      confidence = ExtractionConfidence.LOW,
+      sourceSnippet = sourceSnippet,
+      sourceScreenshotIndex = screenshotIndex,
+      verificationReason = verificationReason,
+      hasConflict = hasConflict,
+      alternatives = alternatives
+    )
+
+    fun <T> manuallyCorrected(
+      value: T,
+      verificationReason: String = "Edited by user during scan review"
+    ): ExtractedField<T> = ExtractedField(
+      value = value,
+      origin = FieldOrigin.MANUALLY_CORRECTED,
+      confidence = ExtractionConfidence.HIGH,
+      verificationReason = verificationReason
+    )
   }
 }
 
@@ -190,9 +234,36 @@ data class OcrDocumentPage(
 enum class ExtractedInstallmentStatus(val label: String) {
   PAID("Paid"),
   UPCOMING("Upcoming"),
+  UNPAID("Unpaid"),
+  PENDING("Pending"),
+  PARTIALLY_PAID("Partially paid"),
   OVERDUE("Overdue"),
-  UNKNOWN("Status unclear")
+  REFUNDED("Refunded"),
+  REVERSED("Reversed"),
+  DISPUTED("Disputed"),
+  UNKNOWN("Status unclear");
+
+  val isSettledPaid: Boolean
+    get() = this == PAID
+
+  val isUnpaidObligation: Boolean
+    get() = this == UPCOMING ||
+      this == UNPAID ||
+      this == PENDING ||
+      this == PARTIALLY_PAID ||
+      this == OVERDUE ||
+      this == UNKNOWN
+
+  val isCancelledOrReversed: Boolean
+    get() = this == REFUNDED || this == REVERSED
 }
+
+data class TextCorrectionAudit(
+  val rawText: String,
+  val normalizedText: String,
+  val reason: String,
+  val screenshotIndex: Int = 0
+)
 
 data class ExtractedInstallmentRow(
   val id: String,
@@ -248,15 +319,29 @@ data class SingleScreenshotExtraction(
   val screenshotIndex: Int,
   val documentKind: ExtractedDocumentKind,
   val providerProfileId: String? = null,
+  val productClassification: ExtractedField<LoanProductClassification> = ExtractedField.notDetected(),
+  val applicationProvider: ExtractedField<String> = ExtractedField.notDetected(),
+  val actualCreditor: ExtractedField<String> = ExtractedField.notDetected(),
   val lender: ExtractedField<String> = ExtractedField.notDetected(),
   val loanName: ExtractedField<String> = ExtractedField.notDetected(),
   val loanType: ExtractedField<String> = ExtractedField.notDetected(),
   val loanReferenceId: ExtractedField<String> = ExtractedField.notDetected(),
+  val loanBookingDateIso: ExtractedField<String> = ExtractedField.notDetected(),
   val originalPrincipalCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val disbursedAmountCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val amountReceivedCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val outstandingBalanceCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val amountCurrentlyDueCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val remainingInstallmentTotalCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val pastDueAmountCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val unpaidChargesCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val creditLimitCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val availableCreditCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val usedCreditCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val statementBalanceCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val minimumDueCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val statementDateIso: ExtractedField<String> = ExtractedField.notDetected(),
+  val statementPeriod: ExtractedField<String> = ExtractedField.notDetected(),
   val installmentAmountCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val originalInstallmentCount: ExtractedField<Int> = ExtractedField.notDetected(),
   val paidInstallmentsCount: ExtractedField<Int> = ExtractedField.notDetected(),
@@ -274,7 +359,12 @@ data class SingleScreenshotExtraction(
   val processingFeeCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val otherFeesCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val loanStatus: ExtractedField<DebtStatus> = ExtractedField.notDetected(),
+  val isSchedulePartial: Boolean = false,
+  val scheduleVersion: Int = 1,
+  val scheduleEffectiveDateIso: String? = null,
+  val obligationRole: ObligationRole = ObligationRole.STANDALONE,
   val installmentRows: List<ExtractedInstallmentRow> = emptyList(),
+  val textCorrections: List<TextCorrectionAudit> = emptyList(),
   val issues: List<ImportValidationIssue> = emptyList(),
   val detectedLabelCues: List<DetectedLabelValueCue> = emptyList(),
   val numericDateOrderUsed: NumericDateOrder = NumericDateOrder.AMBIGUOUS,
@@ -285,15 +375,29 @@ data class DebtImportDraft(
   val candidateId: String,
   val sourceScreenshotIndices: List<Int>,
   val providerProfileId: String? = null,
+  val productClassification: ExtractedField<LoanProductClassification> = ExtractedField.notDetected(),
+  val applicationProvider: ExtractedField<String> = ExtractedField.notDetected(),
+  val actualCreditor: ExtractedField<String> = ExtractedField.notDetected(),
   val lender: ExtractedField<String>,
   val loanName: ExtractedField<String>,
   val loanType: ExtractedField<String>,
   val loanReferenceId: ExtractedField<String>,
+  val loanBookingDateIso: ExtractedField<String> = ExtractedField.notDetected(),
   val originalPrincipalCents: ExtractedField<Long>,
+  val disbursedAmountCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val amountReceivedCents: ExtractedField<Long>,
   val outstandingBalanceCents: ExtractedField<Long>,
   val amountCurrentlyDueCents: ExtractedField<Long> = ExtractedField.notDetected(),
   val remainingInstallmentTotalCents: ExtractedField<Long>,
+  val pastDueAmountCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val unpaidChargesCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val creditLimitCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val availableCreditCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val usedCreditCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val statementBalanceCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val minimumDueCents: ExtractedField<Long> = ExtractedField.notDetected(),
+  val statementDateIso: ExtractedField<String> = ExtractedField.notDetected(),
+  val statementPeriod: ExtractedField<String> = ExtractedField.notDetected(),
   val calculatedUnpaidScheduleSumCents: ExtractedField<Long>,
   val calculatedPaidScheduleSumCents: ExtractedField<Long>,
   val installmentAmountCents: ExtractedField<Long>,
@@ -312,7 +416,13 @@ data class DebtImportDraft(
   val otherFeesCents: ExtractedField<Long>,
   val loanStatus: ExtractedField<DebtStatus>,
   val dueDateStatus: DueDateStatus,
+  val isSchedulePartial: Boolean = false,
+  val scheduleVersion: Int = 1,
+  val scheduleEffectiveDateIso: String? = null,
+  val obligationRole: ObligationRole = ObligationRole.STANDALONE,
+  val suggestedParentDebtId: Long? = null,
   val installmentRows: List<ExtractedInstallmentRow>,
+  val textCorrections: List<TextCorrectionAudit> = emptyList(),
   val mergeNotes: List<String> = emptyList(),
   val validationIssues: List<ImportValidationIssue> = emptyList(),
   val duplicateMatches: List<DuplicateDebtMatch> = emptyList(),

@@ -3,13 +3,37 @@ package com.baonplan.finance.domain.model
 import kotlinx.serialization.Serializable
 
 @Serializable
+enum class LoanProductClassification(val label: String, val defaultCategory: String) {
+  FIXED_INSTALLMENT_LOAN("Fixed installment loan", "Installment Loan"),
+  BNPL_INSTALLMENT("BNPL installment", "BNPL"),
+  BNPL_PAY_LATER("BNPL pay later", "BNPL"),
+  REVOLVING_CREDIT("Revolving credit line", "Credit Line"),
+  SHORT_TERM_LUMP_SUM_LOAN("Short-term lump sum", "Cash Loan"),
+  CREDIT_BILL_INSTALLMENT("Credit bill installment", "Card Installment"),
+  FLEXIBLE_OR_RESTRUCTURED_LOAN("Flexible / restructured loan", "Flexible Loan"),
+  OTHER("Other", "Other"),
+  UNKNOWN("Unknown", "Loan")
+}
+
+@Serializable
+enum class ObligationRole(val label: String, val countsInTotalDebt: Boolean) {
+  STANDALONE("Standalone obligation", true),
+  UNDERLYING_OBLIGATION("Underlying purchase / loan", true),
+  BILLING_STATEMENT("Billing statement (linked)", false),
+  CONVERTED_INSTALLMENT("Converted installment plan (linked)", false)
+}
+
+@Serializable
 enum class RepaymentFrequency(val label: String) {
+  DAILY("Daily"),
   WEEKLY("Weekly"),
   EVERY_14_DAYS("Every 14 days"),
+  TWICE_MONTHLY("Twice monthly"),
   MONTHLY("Monthly"),
-  ONE_TIME("One-time"),
+  QUARTERLY("Quarterly"),
+  ONE_TIME("Lump sum"),
   CUSTOM_DAYS("Custom interval"),
-  IRREGULAR("Irregular"),
+  IRREGULAR("Custom / irregular"),
   UNKNOWN("Unknown")
 }
 
@@ -31,9 +55,24 @@ enum class DebtStatus(val label: String) {
 @Serializable
 enum class InstallmentStatus(val label: String) {
   UPCOMING("Upcoming"),
+  UNPAID("Unpaid"),
+  PENDING("Pending"),
   PARTIAL("Partial"),
   PAID("Paid"),
-  SKIPPED("Skipped")
+  OVERDUE("Overdue"),
+  SKIPPED("Skipped"),
+  REFUNDED("Refunded"),
+  REVERSED("Reversed"),
+  DISPUTED("Disputed"),
+  UNKNOWN("Unknown");
+
+  val isPayableInstallment: Boolean
+    get() = this == UPCOMING ||
+      this == UNPAID ||
+      this == PENDING ||
+      this == PARTIAL ||
+      this == OVERDUE ||
+      this == UNKNOWN
 }
 
 @Serializable

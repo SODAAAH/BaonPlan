@@ -69,6 +69,31 @@ object ScannerCorrectionLearner {
         LoanFieldKey.AMOUNT_RECEIVED,
         initialDraft.amountReceivedCents.value,
         confirmedDebt.amountReceivedCents
+      ),
+      Triple(
+        LoanFieldKey.STATEMENT_BALANCE,
+        initialDraft.statementBalanceCents.value,
+        confirmedDebt.statementBalanceCents
+      ),
+      Triple(
+        LoanFieldKey.MINIMUM_DUE,
+        initialDraft.minimumDueCents.value,
+        confirmedDebt.minimumDueCents
+      ),
+      Triple(
+        LoanFieldKey.CREDIT_LIMIT,
+        initialDraft.creditLimitCents.value,
+        confirmedDebt.creditLimitCents
+      ),
+      Triple(
+        LoanFieldKey.AVAILABLE_CREDIT,
+        initialDraft.availableCreditCents.value,
+        confirmedDebt.availableCreditCents
+      ),
+      Triple(
+        LoanFieldKey.PAST_DUE_AMOUNT,
+        initialDraft.pastDueAmountCents.value,
+        confirmedDebt.pastDueAmountCents
       )
     )
 
