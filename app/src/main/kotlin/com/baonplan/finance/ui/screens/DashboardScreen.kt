@@ -53,7 +53,6 @@ import com.baonplan.finance.domain.budget.BudgetDebtObligationItem
 import com.baonplan.finance.domain.budget.PaymentDueGroup
 import com.baonplan.finance.domain.budget.ResolvedIncomeOccurrence
 import com.baonplan.finance.domain.model.DueDateStatus
-import com.baonplan.finance.domain.model.DuesCoverageStatus
 import com.baonplan.finance.domain.model.IncomeOccurrenceStatus
 import com.baonplan.finance.domain.util.ManilaTime
 import com.baonplan.finance.domain.util.MoneyFormatter
@@ -65,6 +64,7 @@ import com.baonplan.finance.ui.components.CalmSectionLabel
 import com.baonplan.finance.ui.components.MetricRow
 import com.baonplan.finance.ui.components.StatusBadge
 import com.baonplan.finance.ui.theme.LocalBaonColors
+import java.time.temporal.ChronoUnit
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -91,7 +91,6 @@ fun DashboardScreen(
   val overview = state.budgetOverview
   val grouping = state.paymentGrouping
   val progress = state.repaymentProgress
-  val readiness = state.duesReadiness
 
   var showDebtObligationsBreakdown by remember { mutableStateOf(false) }
   var showOverdueBreakdown by remember { mutableStateOf(false) }
@@ -118,29 +117,12 @@ fun DashboardScreen(
       }
     }
 
-    // Section 1: Remaining Debt
+    // Section 1: Remaining Debt (compact horizontal card)
     item {
-      BaonCard(onClick = onOpenDebts) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          CalmSectionLabel("Remaining debt", modifier = Modifier.padding(0.dp))
-          TextButton(
-            onClick = onOpenDebts,
-            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-          ) {
-            Text("View debts", style = MaterialTheme.typography.labelLarge)
-          }
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-          text = MoneyFormatter.formatPeso(state.totalActiveDebtCents),
-          style = MaterialTheme.typography.displaySmall,
-          color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(modifier = Modifier.height(6.dp))
+      BaonCard(
+        onClick = onOpenDebts,
+        contentPadding = 14.dp
+      ) {
         val debtNote = when {
           progress.activeLoansCount == 0 && progress.completedLoansCount == 0 && progress.archivedLoansCount == 0 ->
             "No debts recorded yet"
@@ -155,291 +137,99 @@ fun DashboardScreen(
             "${progress.activeLoansCount} active · $pct% paid off"
           }
         }
-        Text(
-          text = debtNote,
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            CalmSectionLabel("Remaining debt", modifier = Modifier.padding(0.dp))
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+              text = debtNote,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis
+            )
+          }
+          Text(
+            text = MoneyFormatter.formatPeso(state.totalActiveDebtCents),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+          )
+        }
       }
     }
 
-    // Section 2: Intelligent Grouped Next Payment
+    // Section 2: Next Payment (compact: only due date & amount, no loan name)
     item {
-      val overdueGroup = grouping.overdueGroup
-      val nextGroup = grouping.nextGroup
-      val followingGroup = grouping.followingGroups.firstOrNull()
-      val tapPrimaryGroup = nextGroup ?: overdueGroup
-
+      val displayGroup = grouping.nextGroup ?: grouping.overdueGroup
+      val hasUndatedOnly = displayGroup == null && grouping.undatedOrUnconfirmedPayments.isNotEmpty()
       BaonCard(
         onClick = if (grouping.hasAnyActionablePayments) {
-          { onOpenPaymentBreakdown(tapPrimaryGroup) }
-        } else null
+          { onOpenPaymentBreakdown(displayGroup) }
+        } else null,
+        contentPadding = 14.dp
       ) {
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically
         ) {
-          CalmSectionLabel("Next payment", modifier = Modifier.padding(0.dp))
-          if (grouping.hasAnyActionablePayments) {
-            TextButton(
-              onClick = { onOpenPaymentBreakdown(tapPrimaryGroup) },
-              contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-            ) {
-              Text("View breakdown", style = MaterialTheme.typography.labelLarge)
-            }
-          }
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Separated Overdue Section (stays visible even if there are no future groups)
-        if (overdueGroup != null) {
-          Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = semantic.dangerContainer,
-            modifier = Modifier
-              .fillMaxWidth()
-              .clickable { onOpenPaymentBreakdown(overdueGroup) }
-          ) {
-            Column(
-              modifier = Modifier.padding(12.dp),
-              verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-              ) {
-                Row(
-                  horizontalArrangement = Arrangement.spacedBy(6.dp),
-                  verticalAlignment = Alignment.CenterVertically
-                ) {
-                  StatusBadge("Overdue", BadgeTone.DANGER)
-                  Text(
-                    text = overdueGroup.countdownLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = semantic.onDangerContainer
-                  )
-                }
-                Text(
-                  text = if (overdueGroup.knownTotalCents > 0L) {
-                    MoneyFormatter.formatPeso(overdueGroup.knownTotalCents) +
-                      if (overdueGroup.hasIncompleteAmounts) "+" else ""
-                  } else {
-                    "Amount unavailable"
-                  },
-                  style = MaterialTheme.typography.titleMedium,
-                  fontWeight = FontWeight.SemiBold,
-                  color = semantic.onDangerContainer
-                )
-              }
-              val overdueSummaryLine = if (overdueGroup.items.size == 1) {
-                val single = overdueGroup.items.first()
-                "${single.debtName} · ${single.providerName} · Due ${ManilaTime.formatDisplay(single.dueDateIso)}"
-              } else {
-                "${overdueGroup.totalPaymentsCount} overdue payments · ${overdueGroup.distinctLoansCount} ${if (overdueGroup.distinctLoansCount == 1) "loan" else "loans"}"
-              }
-              Text(
-                text = overdueSummaryLine,
-                style = MaterialTheme.typography.bodySmall,
-                color = semantic.onDangerContainer
-              )
-            }
-          }
-          if (nextGroup != null || grouping.undatedOrUnconfirmedPayments.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(10.dp))
-          }
-        }
-
-        // Upcoming Grouped Next Payment
-        if (nextGroup != null) {
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-          ) {
-            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-              Text(
-                text = if (nextGroup.isSingleDate) {
-                  nextGroup.headlineLabel
+          Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            CalmSectionLabel("Next payment", modifier = Modifier.padding(0.dp))
+            Spacer(modifier = Modifier.height(2.dp))
+            val dueDateLabel = when {
+              displayGroup != null -> {
+                if (displayGroup.isOverdueGroup) {
+                  "Overdue · ${displayGroup.dateRangeLabel}"
+                } else if (displayGroup.isSingleDate) {
+                  when (ChronoUnit.DAYS.between(state.today, displayGroup.startDate)) {
+                    0L -> "Due today · ${displayGroup.dateRangeLabel}"
+                    1L -> "Due tomorrow · ${displayGroup.dateRangeLabel}"
+                    else -> "Due ${displayGroup.dateRangeLabel}"
+                  }
                 } else {
-                  "Total due ${nextGroup.dateRangeLabel}"
-                },
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface
-              )
-              Spacer(modifier = Modifier.height(2.dp))
-              val subText = if (nextGroup.isMultiItemGroup) {
-                "${nextGroup.totalPaymentsCount} payments · ${nextGroup.distinctLoansCount} ${if (nextGroup.distinctLoansCount == 1) "loan" else "loans"} · ${nextGroup.countdownLabel}"
-              } else {
-                val single = nextGroup.items.first()
-                "${single.debtName} (${single.providerName}) · ${nextGroup.countdownLabel}"
-              }
-              Text(
-                text = subText,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-              )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-              val amountDisplay = if (nextGroup.knownTotalCents > 0L) {
-                MoneyFormatter.formatPeso(nextGroup.knownTotalCents) +
-                  if (nextGroup.hasIncompleteAmounts) "+" else ""
-              } else {
-                "Amount unavailable"
-              }
-              Text(
-                text = amountDisplay,
-                style = if (nextGroup.knownTotalCents > 0L) {
-                  MaterialTheme.typography.headlineSmall
-                } else {
-                  MaterialTheme.typography.titleMedium
-                },
-                fontWeight = FontWeight.SemiBold,
-                color = if (nextGroup.knownTotalCents == 0L && nextGroup.hasIncompleteAmounts) {
-                  semantic.warning
-                } else {
-                  MaterialTheme.colorScheme.onSurface
-                }
-              )
-            }
-          }
-
-          if (nextGroup.isMultiItemGroup) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-              nextGroup.items.take(3).forEach { item ->
-                Row(
-                  modifier = Modifier.fillMaxWidth(),
-                  horizontalArrangement = Arrangement.SpaceBetween,
-                  verticalAlignment = Alignment.CenterVertically
-                ) {
-                  Text(
-                    text = "${item.debtName} · ${item.providerName} · ${ManilaTime.formatShort(item.dueDateIso)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(end = 8.dp)
-                  )
-                  Text(
-                    text = item.unpaidAmountCents?.let { MoneyFormatter.formatPesoCompact(it) } ?: "Unavailable",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                    color = if (item.unpaidAmountCents == null) semantic.warning else MaterialTheme.colorScheme.onSurface
-                  )
+                  "Due ${displayGroup.dateRangeLabel}"
                 }
               }
-              if (nextGroup.items.size > 3) {
-                Text(
-                  text = "+${nextGroup.items.size - 3} more in breakdown",
-                  style = MaterialTheme.typography.labelSmall,
-                  color = MaterialTheme.colorScheme.primary
-                )
-              }
+              hasUndatedOnly -> "Due date not confirmed"
+              else -> "No upcoming payments"
             }
-          }
-
-          if (nextGroup.hasIncompleteAmounts || nextGroup.hasEstimatedDates || nextGroup.hasPendingPayments) {
-            Spacer(modifier = Modifier.height(8.dp))
-            FlowRow(
-              horizontalArrangement = Arrangement.spacedBy(6.dp),
-              verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-              if (nextGroup.hasPendingPayments) {
-                StatusBadge("Includes pending", BadgeTone.WARNING)
-              }
-              if (nextGroup.hasEstimatedDates) {
-                StatusBadge("Estimated date", BadgeTone.WARNING)
-              }
-              if (nextGroup.hasIncompleteAmounts) {
-                StatusBadge("Total incomplete", BadgeTone.WARNING)
-              }
-            }
-          }
-
-          if (followingGroup != null) {
-            CalmDivider(modifier = Modifier.padding(vertical = 10.dp))
-            Row(
-              modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onOpenPaymentBreakdown(followingGroup) },
-              horizontalArrangement = Arrangement.SpaceBetween,
-              verticalAlignment = Alignment.CenterVertically
-            ) {
-              Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                Text(
-                  text = "Following payment · ${followingGroup.dateRangeLabel}",
-                  style = MaterialTheme.typography.labelLarge,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                  text = "${followingGroup.totalPaymentsCount} ${if (followingGroup.totalPaymentsCount == 1) "payment" else "payments"} · ${followingGroup.distinctLoansCount} ${if (followingGroup.distinctLoansCount == 1) "loan" else "loans"}",
-                  style = MaterialTheme.typography.bodySmall,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-              }
-              Text(
-                text = if (followingGroup.knownTotalCents > 0L) {
-                  MoneyFormatter.formatPesoCompact(followingGroup.knownTotalCents) +
-                    if (followingGroup.hasIncompleteAmounts) "+" else ""
-                } else {
-                  "Unavailable"
-                },
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-              )
-            }
-          }
-        } else if (overdueGroup == null && grouping.undatedOrUnconfirmedPayments.isEmpty()) {
-          Text(
-            text = "No upcoming payments",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface
-          )
-          Spacer(modifier = Modifier.height(2.dp))
-          Text(
-            text = "Payments you track will show up here.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-          )
-        }
-
-        if (grouping.undatedOrUnconfirmedPayments.isNotEmpty()) {
-          Spacer(modifier = Modifier.height(8.dp))
-          Text(
-            text = "${grouping.undatedOrUnconfirmedPayments.size} ${if (grouping.undatedOrUnconfirmedPayments.size == 1) "loan needs" else "loans need"} due date confirmation",
-            style = MaterialTheme.typography.labelMedium,
-            color = semantic.warning
-          )
-        }
-
-        if (readiness.status != DuesCoverageStatus.NO_DUES && overview.isConfigured) {
-          CalmDivider(modifier = Modifier.padding(vertical = 10.dp))
-          val (coverageText, coverageColor) = when (readiness.status) {
-            DuesCoverageStatus.COVERED_BY_RESERVE -> "Covered by reserve" to semantic.positive
-            DuesCoverageStatus.COVERED_WITH_CASH -> "Covered with cash left" to semantic.positive
-            DuesCoverageStatus.SHORTFALL ->
-              "${MoneyFormatter.formatPesoCompact(readiness.unmetShortfallCents)} short" to semantic.warning
-            DuesCoverageStatus.NO_DUES -> "" to MaterialTheme.colorScheme.onSurfaceVariant
-          }
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-          ) {
             Text(
-              text = "Next 7 days due: ${MoneyFormatter.formatPesoCompact(readiness.dueNext7DaysCents)}",
+              text = dueDateLabel,
               style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant
+              color = when {
+                displayGroup?.isOverdueGroup == true -> semantic.danger
+                hasUndatedOnly -> semantic.warning
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+              },
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis
             )
+          }
+          if (displayGroup != null) {
+            val amountDisplay = if (displayGroup.knownTotalCents > 0L) {
+              MoneyFormatter.formatPeso(displayGroup.knownTotalCents) +
+                if (displayGroup.hasIncompleteAmounts) "+" else ""
+            } else {
+              "Amount unavailable"
+            }
             Text(
-              text = coverageText,
-              style = MaterialTheme.typography.labelMedium,
+              text = amountDisplay,
+              style = if (displayGroup.knownTotalCents > 0L) {
+                MaterialTheme.typography.headlineSmall
+              } else {
+                MaterialTheme.typography.titleMedium
+              },
               fontWeight = FontWeight.SemiBold,
-              color = coverageColor
+              color = when {
+                displayGroup.knownTotalCents == 0L && displayGroup.hasIncompleteAmounts -> semantic.warning
+                displayGroup.isOverdueGroup -> semantic.danger
+                else -> MaterialTheme.colorScheme.onSurface
+              }
             )
           }
         }

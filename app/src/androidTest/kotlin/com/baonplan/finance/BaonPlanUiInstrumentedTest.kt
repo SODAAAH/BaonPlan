@@ -259,15 +259,17 @@ class BaonPlanUiInstrumentedTest {
       )
     }
 
-    // Grouped Next Payment shows combined ₱750.00 & opens breakdown -> Debt Details
+    // Next Payment card on Home shows only due date and amount (no loan names), opens breakdown on tap
     composeTestRule.waitUntil(timeoutMillis = 5_000) {
       runCatching {
         composeTestRule.onAllNodesWithText("₱750.00").onFirst().assertIsDisplayed()
-        composeTestRule.onNodeWithText("2 payments · 2 loans", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Due ", substring = true).assertIsDisplayed()
         true
       }.getOrDefault(false)
     }
-    composeTestRule.onNodeWithText("View breakdown").performClick()
+    composeTestRule.onNodeWithText("GCash UI Loan", substring = true).assertDoesNotExist()
+    composeTestRule.onNodeWithText("Maya UI Loan", substring = true).assertDoesNotExist()
+    composeTestRule.onNodeWithText("Next payment").performClick()
     composeTestRule.onNodeWithText("GCash UI Loan").assertIsDisplayed()
     composeTestRule.onNodeWithText("Maya UI Loan").performClick()
     composeTestRule.onNodeWithText("Balance remaining").assertIsDisplayed()
